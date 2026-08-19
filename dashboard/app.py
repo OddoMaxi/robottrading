@@ -73,7 +73,7 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
             rows = result.scalars().all()
     finally:
         await engine.dispose()
-    return pd.DataFrame(
+    result_df = pd.DataFrame(
         [
             {
                 "Stratégie": STRATEGY_LABELS.get(r.strategy, r.strategy),
@@ -92,6 +92,16 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
             for r in rows
         ]
     )
+    # Some columns (break-even, execution probability) are only computed for
+    # a subset of strategies — if a display window happens to contain none
+    # of those rows, pandas infers the column as `object` dtype from an
+    # all-None list instead of float64, and Styler's numeric format string
+    # then breaks on the raw `None` (unlike NaN, which it handles fine).
+    # Forcing numeric dtype here converts None -> NaN regardless.
+    if not result_df.empty:
+        numeric_columns = ["Gain brut (%)", "Seuil de rentabilité (%)", "Gain net (%)", "Résultat sur 1000 $", "Proba. exécution"]
+        result_df[numeric_columns] = result_df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    return result_df
 
 
 async def fetch_last_profitable_spike() -> dict | None:
