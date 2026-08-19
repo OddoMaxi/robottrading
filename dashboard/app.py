@@ -6,10 +6,16 @@ are actually producing opportunities.
 """
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import select
+
+# `streamlit run dashboard/app.py` puts dashboard/ on sys.path, not the repo
+# root, so the top-level `app` package needs to be added explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config.constants import PRIORITY_EXCHANGES
 from app.database.models import OpportunityRecord
