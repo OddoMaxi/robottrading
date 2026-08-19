@@ -5,6 +5,7 @@ because asyncio is single-threaded and cooperative — each update is one
 atomic dict assignment, never interleaved with a read.
 """
 
+import asyncio
 from dataclasses import dataclass
 
 from app.config.constants import MarketType
@@ -26,9 +27,26 @@ class MarketDataStore:
     def __init__(self) -> None:
         self._quotes: dict[tuple[str, MarketType, str], NormalizedQuote] = {}
         self._funding: dict[tuple[str, str], FundingSnapshot] = {}
+        # Lets the detection loop react within milliseconds of a new tick
+        # instead of waiting up to a fixed poll interval — a real spread
+        # observed on 2026-08-19 opened and closed within ~15 seconds, which
+        # a 3s poll could miss most of.
+        self._update_event = asyncio.Event()
 
     def update_quote(self, quote: NormalizedQuote) -> None:
         self._quotes[(quote.exchange, quote.market, quote.symbol)] = quote
+        self._update_event.set()
+
+    async def wait_for_update(self, timeout: float) -> bool:
+        """Block until a quote updates or `timeout` elapses. Returns whether an update woke it."""
+        try:
+            await asyncio.wait_for(self._update_event.wait(), timeout=timeout)
+            woke_on_update = True
+        except TimeoutError:
+            woke_on_update = False
+        finally:
+            self._update_event.clear()
+        return woke_on_update
 
     def get_quote(self, exchange: str, market: MarketType, symbol: str) -> NormalizedQuote | None:
         return self._quotes.get((exchange, market, symbol))

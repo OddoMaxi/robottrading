@@ -49,7 +49,13 @@ logger = logging.getLogger(__name__)
 
 SPOT_SYMBOLS = sorted({f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS} | set(STABLECOIN_PAIRS) | set(TRIANGULAR_CROSS_PAIRS))
 CHART_SYMBOLS = [f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS]
-DETECTION_INTERVAL_SECONDS = 3.0
+# Event-driven detection: react to a new tick almost immediately instead of
+# polling every few seconds — a real spread observed on 2026-08-19 opened
+# and closed within ~15 seconds, which a fixed 3s poll would mostly miss.
+# MIN bounds the scan rate during a burst of ticks (protects the DB write
+# rate); MAX is the fallback so the loop still ticks even with no new data.
+MIN_SCAN_INTERVAL_SECONDS = 0.25
+MAX_SCAN_WAIT_SECONDS = 3.0
 PAPER_TRADE_CLASSIFICATIONS = {
     OpportunityClassification.INTERESTING,
     OpportunityClassification.GOOD,
@@ -88,7 +94,8 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
             raise
         except Exception:
             logger.exception("detection loop iteration failed")
-        await asyncio.sleep(DETECTION_INTERVAL_SECONDS)
+        await market_data_store.wait_for_update(timeout=MAX_SCAN_WAIT_SECONDS)
+        await asyncio.sleep(MIN_SCAN_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
