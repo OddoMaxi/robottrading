@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 # `streamlit run dashboard/app.py` puts dashboard/ on sys.path, not the repo
@@ -79,6 +79,49 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
             for r in rows
         ]
     )
+
+
+async def fetch_last_profitable_spike() -> dict | None:
+    """Most recent opportunity that was genuinely profitable after fees, plus how often that's happened lately.
+
+    Queried directly (not from the already-fetched recent-opportunities
+    table) because that table is capped at a few hundred rows and, since
+    detection went event-driven, that can now be just the last few seconds
+    — too short a window to find a rare profitable spike in.
+    """
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OpportunityRecord)
+                .where(OpportunityRecord.net_spread_pct > 0)
+                .order_by(OpportunityRecord.detected_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+
+            cutoff = (datetime.now(UTC) - timedelta(hours=24)).replace(tzinfo=None)
+            count_result = await session.execute(
+                select(func.count()).where(OpportunityRecord.net_spread_pct > 0, OpportunityRecord.detected_at >= cutoff)
+            )
+            count_24h = count_result.scalar()
+    finally:
+        await engine.dispose()
+    return {
+        "symbol": row.symbol,
+        "strategy": STRATEGY_LABELS.get(row.strategy, row.strategy),
+        "net_spread_pct": float(row.net_spread_pct),
+        "detected_at": row.detected_at,
+        "count_24h": count_24h,
+    }
+
+
+@st.cache_data(ttl=15)
+def get_last_profitable_spike_cached() -> dict | None:
+    return asyncio.run(fetch_last_profitable_spike())
 
 
 async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
@@ -190,6 +233,19 @@ else:
         "❌ Aucune opportunité rentable pour le moment — les écarts de prix repérés sont trop petits "
         "pour couvrir les frais des plateformes. C'est normal et fréquent : le robot continue de "
         "chercher 24h/24, il suffit qu'un écart plus grand apparaisse."
+    )
+
+# --- Dernier pic rentable (historique, pas l'instant présent) ---
+last_spike = get_last_profitable_spike_cached()
+if last_spike is None:
+    st.info("🎯 Aucun pic rentable détecté depuis le début de l'observation — c'est rare, pas un problème.")
+else:
+    st.info(
+        f"🎯 Dernier pic rentable détecté : **{humanize_delta(last_spike['detected_at'])}** "
+        f"({last_spike['detected_at'].strftime('%d/%m %H:%M:%S')} UTC) — "
+        f"**{last_spike['symbol']}** ({last_spike['strategy']}), "
+        f"**+{last_spike['net_spread_pct']:.2f}% net**. "
+        f"{last_spike['count_24h']} pic(s) rentable(s) sur les dernières 24h."
     )
 
 # --- Chiffres clés ---
