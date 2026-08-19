@@ -82,7 +82,10 @@ async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
     engine = create_async_engine(get_settings().database_url)
     try:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        # recorded_at is stored as a naive UTC timestamp (server_default=func.now(),
+        # no timezone=True) — strip tzinfo so asyncpg isn't asked to compare
+        # a naive column against an aware bind parameter.
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
         async with session_factory() as session:
             result = await session.execute(
                 select(PriceSnapshot)
