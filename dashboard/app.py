@@ -5,10 +5,11 @@ Run with: streamlit run dashboard/app.py
 
 import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -17,9 +18,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # root, so the top-level `app` package needs to be added explicitly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config.constants import PRIORITY_EXCHANGES
+from app.config.constants import CROSS_EXCHANGE_ASSETS, PRIORITY_EXCHANGES
 from app.config.settings import get_settings
-from app.database.models import OpportunityRecord
+from app.database.models import OpportunityRecord, PriceSnapshot
 
 st.set_page_config(page_title="Robot d'arbitrage crypto", layout="wide", page_icon="🤖")
 
@@ -77,6 +78,32 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
     )
 
 
+async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PriceSnapshot)
+                .where(PriceSnapshot.symbol == symbol, PriceSnapshot.recorded_at >= cutoff)
+                .order_by(PriceSnapshot.recorded_at)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+    return pd.DataFrame(
+        [
+            {
+                "exchange": r.exchange,
+                "recorded_at": r.recorded_at,
+                "mid": (float(r.bid) + float(r.ask)) / 2,
+            }
+            for r in rows
+        ]
+    )
+
+
 df = asyncio.run(fetch_opportunities())
 profitable = df[df["Gain net (%)"] > 0] if not df.empty else df
 
@@ -108,6 +135,71 @@ col3.metric(
     "Meilleur résultat sur 1000 $",
     f"{df['Résultat sur 1000 $'].max():+.2f} $" if not df.empty else "—",
 )
+
+st.divider()
+
+# --- Graphiques de prix ---
+st.subheader("📈 Graphique des prix")
+
+chart_symbols = [f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS]
+chart_col1, chart_col2 = st.columns([2, 1])
+chart_symbol = chart_col1.selectbox("Paire", chart_symbols)
+chart_timeframe = chart_col2.selectbox("Période", ["1 min", "5 min", "15 min"], index=0)
+resample_rule = {"1 min": "1min", "5 min": "5min", "15 min": "15min"}[chart_timeframe]
+
+price_df = asyncio.run(fetch_price_history(chart_symbol))
+
+if price_df.empty:
+    st.info(
+        "Pas encore assez d'historique pour tracer un graphique — le robot vient de démarrer la "
+        "collecte des prix. Reviens dans quelques minutes."
+    )
+else:
+    exchanges_present = sorted(price_df["exchange"].unique())
+
+    candle_exchange = st.selectbox(
+        "Bougies (chandelier japonais) sur quelle plateforme ?",
+        [e.capitalize() for e in exchanges_present],
+    )
+    candles = (
+        price_df[price_df["exchange"] == candle_exchange.lower()]
+        .set_index("recorded_at")["mid"]
+        .resample(resample_rule)
+        .ohlc()
+        .dropna()
+    )
+
+    if len(candles) < 2:
+        st.info("Pas encore assez de points sur cette période pour former des bougies — patiente un peu ou choisis une période plus courte.")
+    else:
+        candle_fig = go.Figure(
+            data=[
+                go.Candlestick(
+                    x=candles.index,
+                    open=candles["open"],
+                    high=candles["high"],
+                    low=candles["low"],
+                    close=candles["close"],
+                    increasing_line_color="#2ecc71",
+                    decreasing_line_color="#e74c3c",
+                )
+            ]
+        )
+        candle_fig.update_layout(
+            title=f"{chart_symbol} — {candle_exchange}",
+            xaxis_rangeslider_visible=False,
+            height=420,
+            margin=dict(l=10, r=10, t=40, b=10),
+        )
+        st.plotly_chart(candle_fig, use_container_width=True)
+
+    st.caption("Comparaison du prix sur les 3 plateformes — un écart visible entre les lignes, c'est une opportunité d'arbitrage.")
+    compare_fig = go.Figure()
+    for exchange in exchanges_present:
+        sub = price_df[price_df["exchange"] == exchange]
+        compare_fig.add_trace(go.Scatter(x=sub["recorded_at"], y=sub["mid"], mode="lines", name=exchange.capitalize()))
+    compare_fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(compare_fig, use_container_width=True)
 
 st.divider()
 

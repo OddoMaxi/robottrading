@@ -5,8 +5,9 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import Base, Exchange, OpportunityRecord, SimulatedTradeRecord, SystemEvent, VirtualPortfolioRecord
+from app.database.models import Base, Exchange, OpportunityRecord, PriceSnapshot, SimulatedTradeRecord, SystemEvent, VirtualPortfolioRecord
 from app.database.session import engine
+from app.market_data.normalizer import NormalizedQuote
 from app.opportunity.models import Opportunity
 from app.simulation.paper_trader import SimulatedTrade
 
@@ -43,6 +44,11 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
     session.add(record)
     await session.flush()
     return record
+
+
+async def save_price_snapshots(session: AsyncSession, quotes: list[NormalizedQuote]) -> None:
+    session.add_all([PriceSnapshot(exchange=q.exchange, symbol=q.symbol, bid=q.bid, ask=q.ask) for q in quotes])
+    await session.flush()
 
 
 async def log_system_event(session: AsyncSession, event_type: str, severity: str, message: str, metadata: dict | None = None) -> SystemEvent:

@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, ForeignKey, Numeric, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, Index, Numeric, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -74,6 +74,25 @@ class Quote(Base):
     ask_quantity: Mapped[float] = mapped_column(Numeric(20, 10))
     exchange_timestamp: Mapped[datetime]
     received_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class PriceSnapshot(Base):
+    """Lightweight, denormalized bid/ask log for charting price history.
+
+    Deliberately not FK'd through markets/assets (unlike Quote above) — those
+    aren't seeded yet, and this table only needs to answer "what did the
+    price look like over time" for the dashboard's candlestick charts.
+    """
+
+    __tablename__ = "price_snapshots"
+    __table_args__ = (Index("ix_price_snapshots_symbol_time", "exchange", "symbol", "recorded_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    exchange: Mapped[str]
+    symbol: Mapped[str]
+    bid: Mapped[float] = mapped_column(Numeric(20, 10))
+    ask: Mapped[float] = mapped_column(Numeric(20, 10))
+    recorded_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
 class FundingRate(Base):

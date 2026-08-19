@@ -18,13 +18,21 @@ from app.collectors.okx.collector import OkxCollector
 from app.collectors.okx.funding import poll_okx_funding
 from app.config.constants import (
     CROSS_EXCHANGE_ASSETS,
+    MarketType,
     OpportunityClassification,
     PRIORITY_EXCHANGES,
     STABLECOIN_PAIRS,
     TRIANGULAR_CROSS_PAIRS,
 )
 from app.config.settings import get_settings
-from app.database.repository import create_all_tables, get_or_create_exchange, get_or_create_portfolio, save_opportunity, save_simulated_trade
+from app.database.repository import (
+    create_all_tables,
+    get_or_create_exchange,
+    get_or_create_portfolio,
+    save_opportunity,
+    save_price_snapshots,
+    save_simulated_trade,
+)
 from app.database.session import async_session_factory
 from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.engines.funding import FundingArbitrageEngine
@@ -40,6 +48,7 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 SPOT_SYMBOLS = sorted({f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS} | set(STABLECOIN_PAIRS) | set(TRIANGULAR_CROSS_PAIRS))
+CHART_SYMBOLS = [f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS]
 DETECTION_INTERVAL_SECONDS = 3.0
 PAPER_TRADE_CLASSIFICATIONS = {
     OpportunityClassification.INTERESTING,
@@ -57,7 +66,15 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
     while True:
         try:
             opportunities = await detector.scan_once()
+            quotes = [
+                q
+                for exchange in PRIORITY_EXCHANGES
+                for symbol in CHART_SYMBOLS
+                if (q := market_data_store.get_quote(exchange, MarketType.SPOT, symbol)) is not None
+            ]
             async with async_session_factory() as session:
+                if quotes:
+                    await save_price_snapshots(session, quotes)
                 for opp in opportunities:
                     await save_opportunity(session, opp)
                     if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
