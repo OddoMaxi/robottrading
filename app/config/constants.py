@@ -12,6 +12,7 @@ class Strategy(StrEnum):
     CROSS_EXCHANGE = "cross_exchange"
     TRIANGULAR = "triangular"
     FUNDING = "funding"
+    BASIS = "basis"
 
 
 class MarketType(StrEnum):
@@ -59,6 +60,12 @@ CROSS_EXCHANGE_ASSETS = [
     "UNI", "APT", "ARB", "OP", "SUI", "INJ", "SHIB", "PEPE", "ICP", "FIL",
     "AAVE", "RENDER",
 ]
+
+# Engine D — Spot/Futures Basis Arbitrage. Binance-only for now (dated
+# quarterly futures aren't wired up for OKX/Bybit), and limited to the
+# assets that actually have a liquid quarterly contract — most alts on
+# Binance only list a perpetual, not a dated future.
+DELIVERY_FUTURES_ASSETS = ["BTC", "ETH"]
 
 # Section 6 — Engine C: Triangular Arbitrage
 # Extra symbols (beyond X/USDT) that must be streamed for triangular loops to close.

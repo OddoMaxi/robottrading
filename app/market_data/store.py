@@ -31,6 +31,16 @@ class FundingSnapshot:
     received_at: float
 
 
+@dataclass(slots=True)
+class DeliveryFuturesSnapshot:
+    exchange: str
+    symbol: str  # common form, e.g. "BTC/USDT" — the underlying asset/quote
+    contract_symbol: str  # exchange-native dated contract symbol, e.g. "BTCUSDT_250926"
+    price: float
+    delivery_time: float  # epoch seconds
+    received_at: float
+
+
 class MarketDataStore:
     def __init__(self) -> None:
         self._quotes: dict[tuple[str, MarketType, str], NormalizedQuote] = {}
@@ -41,6 +51,7 @@ class MarketDataStore:
         # a 3s poll could miss most of.
         self._update_event = asyncio.Event()
         self._mid_price_history: dict[tuple[str, str], deque[float]] = {}
+        self._delivery_futures: dict[tuple[str, str], DeliveryFuturesSnapshot] = {}
 
     def update_quote(self, quote: NormalizedQuote) -> None:
         self._quotes[(quote.exchange, quote.market, quote.symbol)] = quote
@@ -81,6 +92,12 @@ class MarketDataStore:
 
     def funding_for_symbol(self, symbol: str) -> dict[str, FundingSnapshot]:
         return {ex: f for (ex, s), f in self._funding.items() if s == symbol}
+
+    def update_delivery_future(self, snapshot: DeliveryFuturesSnapshot) -> None:
+        self._delivery_futures[(snapshot.exchange, snapshot.symbol)] = snapshot
+
+    def delivery_futures_for_symbol(self, symbol: str) -> dict[str, DeliveryFuturesSnapshot]:
+        return {ex: f for (ex, s), f in self._delivery_futures.items() if s == symbol}
 
 
 market_data_store = MarketDataStore()

@@ -4,10 +4,13 @@ LONG Spot + SHORT Perpetual: captures the funding rate plus any spot/perp
 basis, net of both legs' taker fees.
 """
 
+import time
+
 from app.analytics.fees import FeeEngine
 from app.config.constants import CROSS_EXCHANGE_ASSETS, DEFAULT_OPPORTUNITY_CAPITAL_USD, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
 from app.market_data.store import MarketDataStore, market_data_store
+from app.opportunity.false_opportunity_filter import check_quote_freshness
 from app.opportunity.models import Opportunity
 
 # Funding is paid repeatedly (every 8h on Binance/Bybit, similarly on OKX) for
@@ -44,6 +47,14 @@ class FundingArbitrageEngine(ArbitrageEngine):
             for exchange, funding in self.store.funding_for_symbol(symbol).items():
                 spot = spot_quotes.get(exchange)
                 if spot is None or spot.ask <= 0 or funding.mark_price <= 0:
+                    continue
+
+                # False Opportunity Filter: only the spot leg is tick-driven
+                # (funding snapshots are REST-polled every ~30s by design —
+                # applying the same tick-freshness bar to them would reject
+                # perfectly valid funding data).
+                spot_freshness = check_quote_freshness(spot, time.time())
+                if not spot_freshness.is_valid:
                     continue
 
                 basis_pct = (funding.mark_price - spot.ask) / spot.ask * 100
@@ -84,6 +95,7 @@ class FundingArbitrageEngine(ArbitrageEngine):
                         net_spread_pct=net_spread_pct,
                         capital_usd=self.capital_usd,
                         expected_profit_usd=net_profit,
+                        market_data_age_seconds=spot_freshness.market_data_age_seconds,
                     )
                 )
         return opportunities

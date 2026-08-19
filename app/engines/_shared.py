@@ -3,12 +3,15 @@ bid/ask across exchanges — Cross-Exchange (section 5) and Stablecoin
 (section 4) arbitrage are the same mechanic over a different symbol universe.
 """
 
+import time
+
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import MarketType, Strategy
 from app.execution.execution_simulator import simulate_best_execution
 from app.market_data.orderbook import OrderBookLevel, simulate_vwap
 from app.market_data.store import MarketDataStore
+from app.opportunity.false_opportunity_filter import check_leg_pair_sync
 from app.opportunity.models import Opportunity
 
 
@@ -35,6 +38,13 @@ class QuoteSpreadScanner:
                 for sell_exchange, sell_quote in quotes.items():
                     if buy_exchange == sell_exchange or buy_quote.ask <= 0 or sell_quote.bid <= 0:
                         continue
+
+                    # False Opportunity Filter: reject stale or desynced
+                    # quotes before treating the gap between them as real.
+                    data_quality = check_leg_pair_sync(buy_quote, sell_quote, time.time())
+                    if not data_quality.is_valid:
+                        continue
+
                     gross_spread_pct = (sell_quote.bid - buy_quote.ask) / buy_quote.ask * 100
                     if gross_spread_pct <= 0:
                         continue
@@ -57,13 +67,22 @@ class QuoteSpreadScanner:
                         continue
 
                     opp = self._price(
-                        symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, taker_break_even.total_pct
+                        symbol,
+                        buy_exchange,
+                        buy_quote,
+                        sell_exchange,
+                        sell_quote,
+                        gross_spread_pct,
+                        taker_break_even.total_pct,
+                        data_quality.market_data_age_seconds,
                     )
                     if opp is not None:
                         opportunities.append(opp)
         return opportunities
 
-    def _price(self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even_pct) -> Opportunity | None:
+    def _price(
+        self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even_pct, market_data_age_seconds
+    ) -> Opportunity | None:
         # V1 collectors only carry top-of-book (bookTicker/tickers streams), so
         # the "order book" fed to the Liquidity/Slippage engines has one level.
         buy_fill = simulate_vwap([OrderBookLevel(buy_quote.ask, buy_quote.ask_quantity)], self.capital_usd)
@@ -101,4 +120,5 @@ class QuoteSpreadScanner:
             expected_profit_usd=net_profit,
             execution_mode=best_execution.mode,
             execution_fill_probability=best_execution.fill_probability,
+            market_data_age_seconds=market_data_age_seconds,
         )

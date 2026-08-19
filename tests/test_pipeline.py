@@ -9,7 +9,7 @@ from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.market_data.normalizer import NormalizedQuote
 from app.market_data.store import MarketDataStore
 from app.opportunity.detector import OpportunityDetector
-from app.simulation.paper_trader import PaperTrader
+from app.simulation.paper_trader import PaperTrader, TradeStatus
 from app.simulation.portfolios import build_default_portfolios
 
 
@@ -38,7 +38,10 @@ async def test_full_pipeline_detect_score_and_paper_trade():
 
     portfolios = build_default_portfolios()
     portfolio = next(p for p in portfolios if p.name == "1K")
-    trade = PaperTrader().simulate(opp, portfolio)
+    paper_trader = PaperTrader()
+    outcome = paper_trader.determine_outcome(opp)
+    assert outcome == TradeStatus.SIMULATED_EXECUTED  # large, fresh, fully-sized taker/taker spread
+    trade = paper_trader.simulate(opp, portfolio, outcome)
 
     assert trade.capital_usd == pytest.approx(opp.capital_usd)
     assert trade.net_profit_usd == pytest.approx(opp.expected_profit_usd)

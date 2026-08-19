@@ -5,11 +5,14 @@ Walks fixed conversion loops within a single exchange (base -> leg1 -> leg2
 available top-of-book depth, net of all three legs' taker fees.
 """
 
+import time
+
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, TRIANGULAR_PATHS, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
 from app.market_data.store import MarketDataStore, market_data_store
+from app.opportunity.false_opportunity_filter import check_quote_freshness
 from app.opportunity.models import Opportunity
 
 
@@ -52,6 +55,14 @@ class TriangularArbitrageEngine(ArbitrageEngine):
         q3 = self.store.get_quote(self.exchange, MarketType.SPOT, sym3)
         if not (q1 and q2 and q3) or q1.ask <= 0 or q2.ask <= 0 or q3.bid <= 0:
             return None
+
+        # False Opportunity Filter: all 3 legs must be reasonably fresh —
+        # a triangle priced off a stale rate on one hop isn't real.
+        now = time.time()
+        checks = [check_quote_freshness(q1, now), check_quote_freshness(q2, now), check_quote_freshness(q3, now)]
+        if any(not c.is_valid for c in checks):
+            return None
+        market_data_age_seconds = max(c.market_data_age_seconds for c in checks)
 
         # Leg 1: BUY leg1_asset with base, capped by top-of-book ask depth.
         leg1_spend = min(self.capital_usd, q1.ask * q1.ask_quantity)
@@ -96,4 +107,5 @@ class TriangularArbitrageEngine(ArbitrageEngine):
             break_even_pct=self.break_even_pct,
             capital_usd=leg1_spend,
             expected_profit_usd=net_profit,
+            market_data_age_seconds=market_data_age_seconds,
         )

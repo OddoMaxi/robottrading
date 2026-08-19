@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.api.routes import router
+from app.collectors.binance.basis_futures import poll_binance_delivery_futures
 from app.collectors.binance.collector import BinanceCollector
 from app.collectors.binance.funding import poll_binance_funding
 from app.collectors.bybit.collector import BybitCollector
@@ -18,6 +19,7 @@ from app.collectors.okx.collector import OkxCollector
 from app.collectors.okx.funding import poll_okx_funding
 from app.config.constants import (
     CROSS_EXCHANGE_ASSETS,
+    DELIVERY_FUTURES_ASSETS,
     MarketType,
     OpportunityClassification,
     PRIORITY_EXCHANGES,
@@ -34,6 +36,7 @@ from app.database.repository import (
     save_simulated_trade,
 )
 from app.database.session import async_session_factory
+from app.engines.basis import BasisArbitrageEngine
 from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.engines.funding import FundingArbitrageEngine
 from app.engines.stablecoin import StablecoinArbitrageEngine
@@ -84,8 +87,12 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 for opp in opportunities:
                     await save_opportunity(session, opp)
                     if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
+                        # Sampled once per opportunity — a maker leg's fill
+                        # outcome is a property of the market, not of which
+                        # virtual portfolio happens to be replaying it.
+                        outcome = paper_trader.determine_outcome(opp)
                         for portfolio in portfolios:
-                            trade = paper_trader.simulate(opp, portfolio)
+                            trade = paper_trader.simulate(opp, portfolio, outcome)
                             await save_simulated_trade(session, trade, opp.id, portfolio_ids[portfolio.name])
                 await session.commit()
             if opportunities:
@@ -122,12 +129,16 @@ async def lifespan(app: FastAPI):
     background_tasks.append(asyncio.create_task(poll_binance_funding(market_data_store, CROSS_EXCHANGE_ASSETS), name="funding:binance"))
     background_tasks.append(asyncio.create_task(poll_okx_funding(market_data_store, CROSS_EXCHANGE_ASSETS), name="funding:okx"))
     background_tasks.append(asyncio.create_task(poll_bybit_funding(market_data_store, CROSS_EXCHANGE_ASSETS), name="funding:bybit"))
+    background_tasks.append(
+        asyncio.create_task(poll_binance_delivery_futures(market_data_store, DELIVERY_FUTURES_ASSETS), name="basis:binance")
+    )
 
     engines = [
         StablecoinArbitrageEngine(),
         CrossExchangeArbitrageEngine(),
         *(TriangularArbitrageEngine(exchange=exchange) for exchange in PRIORITY_EXCHANGES),
         FundingArbitrageEngine(),
+        BasisArbitrageEngine(),
     ]
     detector = OpportunityDetector(engines)
     background_tasks.append(asyncio.create_task(detection_loop(detector, portfolio_ids), name="detection_loop"))

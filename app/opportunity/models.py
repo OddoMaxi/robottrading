@@ -30,6 +30,16 @@ class Opportunity:
     execution_mode: str | None = None
     execution_fill_probability: float | None = None
 
+    # False Opportunity Filter (section 18) — how old the underlying quotes
+    # were when this opportunity was priced.
+    market_data_age_seconds: float | None = None
+
+    # Basis Engine — meaningful for a dated future (basis must converge to
+    # zero by expiry, so annualizing it is a real yield figure, unlike a
+    # perpetual's basis).
+    annualized_pct: float | None = None
+    days_to_expiry: float | None = None
+
     score: float | None = None  # 0-100, section 15
     classification: OpportunityClassification | None = None
 

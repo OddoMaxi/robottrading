@@ -24,6 +24,8 @@ from app.config.constants import CROSS_EXCHANGE_ASSETS, PRIORITY_EXCHANGES
 from app.config.fees import DEFAULT_FEE_SCHEDULES, uniform_fee_schedules
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot
+from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.weekly import Verdict, WeeklyAnalytics, build_weekly_analytics
 
 st.set_page_config(page_title="Robot d'arbitrage crypto", layout="wide", page_icon="🤖")
 
@@ -31,7 +33,8 @@ STRATEGY_LABELS = {
     "stablecoin": "Stablecoins (USDT/USDC/FDUSD)",
     "cross_exchange": "Entre plateformes (même crypto)",
     "triangular": "Triangulaire (boucle sur 1 plateforme)",
-    "funding": "Financement (spot vs futures)",
+    "funding": "Financement (spot vs perpetual)",
+    "basis": "Basis (spot vs future à échéance)",
 }
 
 EXECUTION_MODE_LABELS = {
@@ -220,6 +223,36 @@ def compute_maker_analysis(
                 }
             )
     return pd.DataFrame(rows)
+
+
+async def fetch_daily_summary() -> DailySummary:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_daily_summary(session)
+    finally:
+        await engine.dispose()
+
+
+async def fetch_weekly_analytics() -> WeeklyAnalytics:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_weekly_analytics(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_daily_summary_cached() -> DailySummary:
+    return asyncio.run(fetch_daily_summary())
+
+
+@st.cache_data(ttl=300)
+def get_weekly_analytics_cached() -> WeeklyAnalytics:
+    return asyncio.run(fetch_weekly_analytics())
 
 
 df = asyncio.run(fetch_opportunities())
@@ -462,5 +495,79 @@ if df.empty:
     st.info("Rien à comparer pour l'instant.")
 else:
     st.bar_chart(df["Stratégie"].value_counts())
+
+st.divider()
+
+# --- Rapport quotidien ---
+st.subheader("📅 Résumé du jour (24 dernières heures)")
+daily = get_daily_summary_cached()
+
+day_col1, day_col2, day_col3, day_col4 = st.columns(4)
+day_col1.metric("Opportunités repérées", daily.detected)
+day_col2.metric("Dont rentables (net > 0)", daily.net_positive)
+day_col3.metric("Trades simulés", daily.paper_trades)
+day_col4.metric("P&L simulé cumulé", f"{daily.simulated_net_pnl_usd:+.2f} $")
+
+if daily.best_strategy:
+    st.caption(
+        f"Meilleure stratégie sur 24h : **{STRATEGY_LABELS.get(daily.best_strategy, daily.best_strategy)}** — "
+        f"pire : **{STRATEGY_LABELS.get(daily.worst_strategy, daily.worst_strategy)}** — "
+        f"meilleur actif : **{daily.best_asset or '—'}**"
+    )
+
+st.divider()
+
+# --- Rapport hebdomadaire + verdict GO/MODIFY/NO-GO ---
+st.subheader("📊 Bilan sur 7 jours — quelle stratégie garder ?")
+weekly = get_weekly_analytics_cached()
+
+week_col1, week_col2, week_col3, week_col4 = st.columns(4)
+week_col1.metric("Opportunités (7j)", weekly.total_opportunities)
+week_col2.metric("Trades exécutés (simulés)", weekly.executed_simulations)
+week_col3.metric("Occasions manquées", weekly.missed_opportunities)
+week_col4.metric("P&L simulé (7j)", f"{weekly.net_simulated_pnl_usd:+.2f} $")
+
+context_bits = []
+if weekly.best_asset:
+    context_bits.append(f"meilleur actif : **{weekly.best_asset}**")
+if weekly.best_exchange_pair:
+    context_bits.append(f"meilleure paire d'exchanges : **{weekly.best_exchange_pair}**")
+if weekly.best_trading_hour_utc is not None:
+    context_bits.append(f"meilleure heure (UTC) : **{weekly.best_trading_hour_utc}h**")
+if context_bits:
+    st.caption(" — ".join(context_bits))
+
+with st.expander("Comment lire le verdict par stratégie ?"):
+    st.markdown(
+        """
+        - 🟢 **GO** : rentable de façon consistante (≥ 5 % des occasions positives en net, en moyenne positif) sur au moins 30 observations.
+        - 🟠 **MODIFY** : soit pas encore assez de données (< 30 observations), soit occasionnellement rentable mais pas assez consistant.
+        - 🔴 **NO-GO** : jamais rentable après frais sur la période observée.
+        - Ces seuils sont des points de départ — à recalibrer après une vraie semaine d'observation continue.
+        """
+    )
+
+if not weekly.by_strategy:
+    st.info("Pas encore assez de données sur 7 jours pour un verdict.")
+else:
+    verdict_badges = {Verdict.GO: "🟢 GO", Verdict.MODIFY: "🟠 MODIFY", Verdict.NO_GO: "🔴 NO-GO"}
+    verdict_df = pd.DataFrame(
+        [
+            {
+                "Stratégie": STRATEGY_LABELS.get(s.strategy, s.strategy),
+                "Opportunités": s.total_opportunities,
+                "Rentables (%)": s.net_positive_rate * 100,
+                "Rendement net moyen (%)": s.avg_net_return_pct,
+                "Rendement net médian (%)": s.median_net_return_pct,
+                "Verdict": verdict_badges[s.verdict],
+            }
+            for s in sorted(weekly.by_strategy, key=lambda s: s.avg_net_return_pct, reverse=True)
+        ]
+    )
+    st.dataframe(
+        verdict_df.style.format({"Rentables (%)": "{:.2f} %", "Rendement net moyen (%)": "{:.4f} %", "Rendement net médian (%)": "{:.4f} %"}),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 st.caption(f"Plateformes surveillées : {', '.join(e.capitalize() for e in PRIORITY_EXCHANGES)}")

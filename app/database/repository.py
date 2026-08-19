@@ -43,6 +43,9 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         status=opportunity.status,
         execution_mode=opportunity.execution_mode,
         execution_fill_probability=opportunity.execution_fill_probability,
+        market_data_age_seconds=opportunity.market_data_age_seconds,
+        annualized_pct=opportunity.annualized_pct,
+        days_to_expiry=opportunity.days_to_expiry,
     )
     session.add(record)
     await session.flush()
@@ -77,6 +80,7 @@ async def save_simulated_trade(
     record = SimulatedTradeRecord(
         opportunity_id=opportunity_id,
         portfolio_id=portfolio_id,
+        status=trade.status,
         capital_usd=trade.capital_usd,
         gross_profit_usd=trade.gross_profit_usd,
         fees_usd=trade.fees_usd,

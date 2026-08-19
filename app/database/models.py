@@ -127,6 +127,9 @@ class OpportunityRecord(Base):
 
     execution_mode: Mapped[str | None]
     execution_fill_probability: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    market_data_age_seconds: Mapped[float | None] = mapped_column(Numeric(6, 3))
+    annualized_pct: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    days_to_expiry: Mapped[float | None] = mapped_column(Numeric(8, 2))
 
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
     peak_at: Mapped[datetime | None]
@@ -150,6 +153,7 @@ class SimulatedTradeRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("opportunities.id"), index=True)
     portfolio_id: Mapped[int] = mapped_column(ForeignKey("virtual_portfolios.id"), index=True)
+    status: Mapped[str] = mapped_column(default="simulated_executed")
     capital_usd: Mapped[float] = mapped_column(Numeric(20, 2))
     gross_profit_usd: Mapped[float] = mapped_column(Numeric(20, 2))
     fees_usd: Mapped[float] = mapped_column(Numeric(20, 2))
