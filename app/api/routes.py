@@ -26,6 +26,8 @@ async def list_opportunities(limit: int = 50, session: AsyncSession = Depends(ge
             "gross_spread_pct": row.gross_spread_pct,
             "net_spread_pct": row.net_spread_pct,
             "break_even_pct": row.break_even_pct,
+            "execution_mode": row.execution_mode,
+            "execution_fill_probability": row.execution_fill_probability,
             "score": row.score,
             "classification": row.classification,
             "detected_at": row.detected_at.isoformat() if row.detected_at else None,

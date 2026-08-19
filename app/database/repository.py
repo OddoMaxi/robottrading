@@ -41,6 +41,8 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         score=opportunity.score,
         classification=opportunity.classification,
         status=opportunity.status,
+        execution_mode=opportunity.execution_mode,
+        execution_fill_probability=opportunity.execution_fill_probability,
     )
     session.add(record)
     await session.flush()

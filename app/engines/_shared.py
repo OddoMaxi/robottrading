@@ -6,6 +6,7 @@ bid/ask across exchanges — Cross-Exchange (section 5) and Stablecoin
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import MarketType, Strategy
+from app.execution.execution_simulator import simulate_best_execution
 from app.market_data.orderbook import OrderBookLevel, simulate_vwap
 from app.market_data.store import MarketDataStore
 from app.opportunity.models import Opportunity
@@ -38,18 +39,26 @@ class QuoteSpreadScanner:
                     if gross_spread_pct <= 0:
                         continue
 
-                    # Break-Even Engine: cheap upfront gate. Fees alone are
-                    # known without touching the order book, so a spread that
-                    # can't even clear fees + the standard buffers is
-                    # NOT_PROFITABLE by construction — skip the VWAP fill
-                    # simulation and fee math below entirely.
-                    break_even = compute_break_even(
+                    # Break-Even Engine: cheap upfront gate, fees alone are
+                    # known without touching the order book. Gate on the
+                    # MAKER/MAKER break-even — the lowest of the 4 execution
+                    # modes' thresholds — so an opportunity that could only
+                    # ever be profitable via maker orders still gets through
+                    # to the Maker/Taker Strategy Engine below. The taker
+                    # break-even (the conservative, certain-fill reference)
+                    # is still what gets reported and used for classification.
+                    taker_break_even = compute_break_even(
                         self.fee_engine, [(buy_exchange, MarketType.SPOT, False), (sell_exchange, MarketType.SPOT, False)]
                     )
-                    if gross_spread_pct < break_even.total_pct:
+                    maker_break_even = compute_break_even(
+                        self.fee_engine, [(buy_exchange, MarketType.SPOT, True), (sell_exchange, MarketType.SPOT, True)]
+                    )
+                    if gross_spread_pct < maker_break_even.total_pct:
                         continue
 
-                    opp = self._price(symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even.total_pct)
+                    opp = self._price(
+                        symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, taker_break_even.total_pct
+                    )
                     if opp is not None:
                         opportunities.append(opp)
         return opportunities
@@ -73,6 +82,11 @@ class QuoteSpreadScanner:
         net_profit = gross_profit - buy_fee - sell_fee
         net_spread_pct = net_profit / capital * 100
 
+        # Maker/Taker Strategy Engine: on top of the certain-fill taker/taker
+        # numbers above, work out whether resting a maker order on either
+        # leg beats it in expectation, given the fill risk.
+        best_execution = simulate_best_execution(buy_exchange, sell_exchange, buy_quote, sell_quote, capital, self.fee_engine, self.store)
+
         return Opportunity(
             strategy=self.strategy,
             symbol=symbol,
@@ -85,4 +99,6 @@ class QuoteSpreadScanner:
             break_even_pct=break_even_pct,
             capital_usd=capital,
             expected_profit_usd=net_profit,
+            execution_mode=best_execution.mode,
+            execution_fill_probability=best_execution.fill_probability,
         )

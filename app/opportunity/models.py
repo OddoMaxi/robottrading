@@ -24,6 +24,12 @@ class Opportunity:
     capital_usd: float | None = None
     expected_profit_usd: float | None = None
 
+    # Maker/Taker Strategy Engine (informational — net_spread_pct/expected_profit_usd
+    # above stay the certain-fill taker/taker baseline; these describe the
+    # best of the 4 execution modes by probability-weighted expected value).
+    execution_mode: str | None = None
+    execution_fill_probability: float | None = None
+
     score: float | None = None  # 0-100, section 15
     classification: OpportunityClassification | None = None
 

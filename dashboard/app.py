@@ -34,6 +34,13 @@ STRATEGY_LABELS = {
     "funding": "Financement (spot vs futures)",
 }
 
+EXECUTION_MODE_LABELS = {
+    "taker_taker": "Marché / Marché",
+    "maker_taker": "Limite / Marché",
+    "taker_maker": "Marché / Limite",
+    "maker_maker": "Limite / Limite",
+}
+
 ILLUSTRATIVE_CAPITAL_USD = 1_000
 
 
@@ -74,6 +81,8 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
                 "Résultat sur 1000 $": (float(r.net_spread_pct) / 100 * ILLUSTRATIVE_CAPITAL_USD)
                 if r.net_spread_pct is not None
                 else None,
+                "Meilleure exécution": EXECUTION_MODE_LABELS.get(r.execution_mode, "—"),
+                "Proba. exécution": float(r.execution_fill_probability) * 100 if r.execution_fill_probability is not None else None,
                 "Détecté": humanize_delta(r.detected_at),
                 "_detected_at": r.detected_at,
             }
@@ -410,6 +419,8 @@ with st.expander("Comment lire ce tableau ?"):
         - **Seuil de rentabilité** : l'écart minimum nécessaire pour couvrir les frais + une marge de sécurité. Si le gain brut est en dessous, ce n'est même pas la peine de calculer le reste — ça ne sera jamais rentable.
         - **Gain net** : ce qu'il resterait *après* avoir payé les frais des plateformes — c'est le seul chiffre qui compte vraiment.
         - **Résultat sur 1000 $** : à titre d'exemple, ce que ça donnerait en dollars si on investissait 1000 $ dans cette opportunité (négatif = perte après frais).
+        - **Meilleure exécution** : parmi les 4 façons de passer les deux ordres (marché ou limite, sur chaque côté), celle qui rapporte le plus *en moyenne pondérée par le risque de non-remplissage*. « Limite » coûte moins cher en frais mais peut ne pas s'exécuter à temps.
+        - **Proba. exécution** : estimation (pas une mesure réelle) de la probabilité que cette méthode s'exécute effectivement, basée sur l'écart bid/ask, la liquidité disponible et la volatilité récente.
         - Le robot ne fait **aucune opération réelle** pour l'instant : tout est simulé pour évaluer si la stratégie vaut le coup avant d'y mettre du vrai capital.
         """
     )
@@ -436,6 +447,7 @@ else:
                 "Seuil de rentabilité (%)": "{:.3f} %",
                 "Gain net (%)": "{:.3f} %",
                 "Résultat sur 1000 $": "{:+.2f} $",
+                "Proba. exécution": "{:.0f} %",
             }
         ),
         use_container_width=True,

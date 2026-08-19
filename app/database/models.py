@@ -125,6 +125,9 @@ class OpportunityRecord(Base):
     classification: Mapped[str | None]
     status: Mapped[str] = mapped_column(default="detected")
 
+    execution_mode: Mapped[str | None]
+    execution_fill_probability: Mapped[float | None] = mapped_column(Numeric(5, 4))
+
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
     peak_at: Mapped[datetime | None]
     closed_at: Mapped[datetime | None]

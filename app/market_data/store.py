@@ -6,10 +6,18 @@ atomic dict assignment, never interleaved with a read.
 """
 
 import asyncio
+import statistics
+from collections import deque
 from dataclasses import dataclass
 
 from app.config.constants import MarketType
 from app.market_data.normalizer import NormalizedQuote
+
+# Samples kept per (exchange, symbol) for a lightweight, no-DB-roundtrip
+# volatility estimate — feeds the Maker Fill Probability heuristic
+# (app/execution/fill_probability.py) without slowing down the hot
+# detection path with a database query.
+VOLATILITY_WINDOW_SIZE = 20
 
 
 @dataclass(slots=True)
@@ -32,10 +40,24 @@ class MarketDataStore:
         # observed on 2026-08-19 opened and closed within ~15 seconds, which
         # a 3s poll could miss most of.
         self._update_event = asyncio.Event()
+        self._mid_price_history: dict[tuple[str, str], deque[float]] = {}
 
     def update_quote(self, quote: NormalizedQuote) -> None:
         self._quotes[(quote.exchange, quote.market, quote.symbol)] = quote
+        history_key = (quote.exchange, quote.symbol)
+        history = self._mid_price_history.setdefault(history_key, deque(maxlen=VOLATILITY_WINDOW_SIZE))
+        history.append((quote.bid + quote.ask) / 2)
         self._update_event.set()
+
+    def recent_volatility_pct(self, exchange: str, symbol: str) -> float | None:
+        """Coefficient of variation of the last ~20 mid-price samples, as a %. None if too little history."""
+        history = self._mid_price_history.get((exchange, symbol))
+        if history is None or len(history) < 3:
+            return None
+        mean = statistics.fmean(history)
+        if mean <= 0:
+            return None
+        return statistics.pstdev(history) / mean * 100
 
     async def wait_for_update(self, timeout: float) -> bool:
         """Block until a quote updates or `timeout` elapses. Returns whether an update woke it."""
