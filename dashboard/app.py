@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # root, so the top-level `app` package needs to be added explicitly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.analytics.fees import FeeEngine
+from app.analytics.maker_simulation import MakerAssumptions, best_maker_pair
 from app.config.constants import CROSS_EXCHANGE_ASSETS, PRIORITY_EXCHANGES
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot
@@ -105,6 +107,65 @@ async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
             for r in rows
         ]
     )
+
+
+async def fetch_bid_ask_history(symbols: list[str], hours: float = 2.0) -> pd.DataFrame:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PriceSnapshot).where(PriceSnapshot.symbol.in_(symbols), PriceSnapshot.recorded_at >= cutoff)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+    return pd.DataFrame(
+        [
+            {"symbol": r.symbol, "exchange": r.exchange, "recorded_at": r.recorded_at, "bid": float(r.bid), "ask": float(r.ask)}
+            for r in rows
+        ]
+    )
+
+
+@st.cache_data(ttl=30)
+def get_bid_ask_history_cached(symbols: tuple[str, ...], hours: float) -> pd.DataFrame:
+    return asyncio.run(fetch_bid_ask_history(list(symbols), hours))
+
+
+def compute_maker_analysis(
+    raw_df: pd.DataFrame, assumptions: MakerAssumptions, capital_usd: float, fee_engine: FeeEngine, resample_rule: str = "1min"
+) -> pd.DataFrame:
+    """Replay real observed bid/ask history through the maker-order what-if model."""
+    rows = []
+    for symbol, group in raw_df.groupby("symbol"):
+        bids = group.pivot_table(index="recorded_at", columns="exchange", values="bid").resample(resample_rule).last().ffill(limit=2)
+        asks = group.pivot_table(index="recorded_at", columns="exchange", values="ask").resample(resample_rule).last().ffill(limit=2)
+        for ts in bids.index:
+            bid_row, ask_row = bids.loc[ts], asks.loc[ts]
+            quotes = {
+                exchange: (bid_row[exchange], ask_row[exchange])
+                for exchange in bid_row.index
+                if pd.notna(bid_row[exchange]) and pd.notna(ask_row[exchange])
+            }
+            if len(quotes) < 2:
+                continue
+            best = best_maker_pair(quotes, capital_usd, fee_engine, assumptions)
+            if best is None:
+                continue
+            buy_exchange, sell_exchange, result = best
+            rows.append(
+                {
+                    "Paire": symbol,
+                    "Achat sur": buy_exchange.capitalize(),
+                    "Vente sur": sell_exchange.capitalize(),
+                    "Valeur espérée (%)": result.expected_value_pct,
+                    "Valeur espérée sur 1000 $": result.expected_value_usd / capital_usd * ILLUSTRATIVE_CAPITAL_USD,
+                    "recorded_at": ts,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 df = asyncio.run(fetch_opportunities())
@@ -203,6 +264,70 @@ else:
         compare_fig.add_trace(go.Scatter(x=sub["recorded_at"], y=sub["mid"], mode="lines", name=exchange.capitalize()))
     compare_fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(compare_fig, use_container_width=True)
+
+st.divider()
+
+# --- Simulation "et si on utilisait des ordres maker ?" ---
+st.subheader("🧪 Et si on utilisait des ordres maker au lieu du marché ?")
+st.caption(
+    "Les ordres maker (limite) coûtent moins cher en frais, mais rien ne garantit qu'ils se remplissent "
+    "à temps — c'est une hypothèse à tester, pas une mesure réelle."
+)
+
+with st.expander("Comment ça marche ?", expanded=False):
+    st.markdown(
+        """
+        - Un ordre **marché (taker)** s'exécute tout de suite, mais coûte plus cher en frais.
+        - Un ordre **limite (maker)** coûte moins cher, mais reste en attente — s'il ne se remplit pas
+          avant que le prix bouge, l'opportunité peut disparaître, ou pire, un seul des deux côtés se
+          remplit et on se retrouve exposé sans protection (il faut alors sortir en urgence, à perte).
+        - **On n'a aucune donnée réelle** sur la fréquence à laquelle ces ordres se remplissent sur ces
+          plateformes — les deux curseurs ci-dessous sont donc des hypothèses à ajuster, pas des faits.
+          Un vrai test (compte de démo / testnet) serait nécessaire pour les remplacer par des chiffres mesurés.
+        """
+    )
+
+maker_col1, maker_col2, maker_col3 = st.columns(3)
+fill_probability_pct = maker_col1.slider("Chance qu'un ordre se remplisse à temps", 10, 95, 55, help="Hypothèse — pas une mesure.")
+adverse_move_pct = maker_col2.slider("Perte si un seul côté se remplit (%)", 0.01, 0.30, 0.05, step=0.01)
+maker_hours = maker_col3.selectbox("Sur quelle période ?", [1.0, 2.0, 6.0], index=1, format_func=lambda h: f"Dernières {int(h)} h")
+
+maker_raw_df = get_bid_ask_history_cached(tuple(chart_symbols), maker_hours)
+
+if maker_raw_df.empty:
+    st.info("Pas encore assez d'historique pour cette simulation.")
+else:
+    assumptions = MakerAssumptions(fill_probability=fill_probability_pct / 100, adverse_move_pct=adverse_move_pct)
+    fee_engine = FeeEngine()
+    maker_results = compute_maker_analysis(maker_raw_df, assumptions, ILLUSTRATIVE_CAPITAL_USD, fee_engine)
+
+    if maker_results.empty:
+        st.info("Pas assez de données communes entre plateformes pour cette période.")
+    else:
+        positive_share = (maker_results["Valeur espérée (%)"] > 0).mean() * 100
+        avg_ev = maker_results["Valeur espérée sur 1000 $"].mean()
+
+        verdict_col1, verdict_col2 = st.columns(2)
+        verdict_col1.metric("Instants où c'était rentable (en espérance)", f"{positive_share:.1f} %")
+        verdict_col2.metric("Résultat moyen sur 1000 $ (en espérance)", f"{avg_ev:+.2f} $")
+
+        if positive_share > 50:
+            st.success("Sous ces hypothèses, les ordres maker rendraient cette stratégie rentable plus souvent qu'improbable.")
+        else:
+            st.warning(
+                "Sous ces hypothèses, même avec des frais réduits, le risque de non-remplissage mange "
+                "l'avantage la plupart du temps — essaie d'augmenter la chance de remplissage pour voir "
+                "à partir de quel niveau ça basculerait."
+            )
+
+        st.caption("Meilleures paires sous ces hypothèses (valeur espérée moyenne) :")
+        top_pairs = (
+            maker_results.groupby("Paire")["Valeur espérée sur 1000 $"]
+            .mean()
+            .sort_values(ascending=False)
+            .head(10)
+        )
+        st.bar_chart(top_pairs)
 
 st.divider()
 
