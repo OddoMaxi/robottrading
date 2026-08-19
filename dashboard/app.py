@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.analytics.fees import FeeEngine
 from app.analytics.maker_simulation import MakerAssumptions, best_maker_pair
 from app.config.constants import CROSS_EXCHANGE_ASSETS, PRIORITY_EXCHANGES
+from app.config.fees import DEFAULT_FEE_SCHEDULES, uniform_fee_schedules
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot
 
@@ -282,7 +283,7 @@ with st.expander("Comment ça marche ?", expanded=False):
           avant que le prix bouge, l'opportunité peut disparaître, ou pire, un seul des deux côtés se
           remplit et on se retrouve exposé sans protection (il faut alors sortir en urgence, à perte).
         - **On n'a aucune donnée réelle** sur la fréquence à laquelle ces ordres se remplissent sur ces
-          plateformes — les deux curseurs ci-dessous sont donc des hypothèses à ajuster, pas des faits.
+          plateformes — les deux premiers curseurs sont donc des hypothèses à ajuster, pas des faits.
           Un vrai test (compte de démo / testnet) serait nécessaire pour les remplacer par des chiffres mesurés.
         """
     )
@@ -292,13 +293,24 @@ fill_probability_pct = maker_col1.slider("Chance qu'un ordre se remplisse à tem
 adverse_move_pct = maker_col2.slider("Perte si un seul côté se remplit (%)", 0.01, 0.30, 0.05, step=0.01)
 maker_hours = maker_col3.selectbox("Sur quelle période ?", [1.0, 2.0, 6.0], index=1, format_func=lambda h: f"Dernières {int(h)} h")
 
+st.caption(
+    "« Et si j'avais un statut VIP ? » — règle tes frais réels ci-dessous (visibles dans les paramètres "
+    "de ton compte sur chaque exchange). Les tarifs VIP publiés changent souvent et diffèrent par "
+    "plateforme, donc on ne devine pas de palier ici : mets le chiffre exact que ton compte affiche."
+)
+fee_col1, fee_col2 = st.columns(2)
+default_taker_pct = DEFAULT_FEE_SCHEDULES["binance"].taker_fee_spot * 100
+default_maker_pct = DEFAULT_FEE_SCHEDULES["binance"].maker_fee_spot * 100
+taker_fee_pct = fee_col1.slider("Frais marché — taker (%)", 0.00, 0.10, float(default_taker_pct), step=0.01)
+maker_fee_pct = fee_col2.slider("Frais limite — maker (%)", 0.00, 0.10, float(default_maker_pct), step=0.01)
+
 maker_raw_df = get_bid_ask_history_cached(tuple(chart_symbols), maker_hours)
 
 if maker_raw_df.empty:
     st.info("Pas encore assez d'historique pour cette simulation.")
 else:
     assumptions = MakerAssumptions(fill_probability=fill_probability_pct / 100, adverse_move_pct=adverse_move_pct)
-    fee_engine = FeeEngine()
+    fee_engine = FeeEngine(uniform_fee_schedules(maker_fee_pct / 100, taker_fee_pct / 100))
     maker_results = compute_maker_analysis(maker_raw_df, assumptions, ILLUSTRATIVE_CAPITAL_USD, fee_engine)
 
     if maker_results.empty:
