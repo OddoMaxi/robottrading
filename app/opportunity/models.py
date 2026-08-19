@@ -1,0 +1,36 @@
+"""In-memory representation of a detected opportunity, before persistence.
+
+Shared by all four engines (app/engines/) and by the Opportunity Engine
+(detector.py) that aggregates them. The database/models.py Opportunity table
+mirrors this shape for persistence.
+"""
+
+import uuid
+from dataclasses import dataclass, field
+
+from app.config.constants import OpportunityClassification, OpportunityStatus, Strategy
+
+
+@dataclass(slots=True)
+class Opportunity:
+    strategy: Strategy
+    symbol: str  # e.g. "BTC/USDT" or "USDT/USDC"
+    legs: list[dict]  # ordered list of {exchange, side, market, price, quantity}
+
+    gross_spread_pct: float
+    net_spread_pct: float | None = None  # filled in once Fee/Liquidity/Slippage engines run
+
+    capital_usd: float | None = None
+    expected_profit_usd: float | None = None
+
+    score: float | None = None  # 0-100, section 15
+    classification: OpportunityClassification | None = None
+
+    detected_at: float = 0.0
+    peak_at: float | None = None
+    closed_at: float | None = None
+    max_spread_pct: float | None = None
+    avg_spread_pct: float | None = None
+
+    status: OpportunityStatus = OpportunityStatus.DETECTED
+    id: uuid.UUID = field(default_factory=uuid.uuid4)

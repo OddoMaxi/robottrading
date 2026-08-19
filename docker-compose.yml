@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: arbitrage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arbitrage}
+      POSTGRES_DB: arbitrage
+    ports:
+      # Host-only: this stack shares the VPS with other Docker projects —
+      # never publish the DB/cache on 0.0.0.0.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+
+volumes:
+  postgres_data:
