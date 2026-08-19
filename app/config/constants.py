@@ -40,7 +40,11 @@ PRIORITY_EXCHANGES = ["binance", "okx", "bybit"]
 NEXT_PHASE_EXCHANGES = ["kraken", "gateio", "kucoin"]
 
 # Section 4 — Engine A: Stablecoin Arbitrage
-STABLECOIN_PAIRS = ["USDT/USDC", "USDT/FDUSD", "USDC/FDUSD"]
+# Verified live against each exchange's REST API (2026-08-19): USDC/USDT is
+# the only one of the three spec pairs actually listed on all 3 priority
+# exchanges. FDUSD is Binance-only (FDUSDUSDT, FDUSDUSDC) — not comparable
+# cross-exchange until another priority exchange lists it.
+STABLECOIN_PAIRS = ["USDC/USDT"]
 
 # Section 5 — Engine B: Cross-Exchange Arbitrage
 CROSS_EXCHANGE_ASSETS = ["BTC", "ETH", "SOL", "BNB", "XRP"]
