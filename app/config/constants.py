@@ -21,6 +21,7 @@ class MarketType(StrEnum):
 
 
 class OpportunityClassification(StrEnum):
+    NOT_PROFITABLE = "not_profitable"  # net spread <= 0 — a real cost, not just "low priority"
     WATCH = "watch"
     INTERESTING = "interesting"
     GOOD = "good"
@@ -73,6 +74,14 @@ TRIANGULAR_PATHS: list[tuple[str, str, str]] = [
 # Representative capital used to price a freshly detected opportunity before
 # it's replayed against each Virtual Portfolio (section 20) in paper trading.
 DEFAULT_OPPORTUNITY_CAPITAL_USD = 1_000.0
+
+# Break-Even Spread Engine — costs beyond trading fees that aren't measured
+# per-opportunity yet (real slippage/rebalancing are priced in separately by
+# the Liquidity/Rebalancing engines where wired up). These are conservative,
+# configurable placeholder assumptions, not measurements.
+DEFAULT_SLIPPAGE_BUFFER_PCT = 0.02
+DEFAULT_REBALANCING_BUFFER_PCT = 0.01
+DEFAULT_SAFETY_MARGIN_PCT = 0.03
 
 # Section 12 — Liquidity Engine test amounts (USD)
 LIQUIDITY_TEST_AMOUNTS_USD = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000]

@@ -69,6 +69,7 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
                 "Stratégie": STRATEGY_LABELS.get(r.strategy, r.strategy),
                 "Paire": r.symbol,
                 "Gain brut (%)": float(r.gross_spread_pct),
+                "Seuil de rentabilité (%)": float(r.break_even_pct) if r.break_even_pct is not None else None,
                 "Gain net (%)": float(r.net_spread_pct) if r.net_spread_pct is not None else None,
                 "Résultat sur 1000 $": (float(r.net_spread_pct) / 100 * ILLUSTRATIVE_CAPITAL_USD)
                 if r.net_spread_pct is not None
@@ -406,6 +407,7 @@ with st.expander("Comment lire ce tableau ?"):
     st.markdown(
         """
         - **Gain brut** : l'écart de prix repéré entre deux plateformes (ou dans une boucle), avant les frais.
+        - **Seuil de rentabilité** : l'écart minimum nécessaire pour couvrir les frais + une marge de sécurité. Si le gain brut est en dessous, ce n'est même pas la peine de calculer le reste — ça ne sera jamais rentable.
         - **Gain net** : ce qu'il resterait *après* avoir payé les frais des plateformes — c'est le seul chiffre qui compte vraiment.
         - **Résultat sur 1000 $** : à titre d'exemple, ce que ça donnerait en dollars si on investissait 1000 $ dans cette opportunité (négatif = perte après frais).
         - Le robot ne fait **aucune opération réelle** pour l'instant : tout est simulé pour évaluer si la stratégie vaut le coup avant d'y mettre du vrai capital.
@@ -429,7 +431,12 @@ else:
 
     st.dataframe(
         display_df.style.apply(highlight_profit, axis=1).format(
-            {"Gain brut (%)": "{:.3f} %", "Gain net (%)": "{:.3f} %", "Résultat sur 1000 $": "{:+.2f} $"}
+            {
+                "Gain brut (%)": "{:.3f} %",
+                "Seuil de rentabilité (%)": "{:.3f} %",
+                "Gain net (%)": "{:.3f} %",
+                "Résultat sur 1000 $": "{:+.2f} $",
+            }
         ),
         use_container_width=True,
         hide_index=True,

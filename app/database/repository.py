@@ -35,6 +35,7 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         legs=opportunity.legs,
         gross_spread_pct=opportunity.gross_spread_pct,
         net_spread_pct=opportunity.net_spread_pct,
+        break_even_pct=opportunity.break_even_pct,
         capital_usd=opportunity.capital_usd,
         expected_profit_usd=opportunity.expected_profit_usd,
         score=opportunity.score,

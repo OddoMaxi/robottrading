@@ -11,6 +11,8 @@ _ORDERED = sorted(CLASSIFICATION_THRESHOLDS.items(), key=lambda kv: kv[1], rever
 
 
 def classify(net_spread_pct: float) -> OpportunityClassification:
+    if net_spread_pct < 0:
+        return OpportunityClassification.NOT_PROFITABLE
     for classification, threshold in _ORDERED:
         if net_spread_pct >= threshold:
             return classification

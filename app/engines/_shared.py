@@ -3,6 +3,7 @@ bid/ask across exchanges — Cross-Exchange (section 5) and Stablecoin
 (section 4) arbitrage are the same mechanic over a different symbol universe.
 """
 
+from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import MarketType, Strategy
 from app.market_data.orderbook import OrderBookLevel, simulate_vwap
@@ -36,12 +37,24 @@ class QuoteSpreadScanner:
                     gross_spread_pct = (sell_quote.bid - buy_quote.ask) / buy_quote.ask * 100
                     if gross_spread_pct <= 0:
                         continue
-                    opp = self._price(symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct)
+
+                    # Break-Even Engine: cheap upfront gate. Fees alone are
+                    # known without touching the order book, so a spread that
+                    # can't even clear fees + the standard buffers is
+                    # NOT_PROFITABLE by construction — skip the VWAP fill
+                    # simulation and fee math below entirely.
+                    break_even = compute_break_even(
+                        self.fee_engine, [(buy_exchange, MarketType.SPOT, False), (sell_exchange, MarketType.SPOT, False)]
+                    )
+                    if gross_spread_pct < break_even.total_pct:
+                        continue
+
+                    opp = self._price(symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even.total_pct)
                     if opp is not None:
                         opportunities.append(opp)
         return opportunities
 
-    def _price(self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct) -> Opportunity | None:
+    def _price(self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even_pct) -> Opportunity | None:
         # V1 collectors only carry top-of-book (bookTicker/tickers streams), so
         # the "order book" fed to the Liquidity/Slippage engines has one level.
         buy_fill = simulate_vwap([OrderBookLevel(buy_quote.ask, buy_quote.ask_quantity)], self.capital_usd)
@@ -69,6 +82,7 @@ class QuoteSpreadScanner:
             ],
             gross_spread_pct=gross_spread_pct,
             net_spread_pct=net_spread_pct,
+            break_even_pct=break_even_pct,
             capital_usd=capital,
             expected_profit_usd=net_profit,
         )

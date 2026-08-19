@@ -19,6 +19,7 @@ class Opportunity:
 
     gross_spread_pct: float
     net_spread_pct: float | None = None  # filled in once Fee/Liquidity/Slippage engines run
+    break_even_pct: float | None = None  # minimum gross spread that would have cleared all costs
 
     capital_usd: float | None = None
     expected_profit_usd: float | None = None

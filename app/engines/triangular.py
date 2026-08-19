@@ -5,6 +5,7 @@ Walks fixed conversion loops within a single exchange (base -> leg1 -> leg2
 available top-of-book depth, net of all three legs' taker fees.
 """
 
+from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, TRIANGULAR_PATHS, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
@@ -28,6 +29,10 @@ class TriangularArbitrageEngine(ArbitrageEngine):
         self.store = store
         self.fee_engine = fee_engine
         self.capital_usd = capital_usd
+        # All 3 legs are on the same exchange (taker) — fixed per instance,
+        # so the break-even floor is computed once rather than per scan.
+        three_taker_legs = [(exchange, MarketType.SPOT, False)] * 3
+        self.break_even_pct = compute_break_even(fee_engine, three_taker_legs).total_pct
 
     async def detect(self) -> list[Opportunity]:
         opportunities: list[Opportunity] = []
@@ -67,6 +72,11 @@ class TriangularArbitrageEngine(ArbitrageEngine):
         if gross_spread_pct <= 0:
             return None
 
+        # Break-Even Engine: skip the fee math below entirely if the gross
+        # spread can't even clear the 3-leg fee floor + standard buffers.
+        if gross_spread_pct < self.break_even_pct:
+            return None
+
         fee1 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, leg1_spend, is_maker=False)
         fee2 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, leg2_spend, is_maker=False)
         fee3 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, end_capital, is_maker=False)
@@ -83,6 +93,7 @@ class TriangularArbitrageEngine(ArbitrageEngine):
             ],
             gross_spread_pct=gross_spread_pct,
             net_spread_pct=net_spread_pct,
+            break_even_pct=self.break_even_pct,
             capital_usd=leg1_spend,
             expected_profit_usd=net_profit,
         )

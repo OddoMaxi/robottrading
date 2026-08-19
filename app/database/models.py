@@ -117,6 +117,7 @@ class OpportunityRecord(Base):
 
     gross_spread_pct: Mapped[float] = mapped_column(Numeric(10, 6))
     net_spread_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    break_even_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
     capital_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
     expected_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
 

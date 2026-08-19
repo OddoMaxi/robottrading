@@ -2,6 +2,11 @@ from app.config.constants import OpportunityClassification
 from app.opportunity.validator import classify
 
 
+def test_classify_not_profitable():
+    assert classify(-0.01) == OpportunityClassification.NOT_PROFITABLE
+    assert classify(-5.0) == OpportunityClassification.NOT_PROFITABLE
+
+
 def test_classify_watch():
     assert classify(0.0) == OpportunityClassification.WATCH
     assert classify(0.04) == OpportunityClassification.WATCH
