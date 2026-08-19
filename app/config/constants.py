@@ -47,7 +47,17 @@ NEXT_PHASE_EXCHANGES = ["kraken", "gateio", "kucoin"]
 STABLECOIN_PAIRS = ["USDC/USDT"]
 
 # Section 5 — Engine B: Cross-Exchange Arbitrage
-CROSS_EXCHANGE_ASSETS = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+# Majors (original 5) + altcoins, all verified live and listed as <ASSET>USDT
+# / <ASSET>-USDT / <ASSET>USDT on Binance, OKX, and Bybit spot (2026-08-19).
+# Smaller-cap names carry wider natural spreads than the majors — more
+# chance of a real edge, at the cost of more liquidity/slippage risk (the
+# Liquidity/Slippage engines already price that in per opportunity).
+CROSS_EXCHANGE_ASSETS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP",
+    "DOGE", "ADA", "AVAX", "LINK", "DOT", "LTC", "TRX", "NEAR", "ATOM",
+    "UNI", "APT", "ARB", "OP", "SUI", "INJ", "SHIB", "PEPE", "ICP", "FIL",
+    "AAVE", "RENDER",
+]
 
 # Section 6 — Engine C: Triangular Arbitrage
 # Extra symbols (beyond X/USDT) that must be streamed for triangular loops to close.

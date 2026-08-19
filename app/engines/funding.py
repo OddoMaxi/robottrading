@@ -10,6 +10,12 @@ from app.engines.base import ArbitrageEngine
 from app.market_data.store import MarketDataStore, market_data_store
 from app.opportunity.models import Opportunity
 
+# Funding is paid repeatedly (every 8h on Binance/Bybit, similarly on OKX) for
+# as long as the carry position is held — comparing one funding payment
+# against the full one-time entry cost of both legs understates the trade by
+# construction. 9 periods ≈ 3 days is a conservative minimum realistic hold.
+HOLDING_PERIOD_FUNDING_EVENTS = 9
+
 
 class FundingArbitrageEngine(ArbitrageEngine):
     strategy_name = Strategy.FUNDING
@@ -21,12 +27,14 @@ class FundingArbitrageEngine(ArbitrageEngine):
         store: MarketDataStore = market_data_store,
         fee_engine: FeeEngine = FeeEngine(),
         capital_usd: float = DEFAULT_OPPORTUNITY_CAPITAL_USD,
+        holding_period_funding_events: int = HOLDING_PERIOD_FUNDING_EVENTS,
     ) -> None:
         self.assets = assets
         self.quote_asset = quote_asset
         self.store = store
         self.fee_engine = fee_engine
         self.capital_usd = capital_usd
+        self.holding_period_funding_events = holding_period_funding_events
 
     async def detect(self) -> list[Opportunity]:
         opportunities: list[Opportunity] = []
@@ -45,11 +53,23 @@ class FundingArbitrageEngine(ArbitrageEngine):
                     continue
 
                 quantity = self.capital_usd / spot.ask
-                spot_fee = self.fee_engine.trading_fee(exchange, MarketType.SPOT, self.capital_usd, is_maker=False)
                 perp_notional = quantity * funding.mark_price
-                perp_fee = self.fee_engine.trading_fee(exchange, MarketType.PERPETUAL, perp_notional, is_maker=False)
-                funding_income = perp_notional * funding.funding_rate
-                net_profit = funding_income - spot_fee - perp_fee
+
+                # Round-trip (open + close) taker fees on both legs — the real
+                # one-time cost of the carry trade, paid once regardless of
+                # how long the position is held.
+                spot_fee_round_trip = 2 * self.fee_engine.trading_fee(
+                    exchange, MarketType.SPOT, self.capital_usd, is_maker=False
+                )
+                perp_fee_round_trip = 2 * self.fee_engine.trading_fee(
+                    exchange, MarketType.PERPETUAL, perp_notional, is_maker=False
+                )
+
+                # Funding income compounds over the holding period; basis is
+                # deliberately not counted here (no honest way to assume it
+                # converges in our favor from a single reading) — conservative.
+                total_funding_income = perp_notional * funding.funding_rate * self.holding_period_funding_events
+                net_profit = total_funding_income - spot_fee_round_trip - perp_fee_round_trip
                 net_spread_pct = net_profit / self.capital_usd * 100
 
                 opportunities.append(
