@@ -12,24 +12,34 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 # `streamlit run dashboard/app.py` puts dashboard/ on sys.path, not the repo
 # root, so the top-level `app` package needs to be added explicitly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config.constants import PRIORITY_EXCHANGES
+from app.config.settings import get_settings
 from app.database.models import OpportunityRecord
-from app.database.session import async_session_factory
 
 st.set_page_config(page_title="Multi-Market Arbitrage Engine", layout="wide")
 
 
 async def fetch_opportunities(limit: int = 200) -> pd.DataFrame:
-    async with async_session_factory() as session:
-        result = await session.execute(
-            select(OpportunityRecord).order_by(OpportunityRecord.detected_at.desc()).limit(limit)
-        )
-        rows = result.scalars().all()
+    # Streamlit calls asyncio.run() fresh on every rerun, giving each run its
+    # own event loop. asyncpg connections can't be reused across event loops,
+    # so — unlike the FastAPI app's long-lived engine — this one is created
+    # and disposed within the same run rather than shared at module level.
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OpportunityRecord).order_by(OpportunityRecord.detected_at.desc()).limit(limit)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
     return pd.DataFrame(
         [
             {
