@@ -1,4 +1,4 @@
-"""Streamlit dashboard (section 27) — version simplifiée, pensée pour un lecteur non technique.
+"""Streamlit dashboard (section 27) — dark, card-based design, pensé pour un lecteur non technique.
 
 Run with: streamlit run dashboard/app.py
 """
@@ -29,6 +29,27 @@ from app.reporting.weekly import Verdict, WeeklyAnalytics, build_weekly_analytic
 
 st.set_page_config(page_title="Robot d'arbitrage crypto", layout="wide", page_icon="🤖")
 
+# --- Design tokens — validated dark palette (dataviz skill: references/palette.md) ---
+SURFACE = "#1a1a19"
+PAGE = "#0d0d0d"
+INK_PRIMARY = "#ffffff"
+INK_SECONDARY = "#c3c2b7"
+INK_MUTED = "#898781"
+GRIDLINE = "#2c2c2a"
+BASELINE = "#383835"
+BORDER = "rgba(255,255,255,0.10)"
+FONT_STACK = "system-ui, -apple-system, 'Segoe UI', sans-serif"
+
+SEQUENTIAL_BLUE = "#3987e5"
+
+# Categorical, fixed order — never re-mapped, so an exchange keeps its color everywhere.
+EXCHANGE_COLORS = {"binance": "#3987e5", "okx": "#d95926", "bybit": "#199e70"}
+
+STATUS_GOOD = "#0ca30c"
+STATUS_WARNING = "#fab219"
+STATUS_SERIOUS = "#ec835a"
+STATUS_CRITICAL = "#d03b3b"
+
 STRATEGY_LABELS = {
     "stablecoin": "Stablecoins (USDT/USDC/FDUSD)",
     "cross_exchange": "Entre plateformes (même crypto)",
@@ -45,6 +66,141 @@ EXECUTION_MODE_LABELS = {
 }
 
 ILLUSTRATIVE_CAPITAL_USD = 1_000
+
+st.markdown(
+    f"""
+    <style>
+    html, body, [class*="css"] {{ font-family: {FONT_STACK}; }}
+
+    /* Tighten Streamlit's default top padding for a denser, dashboard feel */
+    .block-container {{ padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px; }}
+
+    h1, h2, h3 {{ font-weight: 600 !important; letter-spacing: -0.01em; }}
+
+    hr {{ border-color: {GRIDLINE} !important; margin: 2rem 0 !important; }}
+
+    /* --- Stat card grid --- */
+    .stat-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 12px;
+        margin: 4px 0 8px 0;
+    }}
+    .stat-card {{
+        background: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 14px;
+        padding: 18px 20px;
+    }}
+    .stat-label {{
+        color: {INK_MUTED};
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 8px;
+    }}
+    .stat-value {{
+        color: {INK_PRIMARY};
+        font-size: 1.85rem;
+        font-weight: 600;
+        line-height: 1.1;
+    }}
+    .stat-sub {{
+        color: {INK_SECONDARY};
+        font-size: 0.82rem;
+        margin-top: 6px;
+    }}
+    .delta-good {{ color: {STATUS_GOOD}; font-weight: 600; }}
+    .delta-bad {{ color: {STATUS_CRITICAL}; font-weight: 600; }}
+
+    /* --- Hero status banner --- */
+    .hero-card {{
+        border-radius: 16px;
+        padding: 24px 28px;
+        margin: 8px 0 20px 0;
+        border: 1px solid {BORDER};
+    }}
+    .hero-card.hero-good {{ background: rgba(12,163,12,0.10); border-color: rgba(12,163,12,0.35); }}
+    .hero-card.hero-warn {{ background: rgba(250,178,25,0.08); border-color: rgba(250,178,25,0.30); }}
+    .hero-card.hero-neutral {{ background: {SURFACE}; }}
+    .hero-eyebrow {{
+        color: {INK_MUTED};
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 10px;
+    }}
+    .hero-figure {{
+        color: {INK_PRIMARY};
+        font-size: 2.6rem;
+        font-weight: 650;
+        line-height: 1.05;
+        margin-bottom: 6px;
+    }}
+    .hero-detail {{ color: {INK_SECONDARY}; font-size: 0.95rem; }}
+
+    /* --- Info card (spike, context) --- */
+    .info-card {{
+        background: {SURFACE};
+        border: 1px solid {BORDER};
+        border-radius: 12px;
+        padding: 14px 18px;
+        color: {INK_SECONDARY};
+        font-size: 0.9rem;
+        margin-bottom: 8px;
+    }}
+    .info-card b {{ color: {INK_PRIMARY}; }}
+
+    /* Badges */
+    .badge {{
+        display: inline-block;
+        padding: 2px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+    }}
+    .badge-go {{ background: rgba(12,163,12,0.18); color: #4ade80; }}
+    .badge-modify {{ background: rgba(250,178,25,0.18); color: #fbbf24; }}
+    .badge-nogo {{ background: rgba(208,59,59,0.18); color: #f87171; }}
+
+    section[data-testid="stSidebar"] {{ display: none; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def render_stat_cards(cards: list[dict]) -> None:
+    """cards: [{"label": str, "value": str, "sub": str | None}]"""
+    parts = ['<div class="stat-grid">']
+    for card in cards:
+        parts.append('<div class="stat-card">')
+        parts.append(f'<div class="stat-label">{card["label"]}</div>')
+        parts.append(f'<div class="stat-value">{card["value"]}</div>')
+        if card.get("sub"):
+            parts.append(f'<div class="stat-sub">{card["sub"]}</div>')
+        parts.append("</div>")
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def style_fig(fig: go.Figure, height: int = 380) -> go.Figure:
+    """Apply the dashboard's dark chart theme — surface, gridlines, font, hover style."""
+    fig.update_layout(
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        font=dict(family=FONT_STACK, color=INK_SECONDARY, size=12),
+        height=height,
+        margin=dict(l=10, r=10, t=36, b=10),
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(color=INK_SECONDARY)),
+        hoverlabel=dict(bgcolor=SURFACE, font_color=INK_PRIMARY, bordercolor=BORDER),
+        title=dict(font=dict(color=INK_PRIMARY, size=14)),
+    )
+    fig.update_xaxes(gridcolor=GRIDLINE, zerolinecolor=BASELINE, showline=False, linecolor=BASELINE, tickfont=dict(color=INK_MUTED))
+    fig.update_yaxes(gridcolor=GRIDLINE, zerolinecolor=BASELINE, showline=False, linecolor=BASELINE, tickfont=dict(color=INK_MUTED))
+    return fig
 
 
 def humanize_delta(detected_at: datetime) -> str:
@@ -268,46 +424,66 @@ def get_weekly_analytics_cached() -> WeeklyAnalytics:
 df = asyncio.run(fetch_opportunities())
 profitable = df[df["Gain net (%)"] > 0] if not df.empty else df
 
-st.title("🤖 Robot d'arbitrage crypto")
-st.caption("Le robot compare en continu les prix sur Binance, OKX et Bybit — aucun argent réel n'est engagé (simulation uniquement).")
+st.markdown(
+    '<div style="font-size:1.9rem;font-weight:650;">🤖 Robot d\'arbitrage crypto</div>'
+    f'<div style="color:{INK_SECONDARY};margin-top:2px;margin-bottom:18px;">'
+    "Le robot compare en continu les prix sur Binance, OKX et Bybit — aucun argent réel n'est engagé (simulation uniquement)."
+    "</div>",
+    unsafe_allow_html=True,
+)
 
-# --- Bandeau de statut, en langage simple ---
+# --- Bandeau de statut (hero card) ---
 if df.empty:
-    st.info("Le robot vient de démarrer, pas encore de données à afficher. Reviens dans quelques instants.")
+    st.markdown(
+        '<div class="hero-card hero-neutral"><div class="hero-eyebrow">Statut</div>'
+        '<div class="hero-figure">Démarrage…</div>'
+        '<div class="hero-detail">Le robot vient de démarrer, pas encore de données à afficher. Reviens dans quelques instants.</div></div>',
+        unsafe_allow_html=True,
+    )
 elif not profitable.empty:
     best = profitable.sort_values("Résultat sur 1000 $", ascending=False).iloc[0]
-    st.success(
-        f"✅ {len(profitable)} opportunité(s) actuellement rentable(s) après frais. "
-        f"La meilleure : **{best['Paire']}** ({best['Stratégie']}) — "
-        f"environ **{best['Résultat sur 1000 $']:+.2f} $** sur 1000 $ investis."
+    st.markdown(
+        '<div class="hero-card hero-good"><div class="hero-eyebrow">✅ Opportunité rentable maintenant</div>'
+        f'<div class="hero-figure">{best["Résultat sur 1000 $"]:+.2f} $ <span style="font-size:1.1rem;color:{INK_SECONDARY};font-weight:500;">sur 1000 $</span></div>'
+        f'<div class="hero-detail">{len(profitable)} opportunité(s) rentable(s) au total — la meilleure : '
+        f'<b>{best["Paire"]}</b> ({best["Stratégie"]})</div></div>',
+        unsafe_allow_html=True,
     )
 else:
-    st.warning(
-        "❌ Aucune opportunité rentable pour le moment — les écarts de prix repérés sont trop petits "
-        "pour couvrir les frais des plateformes. C'est normal et fréquent : le robot continue de "
-        "chercher 24h/24, il suffit qu'un écart plus grand apparaisse."
+    st.markdown(
+        '<div class="hero-card hero-warn"><div class="hero-eyebrow">❌ Rien de rentable pour l\'instant</div>'
+        '<div class="hero-figure" style="font-size:1.5rem;">Les écarts sont trop petits pour couvrir les frais</div>'
+        '<div class="hero-detail">C\'est normal et fréquent — le robot continue de chercher 24h/24, il suffit qu\'un écart plus grand apparaisse.</div></div>',
+        unsafe_allow_html=True,
     )
 
 # --- Dernier pic rentable (historique, pas l'instant présent) ---
 last_spike = get_last_profitable_spike_cached()
 if last_spike is None:
-    st.info("🎯 Aucun pic rentable détecté depuis le début de l'observation — c'est rare, pas un problème.")
+    st.markdown(
+        '<div class="info-card">🎯 Aucun pic rentable détecté depuis le début de l\'observation — c\'est rare, pas un problème.</div>',
+        unsafe_allow_html=True,
+    )
 else:
-    st.info(
-        f"🎯 Dernier pic rentable détecté : **{humanize_delta(last_spike['detected_at'])}** "
-        f"({last_spike['detected_at'].strftime('%d/%m %H:%M:%S')} UTC) — "
-        f"**{last_spike['symbol']}** ({last_spike['strategy']}), "
-        f"**+{last_spike['net_spread_pct']:.2f}% net**. "
-        f"{last_spike['count_24h']} pic(s) rentable(s) sur les dernières 24h."
+    st.markdown(
+        f'<div class="info-card">🎯 Dernier pic rentable détecté : <b>{humanize_delta(last_spike["detected_at"])}</b> '
+        f'({last_spike["detected_at"].strftime("%d/%m %H:%M:%S")} UTC) — '
+        f'<b>{last_spike["symbol"]}</b> ({last_spike["strategy"]}), '
+        f'<b>+{last_spike["net_spread_pct"]:.2f}% net</b>. '
+        f'{last_spike["count_24h"]} pic(s) rentable(s) sur les dernières 24h.</div>',
+        unsafe_allow_html=True,
     )
 
 # --- Chiffres clés ---
-col1, col2, col3 = st.columns(3)
-col1.metric("Opportunités repérées (récentes)", len(df))
-col2.metric("Dont rentables après frais", len(profitable) if not df.empty else 0)
-col3.metric(
-    "Meilleur résultat sur 1000 $",
-    f"{df['Résultat sur 1000 $'].max():+.2f} $" if not df.empty else "—",
+render_stat_cards(
+    [
+        {"label": "Opportunités repérées", "value": f"{len(df):,}".replace(",", " "), "sub": "récentes"},
+        {"label": "Dont rentables après frais", "value": f"{len(profitable) if not df.empty else 0:,}".replace(",", " ")},
+        {
+            "label": "Meilleur résultat sur 1000 $",
+            "value": f"{df['Résultat sur 1000 $'].max():+.2f} $" if not df.empty else "—",
+        },
+    ]
 )
 
 st.divider()
@@ -354,26 +530,30 @@ else:
                     high=candles["high"],
                     low=candles["low"],
                     close=candles["close"],
-                    increasing_line_color="#2ecc71",
-                    decreasing_line_color="#e74c3c",
+                    increasing_line_color=STATUS_GOOD,
+                    increasing_fillcolor=STATUS_GOOD,
+                    decreasing_line_color=STATUS_CRITICAL,
+                    decreasing_fillcolor=STATUS_CRITICAL,
                 )
             ]
         )
-        candle_fig.update_layout(
-            title=f"{chart_symbol} — {candle_exchange}",
-            xaxis_rangeslider_visible=False,
-            height=420,
-            margin=dict(l=10, r=10, t=40, b=10),
-        )
-        st.plotly_chart(candle_fig, use_container_width=True)
+        candle_fig.update_layout(title=f"{chart_symbol} — {candle_exchange}", xaxis_rangeslider_visible=False, showlegend=False)
+        st.plotly_chart(style_fig(candle_fig, height=420), use_container_width=True)
 
     st.caption("Comparaison du prix sur les 3 plateformes — un écart visible entre les lignes, c'est une opportunité d'arbitrage.")
     compare_fig = go.Figure()
     for exchange in exchanges_present:
         sub = price_df[price_df["exchange"] == exchange]
-        compare_fig.add_trace(go.Scatter(x=sub["recorded_at"], y=sub["mid"], mode="lines", name=exchange.capitalize()))
-    compare_fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(compare_fig, use_container_width=True)
+        compare_fig.add_trace(
+            go.Scatter(
+                x=sub["recorded_at"],
+                y=sub["mid"],
+                mode="lines",
+                name=exchange.capitalize(),
+                line=dict(color=EXCHANGE_COLORS.get(exchange, SEQUENTIAL_BLUE), width=2),
+            )
+        )
+    st.plotly_chart(style_fig(compare_fig, height=320), use_container_width=True)
 
 st.divider()
 
@@ -428,9 +608,12 @@ else:
         positive_share = (maker_results["Valeur espérée (%)"] > 0).mean() * 100
         avg_ev = maker_results["Valeur espérée sur 1000 $"].mean()
 
-        verdict_col1, verdict_col2 = st.columns(2)
-        verdict_col1.metric("Instants où c'était rentable (en espérance)", f"{positive_share:.1f} %")
-        verdict_col2.metric("Résultat moyen sur 1000 $ (en espérance)", f"{avg_ev:+.2f} $")
+        render_stat_cards(
+            [
+                {"label": "Instants rentables (en espérance)", "value": f"{positive_share:.1f} %"},
+                {"label": "Résultat moyen sur 1000 $ (en espérance)", "value": f"{avg_ev:+.2f} $"},
+            ]
+        )
 
         if positive_share > 50:
             st.success("Sous ces hypothèses, les ordres maker rendraient cette stratégie rentable plus souvent qu'improbable.")
@@ -445,10 +628,20 @@ else:
         top_pairs = (
             maker_results.groupby("Paire")["Valeur espérée sur 1000 $"]
             .mean()
-            .sort_values(ascending=False)
-            .head(10)
+            .sort_values(ascending=True)
+            .tail(10)
         )
-        st.bar_chart(top_pairs)
+        pairs_fig = go.Figure(
+            go.Bar(
+                x=top_pairs.values,
+                y=top_pairs.index,
+                orientation="h",
+                marker_color=[SEQUENTIAL_BLUE if v >= 0 else STATUS_CRITICAL for v in top_pairs.values],
+                marker_line_width=0,
+            )
+        )
+        pairs_fig.update_xaxes(title="Valeur espérée sur 1000 $")
+        st.plotly_chart(style_fig(pairs_fig, height=max(220, 34 * len(top_pairs))), use_container_width=True)
 
 st.divider()
 
@@ -476,11 +669,11 @@ else:
     def highlight_profit(row: pd.Series) -> list[str]:
         net = row["Gain net (%)"]
         if pd.isna(net):
-            color = "background-color: #333333"
+            color = f"background-color: {SURFACE}"
         elif net > 0:
-            color = "background-color: #1e4620"
+            color = "background-color: rgba(12,163,12,0.12)"
         else:
-            color = "background-color: #4a1e1e"
+            color = "background-color: rgba(208,59,59,0.10)"
         return [color] * len(row)
 
     st.dataframe(
@@ -504,7 +697,9 @@ st.subheader("Combien d'opportunités par stratégie ?")
 if df.empty:
     st.info("Rien à comparer pour l'instant.")
 else:
-    st.bar_chart(df["Stratégie"].value_counts())
+    counts = df["Stratégie"].value_counts().sort_values(ascending=True)
+    strategy_fig = go.Figure(go.Bar(x=counts.values, y=counts.index, orientation="h", marker_color=SEQUENTIAL_BLUE, marker_line_width=0))
+    st.plotly_chart(style_fig(strategy_fig, height=max(200, 46 * len(counts))), use_container_width=True)
 
 st.divider()
 
@@ -512,11 +707,17 @@ st.divider()
 st.subheader("📅 Résumé du jour (24 dernières heures)")
 daily = get_daily_summary_cached()
 
-day_col1, day_col2, day_col3, day_col4 = st.columns(4)
-day_col1.metric("Opportunités repérées", daily.detected)
-day_col2.metric("Dont rentables (net > 0)", daily.net_positive)
-day_col3.metric("Trades simulés", daily.paper_trades)
-day_col4.metric("P&L simulé cumulé", f"{daily.simulated_net_pnl_usd:+.2f} $")
+render_stat_cards(
+    [
+        {"label": "Opportunités repérées", "value": f"{daily.detected:,}".replace(",", " ")},
+        {"label": "Dont rentables (net > 0)", "value": f"{daily.net_positive:,}".replace(",", " ")},
+        {"label": "Trades simulés", "value": f"{daily.paper_trades:,}".replace(",", " ")},
+        {
+            "label": "P&L simulé cumulé",
+            "value": f"{daily.simulated_net_pnl_usd:+.2f} $",
+        },
+    ]
+)
 
 if daily.best_strategy:
     st.caption(
@@ -531,11 +732,14 @@ st.divider()
 st.subheader("📊 Bilan sur 7 jours — quelle stratégie garder ?")
 weekly = get_weekly_analytics_cached()
 
-week_col1, week_col2, week_col3, week_col4 = st.columns(4)
-week_col1.metric("Opportunités (7j)", weekly.total_opportunities)
-week_col2.metric("Trades exécutés (simulés)", weekly.executed_simulations)
-week_col3.metric("Occasions manquées", weekly.missed_opportunities)
-week_col4.metric("P&L simulé (7j)", f"{weekly.net_simulated_pnl_usd:+.2f} $")
+render_stat_cards(
+    [
+        {"label": "Opportunités (7j)", "value": f"{weekly.total_opportunities:,}".replace(",", " ")},
+        {"label": "Trades exécutés (simulés)", "value": f"{weekly.executed_simulations:,}".replace(",", " ")},
+        {"label": "Occasions manquées", "value": f"{weekly.missed_opportunities:,}".replace(",", " ")},
+        {"label": "P&L simulé (7j)", "value": f"{weekly.net_simulated_pnl_usd:+.2f} $"},
+    ]
+)
 
 context_bits = []
 if weekly.best_asset:
@@ -560,24 +764,44 @@ with st.expander("Comment lire le verdict par stratégie ?"):
 if not weekly.by_strategy:
     st.info("Pas encore assez de données sur 7 jours pour un verdict.")
 else:
-    verdict_badges = {Verdict.GO: "🟢 GO", Verdict.MODIFY: "🟠 MODIFY", Verdict.NO_GO: "🔴 NO-GO"}
-    verdict_df = pd.DataFrame(
-        [
-            {
-                "Stratégie": STRATEGY_LABELS.get(s.strategy, s.strategy),
-                "Opportunités": s.total_opportunities,
-                "Rentables (%)": s.net_positive_rate * 100,
-                "Rendement net moyen (%)": s.avg_net_return_pct,
-                "Rendement net médian (%)": s.median_net_return_pct,
-                "Verdict": verdict_badges[s.verdict],
-            }
-            for s in sorted(weekly.by_strategy, key=lambda s: s.avg_net_return_pct, reverse=True)
-        ]
-    )
-    st.dataframe(
-        verdict_df.style.format({"Rentables (%)": "{:.2f} %", "Rendement net moyen (%)": "{:.4f} %", "Rendement net médian (%)": "{:.4f} %"}),
-        use_container_width=True,
-        hide_index=True,
-    )
+    verdict_badge_html = {
+        Verdict.GO: '<span class="badge badge-go">🟢 GO</span>',
+        Verdict.MODIFY: '<span class="badge badge-modify">🟠 MODIFY</span>',
+        Verdict.NO_GO: '<span class="badge badge-nogo">🔴 NO-GO</span>',
+    }
+    ranked = sorted(weekly.by_strategy, key=lambda s: s.avg_net_return_pct, reverse=True)
 
+    rows_html = []
+    for s in ranked:
+        rows_html.append(
+            "<tr>"
+            f'<td style="padding:10px 14px;color:{INK_PRIMARY};">{STRATEGY_LABELS.get(s.strategy, s.strategy)}</td>'
+            f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{s.total_opportunities:,}</td>'
+            f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{s.net_positive_rate * 100:.2f} %</td>'
+            f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{s.avg_net_return_pct:.4f} %</td>'
+            f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{s.median_net_return_pct:.4f} %</td>'
+            f'<td style="padding:10px 14px;text-align:center;">{verdict_badge_html[s.verdict]}</td>'
+            "</tr>"
+        )
+
+    table_html = f"""
+    <div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;overflow:hidden;">
+    <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+    <thead>
+        <tr style="border-bottom:1px solid {GRIDLINE};">
+            <th style="padding:10px 14px;text-align:left;color:{INK_MUTED};font-weight:600;">Stratégie</th>
+            <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Opportunités</th>
+            <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Rentables</th>
+            <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Rendement moyen</th>
+            <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Rendement médian</th>
+            <th style="padding:10px 14px;text-align:center;color:{INK_MUTED};font-weight:600;">Verdict</th>
+        </tr>
+    </thead>
+    <tbody>{"".join(rows_html)}</tbody>
+    </table>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
+
+st.divider()
 st.caption(f"Plateformes surveillées : {', '.join(e.capitalize() for e in PRIORITY_EXCHANGES)}")
