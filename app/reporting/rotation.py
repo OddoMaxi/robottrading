@@ -8,7 +8,7 @@ only opportunities whose net expectation stays positive after costs?
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.constants import HoldingTimeCategory
@@ -26,6 +26,8 @@ class RotationReport:
     total_capital_traded_usd: float
     capital_rotation_rate: float  # total capital traded / base capital — spec section 6
     completed_trades: int
+    win_count: int
+    loss_count: int
     net_pnl_usd: float
     avg_net_profit_per_trade_usd: float
     avg_holding_time_seconds: float | None
@@ -52,12 +54,16 @@ async def build_rotation_report(
     now = now or datetime.now(UTC).replace(tzinfo=None)
     period_start = now - timedelta(hours=hours)
 
+    win_case = case((SimulatedTradeRecord.net_profit_usd > 0, 1), else_=0)
+    loss_case = case((SimulatedTradeRecord.net_profit_usd < 0, 1), else_=0)
     query = (
         select(
             func.count(),
             func.coalesce(func.sum(SimulatedTradeRecord.capital_usd), 0),
             func.coalesce(func.sum(SimulatedTradeRecord.net_profit_usd), 0),
             func.avg(OpportunityRecord.holding_period_seconds),
+            func.coalesce(func.sum(win_case), 0),
+            func.coalesce(func.sum(loss_case), 0),
         )
         .select_from(SimulatedTradeRecord)
         .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
@@ -72,7 +78,7 @@ async def build_rotation_report(
     elif mode == "fast":
         query = query.where(OpportunityRecord.holding_time_category != HoldingTimeCategory.CARRY)
 
-    count, total_capital, net_pnl, avg_holding = (await session.execute(query)).first()
+    count, total_capital, net_pnl, avg_holding, wins, losses = (await session.execute(query)).first()
 
     total_capital = float(total_capital)
     net_pnl = float(net_pnl)
@@ -84,6 +90,8 @@ async def build_rotation_report(
         total_capital_traded_usd=total_capital,
         capital_rotation_rate=(total_capital / base_capital_usd) if base_capital_usd else 0.0,
         completed_trades=count,
+        win_count=int(wins),
+        loss_count=int(losses),
         net_pnl_usd=net_pnl,
         avg_net_profit_per_trade_usd=(net_pnl / count) if count else 0.0,
         avg_holding_time_seconds=float(avg_holding) if avg_holding is not None else None,

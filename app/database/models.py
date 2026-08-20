@@ -85,9 +85,17 @@ class PriceSnapshot(Base):
     """
 
     __tablename__ = "price_snapshots"
-    # Every query filters by symbol (+ optionally recorded_at) — never by
-    # exchange alone — so the index leads with symbol, not exchange.
-    __table_args__ = (Index("ix_price_snapshots_symbol_recorded_at", "symbol", "recorded_at"),)
+    __table_args__ = (
+        # Every symbol-scoped query filters by symbol (+ optionally
+        # recorded_at) — never by exchange alone — so this one leads with symbol.
+        Index("ix_price_snapshots_symbol_recorded_at", "symbol", "recorded_at"),
+        # Simple Mode's "is this exchange connected?" check is the one query
+        # that filters by exchange alone (latest tick per exchange) — without
+        # this, that query would fall back to the symbol-led index (useless
+        # here) and scan the whole table, the exact hang this app already got
+        # burned by once at ~1M rows.
+        Index("ix_price_snapshots_exchange_recorded_at", "exchange", "recorded_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     exchange: Mapped[str]

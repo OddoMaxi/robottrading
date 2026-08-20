@@ -1,0 +1,356 @@
+"""Data-fetching layer shared by Simple and Expert mode.
+
+Every function here opens its own short-lived async engine — Streamlit
+calls asyncio.run() fresh on every rerun, giving each run its own event
+loop, and asyncpg connections can't be reused across event loops (unlike
+the FastAPI app's long-lived engine).
+"""
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+
+import pandas as pd
+import streamlit as st
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.config.settings import get_settings
+from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
+from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.holding_time_performance import HoldingTimeBucketStats, build_holding_time_performance
+from app.reporting.rotation import RotationReport, build_rotation_report
+from app.reporting.simple_summary import (
+    EquityPoint,
+    RobotStatus,
+    TradeRow,
+    build_equity_curve,
+    build_portfolio_capital,
+    build_robot_status,
+    list_recent_trades,
+)
+from app.reporting.weekly import WeeklyAnalytics, build_weekly_analytics
+from dashboard.theme import EXECUTION_MODE_LABELS, STRATEGY_LABELS, ILLUSTRATIVE_CAPITAL_USD, humanize_delta
+
+# Reference portfolio for every single-portfolio KPI (Simple Mode's capital
+# card, the Fast Rotation section, etc.) — matches the Fast-Rotation spec's
+# own worked examples (section 6-9, 58) and Simple Mode's own mockup, both
+# of which use $5,000.
+ROTATION_REFERENCE_PORTFOLIO = "5K"
+
+# price_snapshots grows fast (event-driven detection writes a tick almost
+# every scan). Charting only needs enough points to fill 1-15min candles —
+# capping the row count bounds worst-case query time, pandas memory, and
+# resample cost regardless of how large the table gets or how long a
+# lookback window is requested.
+MAX_PRICE_HISTORY_ROWS = 20_000
+MAX_BID_ASK_HISTORY_ROWS = 150_000
+
+
+async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OpportunityRecord).order_by(OpportunityRecord.detected_at.desc()).limit(limit)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+    result_df = pd.DataFrame(
+        [
+            {
+                "Stratégie": STRATEGY_LABELS.get(r.strategy, r.strategy),
+                "_strategy": r.strategy,
+                "Paire": r.symbol,
+                "Gain brut (%)": float(r.gross_spread_pct),
+                "Seuil de rentabilité (%)": float(r.break_even_pct) if r.break_even_pct is not None else None,
+                "Gain net (%)": float(r.net_spread_pct) if r.net_spread_pct is not None else None,
+                "Résultat sur 1000 $": (float(r.net_spread_pct) / 100 * ILLUSTRATIVE_CAPITAL_USD)
+                if r.net_spread_pct is not None
+                else None,
+                "Meilleure exécution": EXECUTION_MODE_LABELS.get(r.execution_mode, "—"),
+                "Proba. exécution": float(r.execution_fill_probability) * 100 if r.execution_fill_probability is not None else None,
+                "Détecté": humanize_delta(r.detected_at),
+                "_detected_at": r.detected_at,
+                "_capital_usd": float(r.capital_usd) if r.capital_usd is not None else None,
+                "_expected_profit_usd": float(r.expected_profit_usd) if r.expected_profit_usd is not None else None,
+                "_gross_spread_pct": float(r.gross_spread_pct),
+                "_break_even_pct": float(r.break_even_pct) if r.break_even_pct is not None else None,
+                "_holding_period_seconds": float(r.holding_period_seconds) if r.holding_period_seconds is not None else None,
+                "_execution_fill_probability": float(r.execution_fill_probability) if r.execution_fill_probability is not None else None,
+                "_classification": r.classification,
+                "_legs": r.legs,
+            }
+            for r in rows
+        ]
+    )
+    # Some columns (break-even, execution probability) are only computed for
+    # a subset of strategies — if a display window happens to contain none
+    # of those rows, pandas infers the column as `object` dtype from an
+    # all-None list instead of float64, and Styler's numeric format string
+    # then breaks on the raw `None` (unlike NaN, which it handles fine).
+    # Forcing numeric dtype here converts None -> NaN regardless.
+    if not result_df.empty:
+        numeric_columns = ["Gain brut (%)", "Seuil de rentabilité (%)", "Gain net (%)", "Résultat sur 1000 $", "Proba. exécution"]
+        result_df[numeric_columns] = result_df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    return result_df
+
+
+@st.cache_data(ttl=10)
+def get_opportunities_cached(limit: int = 300) -> pd.DataFrame:
+    return asyncio.run(fetch_opportunities(limit))
+
+
+async def fetch_last_profitable_spike() -> dict | None:
+    """Most recent opportunity that was genuinely profitable after fees, plus how often that's happened lately.
+
+    Queried directly (not from the already-fetched recent-opportunities
+    table) because that table is capped at a few hundred rows and, since
+    detection went event-driven, that can now be just the last few seconds
+    — too short a window to find a rare profitable spike in.
+    """
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(OpportunityRecord)
+                .where(OpportunityRecord.net_spread_pct > 0)
+                .order_by(OpportunityRecord.detected_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+
+            cutoff = (datetime.now(UTC) - timedelta(hours=24)).replace(tzinfo=None)
+            count_result = await session.execute(
+                select(func.count()).where(OpportunityRecord.net_spread_pct > 0, OpportunityRecord.detected_at >= cutoff)
+            )
+            count_24h = count_result.scalar()
+    finally:
+        await engine.dispose()
+    return {
+        "symbol": row.symbol,
+        "strategy": STRATEGY_LABELS.get(row.strategy, row.strategy),
+        "net_spread_pct": float(row.net_spread_pct),
+        "detected_at": row.detected_at,
+        "count_24h": count_24h,
+    }
+
+
+@st.cache_data(ttl=15)
+def get_last_profitable_spike_cached() -> dict | None:
+    return asyncio.run(fetch_last_profitable_spike())
+
+
+async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        # recorded_at is stored as a naive UTC timestamp (server_default=func.now(),
+        # no timezone=True) — strip tzinfo so asyncpg isn't asked to compare
+        # a naive column against an aware bind parameter.
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PriceSnapshot)
+                .where(PriceSnapshot.symbol == symbol, PriceSnapshot.recorded_at >= cutoff)
+                .order_by(PriceSnapshot.recorded_at.desc())
+                .limit(MAX_PRICE_HISTORY_ROWS)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+    history_df = pd.DataFrame(
+        [
+            {
+                "exchange": r.exchange,
+                "recorded_at": r.recorded_at,
+                "mid": (float(r.bid) + float(r.ask)) / 2,
+            }
+            for r in rows
+        ]
+    )
+    return history_df.sort_values("recorded_at") if not history_df.empty else history_df
+
+
+async def fetch_bid_ask_history(symbols: list[str], hours: float = 2.0) -> pd.DataFrame:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(PriceSnapshot)
+                .where(PriceSnapshot.symbol.in_(symbols), PriceSnapshot.recorded_at >= cutoff)
+                .order_by(PriceSnapshot.recorded_at.desc())
+                .limit(MAX_BID_ASK_HISTORY_ROWS)
+            )
+            rows = result.scalars().all()
+    finally:
+        await engine.dispose()
+    bid_ask_df = pd.DataFrame(
+        [
+            {"symbol": r.symbol, "exchange": r.exchange, "recorded_at": r.recorded_at, "bid": float(r.bid), "ask": float(r.ask)}
+            for r in rows
+        ]
+    )
+    return bid_ask_df.sort_values("recorded_at") if not bid_ask_df.empty else bid_ask_df
+
+
+@st.cache_data(ttl=30)
+def get_bid_ask_history_cached(symbols: tuple[str, ...], hours: float) -> pd.DataFrame:
+    return asyncio.run(fetch_bid_ask_history(list(symbols), hours))
+
+
+async def fetch_daily_summary() -> DailySummary:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_daily_summary(session)
+    finally:
+        await engine.dispose()
+
+
+async def fetch_weekly_analytics() -> WeeklyAnalytics:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_weekly_analytics(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_daily_summary_cached() -> DailySummary:
+    return asyncio.run(fetch_daily_summary())
+
+
+@st.cache_data(ttl=300)
+def get_weekly_analytics_cached() -> WeeklyAnalytics:
+    return asyncio.run(fetch_weekly_analytics())
+
+
+async def fetch_rotation_report(mode: str | None, hours: float = 24.0) -> RotationReport | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(VirtualPortfolioRecord).where(VirtualPortfolioRecord.name == ROTATION_REFERENCE_PORTFOLIO)
+            )
+            portfolio = result.scalar_one_or_none()
+            if portfolio is None:
+                return None
+            return await build_rotation_report(
+                session, portfolio.id, portfolio.name, float(portfolio.initial_capital_usd), mode=mode, hours=hours
+            )
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_rotation_report_cached(mode: str | None, hours: float = 24.0) -> RotationReport | None:
+    return asyncio.run(fetch_rotation_report(mode, hours))
+
+
+async def fetch_holding_time_performance(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(VirtualPortfolioRecord).where(VirtualPortfolioRecord.name == ROTATION_REFERENCE_PORTFOLIO)
+            )
+            portfolio = result.scalar_one_or_none()
+            if portfolio is None:
+                return []
+            return await build_holding_time_performance(session, portfolio.id, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_holding_time_performance_cached(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
+    return asyncio.run(fetch_holding_time_performance(hours))
+
+
+# --- Simple Mode data ---
+
+
+async def _get_reference_portfolio(session) -> VirtualPortfolioRecord | None:
+    result = await session.execute(select(VirtualPortfolioRecord).where(VirtualPortfolioRecord.name == ROTATION_REFERENCE_PORTFOLIO))
+    return result.scalar_one_or_none()
+
+
+async def fetch_robot_status() -> RobotStatus:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_robot_status(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=10)
+def get_robot_status_cached() -> RobotStatus:
+    return asyncio.run(fetch_robot_status())
+
+
+async def fetch_simple_capital() -> float | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            return await build_portfolio_capital(session, portfolio.id, float(portfolio.initial_capital_usd))
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15)
+def get_simple_capital_cached() -> float | None:
+    return asyncio.run(fetch_simple_capital())
+
+
+async def fetch_equity_curve(hours: float = 24.0) -> list[EquityPoint]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return []
+            return await build_equity_curve(session, portfolio.id, float(portfolio.initial_capital_usd), hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30)
+def get_equity_curve_cached(hours: float = 24.0) -> list[EquityPoint]:
+    return asyncio.run(fetch_equity_curve(hours))
+
+
+async def fetch_recent_trades(limit: int = 50) -> list[TradeRow]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return []
+            return await list_recent_trades(session, portfolio.id, limit=limit)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15)
+def get_recent_trades_cached(limit: int = 50) -> list[TradeRow]:
+    return asyncio.run(fetch_recent_trades(limit))
