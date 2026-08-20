@@ -38,6 +38,7 @@ class BybitCollector(MarketDataCollector):
             for i in range(0, len(topics), MAX_ARGS_PER_SUBSCRIBE):
                 batch = topics[i : i + MAX_ARGS_PER_SUBSCRIBE]
                 await ws.send(json.dumps({"op": "subscribe", "args": batch}))
+                await asyncio.sleep(0.1)  # avoid tripping Bybit's WS op rate limit
             logger.info("bybit collector connected (%d symbols)", len(self.symbols))
 
             keepalive = asyncio.create_task(self._keepalive(ws))
