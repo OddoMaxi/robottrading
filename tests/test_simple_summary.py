@@ -1,6 +1,9 @@
+from datetime import datetime, timedelta
+
 from app.reporting.simple_summary import (
     RobotHealth,
     RobotStatus,
+    _reconstruct_open_positions,
     build_explainer_narrative,
     classify_robot_health,
     compute_max_drawdown_usd,
@@ -80,3 +83,66 @@ def test_explainer_narrative_matches_spec_example_shape():
 
 def test_explainer_narrative_handles_zero_observed():
     assert "pas encore" in build_explainer_narrative(observed=0, valid=0, executed=0, winning=0, net_pnl_usd=0.0).lower()
+
+
+# --- Urgent audit fix: the dashboard's own reconstruction must respect the
+# same invariant as the live engine (VirtualPortfolio.lock_capital) — never
+# imply negative available capital or >100% utilization. ---
+
+NOW = datetime(2026, 8, 20, 12, 0, 0)
+
+
+def _row(capital_usd, net_profit_usd, hours_ago, strategy="basis", symbol="BTC/USDT", exchange="binance", holding_days=35):
+    return (
+        capital_usd,
+        net_profit_usd,
+        NOW - timedelta(hours=hours_ago),
+        strategy,
+        symbol,
+        [{"exchange": exchange, "side": "buy", "market": "spot"}],
+        holding_days * 86400.0,
+    )
+
+
+def test_reconstruct_keeps_a_position_that_fits_within_capital():
+    rows = [_row(1000.0, 3.0, hours_ago=1)]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
+    assert len(kept) == 1
+
+
+def test_reconstruct_excludes_a_position_sized_over_total_capital():
+    """The exact bug found in production: a $5,000 basis position sized
+    under since-superseded risk rules, reconstructed against a $500
+    portfolio — must be excluded, not shown as negative available capital."""
+    rows = [_row(5000.0, 15.0, hours_ago=1, symbol="BTC/USDT")]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=500.0, now=NOW)
+    assert kept == []
+
+
+def test_reconstruct_never_lets_cumulative_engaged_exceed_total_capital():
+    rows = [
+        _row(3000.0, 5.0, hours_ago=3, symbol="BTC/USDT"),
+        _row(3000.0, 5.0, hours_ago=2, symbol="ETH/USDT"),  # together with BTC this would be 6,005 > 5,000
+    ]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
+    assert len(kept) == 1
+    assert kept[0][4] == "BTC/USDT"  # the earlier one wins, later one excluded
+    engaged = sum(c + p for c, p, *_ in [(k[0], k[1]) for k in kept])
+    assert engaged <= 5000.0
+
+
+def test_reconstruct_deduplicates_restart_amnesia_duplicates_keeping_the_earliest():
+    rows = [
+        _row(1000.0, 3.0, hours_ago=5, symbol="BTC/USDT"),
+        _row(1000.0, 3.0, hours_ago=3, symbol="BTC/USDT"),  # same key, opened "again" — restart bug artifact
+        _row(1000.0, 3.0, hours_ago=1, symbol="BTC/USDT"),
+    ]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
+    assert len(kept) == 1
+    assert kept[0][2] == NOW - timedelta(hours=5)  # the earliest executed_at
+
+
+def test_reconstruct_excludes_already_closed_positions():
+    rows = [_row(1000.0, 3.0, hours_ago=1000, holding_days=1)]  # opened ~41 days ago, 1-day hold — long closed
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
+    assert kept == []

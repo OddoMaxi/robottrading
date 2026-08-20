@@ -103,6 +103,70 @@ class CapitalUtilization:
     open_position_count: int
 
 
+async def _fetch_open_position_rows(session: AsyncSession, portfolio_id: int, now: datetime) -> list[tuple]:
+    """Shared by build_capital_utilization and list_open_positions —
+    reconstructs "still open" positions from the trade ledger the same
+    invariant-respecting way app.simulation.state_recovery rebuilds the
+    live engine's state (urgent audit fix, sections 1-2, 9): walked
+    oldest-first, deduplicated per (strategy, exchange, symbol) key
+    (earliest wins — a later overlapping trade on the same key is a
+    restart-amnesia artifact, not an independent position), and a position
+    is only counted if it actually fits within the portfolio's own equity —
+    a stale position sized under since-superseded risk rules must never
+    make this show negative available capital or >100% utilization.
+    Without this, the dashboard's own reconstruction diverged from the
+    engine's (which now enforces the invariant via VirtualPortfolio.lock_capital)
+    and kept showing impossible negative available capital.
+    """
+    lookback_cutoff = now - timedelta(days=120)
+    rows = (
+        await session.execute(
+            select(
+                SimulatedTradeRecord.capital_usd,
+                SimulatedTradeRecord.net_profit_usd,
+                SimulatedTradeRecord.executed_at,
+                OpportunityRecord.strategy,
+                OpportunityRecord.symbol,
+                OpportunityRecord.legs,
+                OpportunityRecord.holding_period_seconds,
+            )
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                OpportunityRecord.holding_period_seconds.is_not(None),
+                SimulatedTradeRecord.executed_at >= lookback_cutoff,
+            )
+            .order_by(SimulatedTradeRecord.executed_at.asc())
+        )
+    ).all()
+    return rows
+
+
+def _reconstruct_open_positions(rows: list[tuple], total_capital_usd: float, now: datetime) -> list[tuple]:
+    """Returns [(capital_usd, net_profit_usd, executed_at, strategy, symbol)]
+    for positions that are both still open and safely fit within equity."""
+    seen_keys: set[str] = set()
+    engaged_so_far = 0.0
+    kept: list[tuple] = []
+    for capital_usd, net_profit_usd, executed_at, strategy, symbol, legs, holding_period_seconds in rows:
+        exchange = legs[0].get("exchange") if legs else None
+        key = f"{strategy}:{exchange}:{symbol}"
+        if key in seen_keys:
+            continue  # a later trade on an already-open key — restart-amnesia duplicate
+        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
+        if closes_at <= now:
+            continue
+        seen_keys.add(key)
+        amount = float(capital_usd) + float(net_profit_usd)
+        if engaged_so_far + amount > total_capital_usd + 1e-6:
+            continue  # would violate available_capital >= 0 / utilization <= 100% — exclude, matching the engine's own guard
+        engaged_so_far += amount
+        kept.append((capital_usd, net_profit_usd, executed_at, strategy, symbol, closes_at))
+    return kept
+
+
 async def build_capital_utilization(
     session: AsyncSession, portfolio_id: int, total_capital_usd: float, now: datetime | None = None
 ) -> CapitalUtilization:
@@ -112,45 +176,17 @@ async def build_capital_utilization(
     (cumulative volume / starting capital, app/reporting/rotation.py). The
     spec is explicit these must be two separate KPIs, not one computed
     from the other.
-
-    "Still open" is reconstructed from the trade ledger — capital plus its
-    booked profit locks until executed_at + holding_period_seconds,
-    matching PaperTrader.simulate's own lock semantics — rather than a new
-    write path, since the engine's live lock state is in-memory only.
     """
     now = now or datetime.now(UTC).replace(tzinfo=None)
-    # Bounded to a window comfortably wider than the longest real holding
-    # period (Basis/Funding run at most a few months) so this stays a cheap,
-    # indexed portfolio_id scan rather than reading the whole ledger.
-    lookback_cutoff = now - timedelta(days=120)
+    rows = await _fetch_open_position_rows(session, portfolio_id, now)
+    kept = _reconstruct_open_positions(rows, total_capital_usd, now)
 
-    rows = (
-        await session.execute(
-            select(SimulatedTradeRecord.capital_usd, SimulatedTradeRecord.net_profit_usd, SimulatedTradeRecord.executed_at, OpportunityRecord.holding_period_seconds)
-            .select_from(SimulatedTradeRecord)
-            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
-            .where(
-                SimulatedTradeRecord.portfolio_id == portfolio_id,
-                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
-                OpportunityRecord.holding_period_seconds.is_not(None),
-                SimulatedTradeRecord.executed_at >= lookback_cutoff,
-            )
-        )
-    ).all()
-
-    engaged = 0.0
-    open_count = 0
-    for capital_usd, net_profit_usd, executed_at, holding_period_seconds in rows:
-        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
-        if closes_at > now:
-            engaged += float(capital_usd) + float(net_profit_usd)
-            open_count += 1
-
+    engaged = sum(float(capital_usd) + float(net_profit_usd) for capital_usd, net_profit_usd, _, _, _, _ in kept)
     return CapitalUtilization(
         engaged_usd=engaged,
         total_capital_usd=total_capital_usd,
         utilization_pct=(engaged / total_capital_usd * 100) if total_capital_usd else 0.0,
-        open_position_count=open_count,
+        open_position_count=len(kept),
     )
 
 
@@ -164,49 +200,28 @@ class OpenPosition:
     closes_at: datetime
 
 
-async def list_open_positions(session: AsyncSession, portfolio_id: int, now: datetime | None = None) -> list[OpenPosition]:
+async def list_open_positions(
+    session: AsyncSession, portfolio_id: int, total_capital_usd: float, now: datetime | None = None
+) -> list[OpenPosition]:
     """Continuous Execution spec, section 47 — "Positions en cours" for
-    Simple Mode. Same "still open" reconstruction as build_capital_utilization,
-    just returned per-position instead of aggregated."""
+    Simple Mode. Same invariant-respecting reconstruction as
+    build_capital_utilization (see _reconstruct_open_positions), so this
+    list and the utilization % it implies always agree with each other."""
     now = now or datetime.now(UTC).replace(tzinfo=None)
-    lookback_cutoff = now - timedelta(days=120)
+    rows = await _fetch_open_position_rows(session, portfolio_id, now)
+    kept = _reconstruct_open_positions(rows, total_capital_usd, now)
 
-    rows = (
-        await session.execute(
-            select(
-                OpportunityRecord.symbol,
-                OpportunityRecord.strategy,
-                SimulatedTradeRecord.capital_usd,
-                SimulatedTradeRecord.net_profit_usd,
-                SimulatedTradeRecord.executed_at,
-                OpportunityRecord.holding_period_seconds,
-            )
-            .select_from(SimulatedTradeRecord)
-            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
-            .where(
-                SimulatedTradeRecord.portfolio_id == portfolio_id,
-                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
-                OpportunityRecord.holding_period_seconds.is_not(None),
-                SimulatedTradeRecord.executed_at >= lookback_cutoff,
-            )
+    return [
+        OpenPosition(
+            symbol=symbol,
+            strategy=strategy,
+            capital_usd=float(capital_usd),
+            net_profit_usd=float(net_profit_usd),
+            opened_at=executed_at,
+            closes_at=closes_at,
         )
-    ).all()
-
-    positions = []
-    for symbol, strategy, capital_usd, net_profit_usd, executed_at, holding_period_seconds in rows:
-        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
-        if closes_at > now:
-            positions.append(
-                OpenPosition(
-                    symbol=symbol,
-                    strategy=strategy,
-                    capital_usd=float(capital_usd),
-                    net_profit_usd=float(net_profit_usd),
-                    opened_at=executed_at,
-                    closes_at=closes_at,
-                )
-            )
-    return positions
+        for capital_usd, net_profit_usd, executed_at, strategy, symbol, closes_at in kept
+    ]
 
 
 @dataclass(slots=True)

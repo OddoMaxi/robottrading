@@ -387,7 +387,8 @@ async def fetch_open_positions() -> list[OpenPosition]:
             portfolio = await _get_reference_portfolio(session)
             if portfolio is None:
                 return []
-            return await list_open_positions(session, portfolio.id)
+            total_capital = await build_portfolio_capital(session, portfolio.id, float(portfolio.initial_capital_usd))
+            return await list_open_positions(session, portfolio.id, total_capital)
     finally:
         await engine.dispose()
 
