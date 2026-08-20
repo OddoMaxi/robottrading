@@ -69,13 +69,18 @@ DELIVERY_FUTURES_ASSETS = ["BTC", "ETH"]
 
 # Section 6 — Engine C: Triangular Arbitrage
 # Extra symbols (beyond X/USDT) that must be streamed for triangular loops to close.
-TRIANGULAR_CROSS_PAIRS = ["ETH/BTC", "SOL/BTC", "BNB/BTC", "XRP/BTC"]
+# FDUSD/USDC and FDUSD/USDT verified live on Binance (2026-08-20) — FDUSD is
+# Binance-only (confirmed absent from OKX/Bybit again on the same date), so
+# it can't feed the cross-exchange Stablecoin engine, but a same-exchange
+# triangular loop only needs it listed on the one exchange it runs on.
+TRIANGULAR_CROSS_PAIRS = ["ETH/BTC", "SOL/BTC", "BNB/BTC", "XRP/BTC", "FDUSD/USDC", "FDUSD/USDT"]
 # Each path is (base, leg1_asset, leg2_asset): base -> leg1 -> leg2 -> base.
 TRIANGULAR_PATHS: list[tuple[str, str, str]] = [
     ("USDT", "BTC", "ETH"),
     ("USDT", "BTC", "SOL"),
     ("USDT", "BTC", "BNB"),
     ("USDT", "BTC", "XRP"),
+    ("USDT", "USDC", "FDUSD"),  # pure stablecoin triangle: USDT -> USDC -> FDUSD -> USDT
 ]
 
 # Representative capital used to price a freshly detected opportunity before

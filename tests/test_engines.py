@@ -77,3 +77,22 @@ async def test_triangular_no_opportunity_when_consistent():
 
     engine = TriangularArbitrageEngine(exchange="binance", store=store, capital_usd=1_000)
     assert await engine.detect() == []
+
+
+@pytest.mark.asyncio
+async def test_triangular_fdusd_stablecoin_loop():
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "USDC/USDT", bid=0.9998, ask=0.9999, qty=100_000))
+    store.update_quote(make_quote("binance", "FDUSD/USDC", bid=0.9997, ask=0.9998, qty=100_000))
+    # Exaggerated on purpose (real stablecoin spreads are tiny) so the loop
+    # clearly clears the 3-leg break-even floor and isn't just testing the
+    # break-even gate itself.
+    store.update_quote(make_quote("binance", "FDUSD/USDT", bid=1.010, ask=1.011, qty=100_000))
+
+    engine = TriangularArbitrageEngine(exchange="binance", store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    fdusd_opps = [o for o in opportunities if o.symbol == "USDT->USDC->FDUSD->USDT"]
+    assert len(fdusd_opps) == 1
+    assert fdusd_opps[0].gross_spread_pct > 0
+    assert fdusd_opps[0].legs[1]["symbol"] == "FDUSD/USDC"
