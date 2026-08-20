@@ -42,8 +42,12 @@ class BybitCollector(MarketDataCollector):
             logger.info("bybit collector connected (%d symbols)", len(self.symbols))
 
             keepalive = asyncio.create_task(self._keepalive(ws))
+            debug_left = 5
             try:
                 async for raw in ws:
+                    if debug_left > 0:
+                        logger.warning("bybit raw: %s", raw[:300])
+                        debug_left -= 1
                     message = json.loads(raw)
                     if message.get("op") == "subscribe" and not message.get("success", True):
                         logger.warning("bybit subscribe batch rejected: %s", message.get("ret_msg"))
