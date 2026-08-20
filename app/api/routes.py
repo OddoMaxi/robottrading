@@ -1,9 +1,13 @@
+import time
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.constants import PRIORITY_EXCHANGES, TRIANGULAR_CROSS_PAIRS, MarketType
 from app.database.models import OpportunityRecord
 from app.database.session import get_session
+from app.market_data.store import market_data_store
 
 router = APIRouter()
 
@@ -11,6 +15,29 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@router.get("/market-data/health")
+async def market_data_health() -> list[dict]:
+    """Per-(exchange, symbol) quote age for every triangular/stablecoin
+    cross-pair — diagnostic for whether a WS feed has gone quiet (missing
+    entry) or just stale (large age_seconds), without needing DB access."""
+    now = time.time()
+    rows = []
+    for exchange in PRIORITY_EXCHANGES:
+        for symbol in TRIANGULAR_CROSS_PAIRS:
+            quote = market_data_store.get_quote(exchange, MarketType.SPOT, symbol)
+            rows.append(
+                {
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "present": quote is not None,
+                    "age_seconds": round(now - quote.received_at, 2) if quote else None,
+                    "bid": quote.bid if quote else None,
+                    "ask": quote.ask if quote else None,
+                }
+            )
+    return rows
 
 
 @router.get("/opportunities")
