@@ -51,6 +51,7 @@ from app.risk.risk_engine import risk_engine
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
+from app.simulation.state_recovery import rebuild_open_positions
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level)
@@ -162,6 +163,13 @@ async def lifespan(app: FastAPI):
             record = await get_or_create_portfolio(session, portfolio.name, portfolio.initial_capital_usd)
             portfolio_ids[portfolio.name] = record.id
         await session.commit()
+
+        # Urgent audit fix — position/capital lock state is in-memory only
+        # and a restart otherwise forgets every currently-open position,
+        # letting the engine re-allocate capital that's actually still
+        # committed for days or weeks (Basis/Funding). Must run before any
+        # collector/detection task starts.
+        await rebuild_open_positions(session, portfolios, portfolio_ids, position_tracker)
 
     collectors = [
         BinanceCollector(SPOT_SYMBOLS),
