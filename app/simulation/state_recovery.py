@@ -116,8 +116,26 @@ async def rebuild_portfolio_state(
             remaining_seconds = (closes_at - now_dt).total_seconds()
             if remaining_seconds <= 0:
                 continue
-            portfolio.lock_capital(key, float(capital_usd) + float(net_profit_usd), now + remaining_seconds)
+            # Block re-entry on this key regardless of whether the capital
+            # reservation below succeeds — it's still a real, still-open
+            # historical position; we just may not be able to safely
+            # account for its capital under today's risk limits (see below).
             position_tracker.open_position((strategy, exchange, symbol), now, remaining_seconds)
+            reserved = portfolio.lock_capital(key, float(capital_usd) + float(net_profit_usd), now + remaining_seconds, now=now)
+            if not reserved:
+                # A position sized under since-superseded rules (e.g.
+                # pre-dating the % risk-limit fix) can be larger than
+                # today's invariant allows to reserve. Never violate
+                # available_capital >= 0 to force it in — log it and move
+                # on; its capital effectively free-floats until it closes.
+                logger.error(
+                    "state recovery: could not fully reserve stale position %s (%.2f) on portfolio %s without violating "
+                    "available_capital >= 0 — likely sized under old risk rules; left unreserved, not double-counted",
+                    key,
+                    float(capital_usd) + float(net_profit_usd),
+                    portfolio.name,
+                )
+                continue
             total_recovered += 1
 
     logger.warning(

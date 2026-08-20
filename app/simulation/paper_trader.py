@@ -128,16 +128,25 @@ class PaperTrader:
         gross_profit = capital * (opportunity.gross_spread_pct / 100)
         fees = gross_profit - net_profit
 
+        # Profit is credited immediately (V1 simplification — full deferred
+        # settlement at close isn't built yet), so both the principal *and*
+        # the just-credited profit get locked together below; otherwise
+        # available_usd would double-count that profit as "free" money
+        # while the position is still open.
         portfolio.balances["USDT"] = portfolio.balances.get("USDT", 0.0) + net_profit
 
         if is_held:
-            # Profit is credited immediately (V1 simplification — full
-            # deferred settlement at close isn't built yet), so both the
-            # principal *and* the just-credited profit are locked together;
-            # otherwise available_usd would double-count that profit as
-            # "free" money while the position is still open.
+            # Reservation is atomic (urgent audit fix, section 1): `capital`
+            # was already bounded by available_usd(now) above, so this
+            # should always succeed in normal operation — it's the last
+            # line of defense against a sizing bug ever pushing available
+            # capital negative, not the primary gate. On the rare failure,
+            # roll back the profit credit so nothing is left half-applied.
             position_key = _position_key(opportunity)
             if position_key is not None:
-                portfolio.lock_capital(position_key, capital + net_profit, now + opportunity.holding_period_seconds)
+                reserved = portfolio.lock_capital(position_key, capital + net_profit, now + opportunity.holding_period_seconds, now=now)
+                if not reserved:
+                    portfolio.balances["USDT"] -= net_profit
+                    return SimulatedTrade(str(opportunity.id), portfolio.name, TradeStatus.NO_CAPITAL_AVAILABLE, 0.0, 0.0, 0.0, 0.0)
 
         return SimulatedTrade(str(opportunity.id), portfolio.name, status, capital, gross_profit, fees, net_profit)
