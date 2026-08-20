@@ -30,6 +30,12 @@ class OpportunityDetector:
                     opp.score = self._score(opp)
                     self._score_velocity(opp)
                 opportunities.append(opp)
+        # Fast-Rotation spec, section 15 — rank by capital efficiency (profit
+        # per minute of capital tied up), not raw spread size: a small, fast
+        # trade that recycles capital in seconds should outrank a bigger but
+        # much slower one with the same raw profit. Unscored opportunities
+        # (missing a required field) sort last rather than dropping out.
+        opportunities.sort(key=lambda o: o.capital_velocity_score if o.capital_velocity_score is not None else -1, reverse=True)
         return opportunities
 
     @staticmethod

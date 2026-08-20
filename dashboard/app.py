@@ -25,6 +25,7 @@ from app.config.fees import DEFAULT_FEE_SCHEDULES, uniform_fee_schedules
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.holding_time_performance import HoldingTimeBucketStats, build_holding_time_performance
 from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.weekly import Verdict, WeeklyAnalytics, build_weekly_analytics
 
@@ -57,6 +58,13 @@ STRATEGY_LABELS = {
     "triangular": "Triangulaire (boucle sur 1 plateforme)",
     "funding": "Financement (spot vs perpetual)",
     "basis": "Basis (spot vs future à échéance)",
+}
+
+HOLDING_TIME_LABELS = {
+    "ultra_fast": "Ultra Fast (< 30 s)",
+    "fast": "Fast (< 5 min)",
+    "medium": "Medium (< 30 min)",
+    "carry": "Carry (≥ 30 min)",
 }
 
 EXECUTION_MODE_LABELS = {
@@ -466,6 +474,27 @@ def get_rotation_report_cached(mode: str | None, hours: float = 24.0) -> Rotatio
     return asyncio.run(fetch_rotation_report(mode, hours))
 
 
+async def fetch_holding_time_performance(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(VirtualPortfolioRecord).where(VirtualPortfolioRecord.name == ROTATION_REFERENCE_PORTFOLIO)
+            )
+            portfolio = result.scalar_one_or_none()
+            if portfolio is None:
+                return []
+            return await build_holding_time_performance(session, portfolio.id, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_holding_time_performance_cached(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
+    return asyncio.run(fetch_holding_time_performance(hours))
+
+
 df = asyncio.run(fetch_opportunities())
 profitable = df[df["Gain net (%)"] > 0] if not df.empty else df
 
@@ -567,6 +596,53 @@ else:
             if carry_report.avg_holding_time_seconds
             else f"Carry Mode (Basis/Financement, à part) : {carry_report.completed_trades} trade(s), P&L net {carry_report.net_pnl_usd:+.2f} $"
         )
+
+    # --- Performance par horizon de détention (section 45) ---
+    buckets = get_holding_time_performance_cached()
+    if buckets:
+        st.markdown(
+            f'<div style="font-size:1rem;font-weight:600;margin-top:16px;margin-bottom:8px;">Performance par horizon de détention</div>'
+            f'<div style="color:{INK_SECONDARY};font-size:0.85rem;margin-bottom:10px;">'
+            "Quel horizon (Ultra Fast / Fast / Medium / Carry) rapporte vraiment, plutôt qu'un seul total qui peut masquer un horizon perdant."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        bucket_rows_html = []
+        for b in buckets:
+            pnl_color = STATUS_GOOD if b.net_pnl_usd >= 0 else STATUS_CRITICAL
+            holding_display = (
+                f"{b.avg_holding_time_seconds / 86400:.1f} j" if b.avg_holding_time_seconds and b.avg_holding_time_seconds > 3600
+                else f"{b.avg_holding_time_seconds:.0f} s" if b.avg_holding_time_seconds else "—"
+            )
+            trade_count_display = f"{b.trade_count:,}".replace(",", " ")
+            bucket_rows_html.append(
+                "<tr>"
+                f'<td style="padding:10px 14px;color:{INK_PRIMARY};">{HOLDING_TIME_LABELS.get(b.holding_time_category, b.holding_time_category)}</td>'
+                f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{trade_count_display}</td>'
+                f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{b.win_rate_pct:.1f} %</td>'
+                f'<td style="padding:10px 14px;color:{pnl_color};text-align:right;font-weight:600;">{b.net_pnl_usd:+.2f} $</td>'
+                f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{b.avg_net_profit_per_trade_usd:+.3f} $</td>'
+                f'<td style="padding:10px 14px;color:{INK_SECONDARY};text-align:right;">{holding_display}</td>'
+                "</tr>"
+            )
+        bucket_table_html = f"""
+        <div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;overflow:hidden;">
+        <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
+        <thead>
+            <tr style="border-bottom:1px solid {GRIDLINE};">
+                <th style="padding:10px 14px;text-align:left;color:{INK_MUTED};font-weight:600;">Horizon</th>
+                <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Trades</th>
+                <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Taux de réussite</th>
+                <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">P&L net</th>
+                <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Moyenne / trade</th>
+                <th style="padding:10px 14px;text-align:right;color:{INK_MUTED};font-weight:600;">Détention moy.</th>
+            </tr>
+        </thead>
+        <tbody>{"".join(bucket_rows_html)}</tbody>
+        </table>
+        </div>
+        """
+        st.markdown(bucket_table_html, unsafe_allow_html=True)
 
 st.divider()
 
