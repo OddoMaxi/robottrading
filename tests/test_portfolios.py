@@ -43,3 +43,13 @@ def test_reopening_the_same_key_replaces_the_old_lock():
     portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=100.0)
     portfolio.lock_capital("basis:binance:BTC/USDT", 700.0, expiry=200.0)
     assert portfolio.available_usd(now=50.0) == pytest.approx(300.0)  # not 400+700
+
+
+def test_compound_mode_reference_capital_grows_with_balance():
+    portfolio = VirtualPortfolio(name="1K", initial_capital_usd=1_000.0, balances={"USDT": 1_200.0}, capital_mode="compound")
+    assert portfolio.reference_capital_usd == pytest.approx(1_200.0)
+
+
+def test_fixed_mode_reference_capital_ignores_profit():
+    portfolio = VirtualPortfolio(name="1K", initial_capital_usd=1_000.0, balances={"USDT": 1_200.0}, capital_mode="fixed")
+    assert portfolio.reference_capital_usd == pytest.approx(1_000.0)

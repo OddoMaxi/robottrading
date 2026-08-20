@@ -63,6 +63,11 @@ class Opportunity:
     score: float | None = None  # 0-100, section 15
     classification: OpportunityClassification | None = None
 
+    # Fast-Rotation spec, sections 13-15 — ranks capital efficiency, not just
+    # raw profit; a small fast trade can beat a bigger slower one.
+    capital_velocity_score: float | None = None  # 0-100
+    return_per_minute_pct: float | None = None
+
     detected_at: float = 0.0
     peak_at: float | None = None
     closed_at: float | None = None

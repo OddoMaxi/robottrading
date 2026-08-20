@@ -93,20 +93,22 @@ class PaperTrader:
             # and can only deploy what this portfolio doesn't already have
             # locked in another open position (Fast-Rotation spec, Capital
             # Recycling Engine).
+            per_trade_cap = self._risk_limits.max_capital_for_portfolio(portfolio.reference_capital_usd)
             if opportunity.capital_is_liquidity_capped:
                 # Cross-Exchange/Triangular/Stablecoin: capital_usd already
                 # reflects a real VWAP fill against observed order-book depth
                 # — never scale *above* that, it would pretend the book can
                 # absorb more than what was actually observed.
-                capital = min(opportunity.capital_usd, portfolio.available_usd(now), self._risk_limits.max_capital_per_trade_usd)
+                capital = min(opportunity.capital_usd, portfolio.available_usd(now), per_trade_cap)
             else:
                 # Basis/Funding: capital_usd is just the fixed detection-time
                 # size — no depth data exists for the futures/perp leg to cap
                 # it against, so scale up to whatever the portfolio can
-                # afford (bounded by the risk limit). Profit scales linearly
+                # afford (bounded by the risk limit, itself a % of this
+                # portfolio's size — spec section 31). Profit scales linearly
                 # with fees (a flat % rate), but this assumes no extra
                 # slippage at larger size, which we can't check here.
-                capital = min(portfolio.available_usd(now), self._risk_limits.max_capital_per_trade_usd)
+                capital = min(portfolio.available_usd(now), per_trade_cap)
             if capital <= 0:
                 return SimulatedTrade(str(opportunity.id), portfolio.name, TradeStatus.NO_CAPITAL_AVAILABLE, 0.0, 0.0, 0.0, 0.0)
         else:

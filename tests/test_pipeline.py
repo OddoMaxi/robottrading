@@ -43,6 +43,9 @@ async def test_full_pipeline_detect_score_and_paper_trade():
     assert outcome == TradeStatus.SIMULATED_EXECUTED  # large, fresh, fully-sized taker/taker spread
     trade = paper_trader.simulate(opp, portfolio, outcome)
 
-    assert trade.capital_usd == pytest.approx(opp.capital_usd)
-    assert trade.net_profit_usd == pytest.approx(opp.expected_profit_usd)
+    # Capped at 20% of the $1,000 portfolio (default risk limit, spec section
+    # 31) — well under the $1,000 the opportunity itself was priced/liquidity-capped at.
+    assert trade.capital_usd == pytest.approx(200.0)
+    expected_scale = 200.0 / opp.capital_usd
+    assert trade.net_profit_usd == pytest.approx(opp.expected_profit_usd * expected_scale)
     assert portfolio.balances["USDT"] == pytest.approx(1_000 + trade.net_profit_usd)

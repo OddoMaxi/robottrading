@@ -2,6 +2,7 @@
 
 import time
 
+from app.analytics.capital_velocity import capital_velocity_score, return_per_minute
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, Strategy
 from app.engines.base import ArbitrageEngine
 from app.opportunity.models import Opportunity
@@ -27,8 +28,22 @@ class OpportunityDetector:
                 if opp.net_spread_pct is not None:
                     opp.classification = classify(opp.net_spread_pct)
                     opp.score = self._score(opp)
+                    self._score_velocity(opp)
                 opportunities.append(opp)
         return opportunities
+
+    @staticmethod
+    def _score_velocity(opp: Opportunity) -> None:
+        """Fast-Rotation spec, sections 13-15 — capital efficiency, not just raw profit."""
+        if opp.holding_period_seconds is None or opp.capital_usd is None or opp.expected_profit_usd is None:
+            return
+        opp.return_per_minute_pct = return_per_minute(opp.net_spread_pct, opp.holding_period_seconds)
+        opp.capital_velocity_score, _ = capital_velocity_score(
+            net_profit_usd=opp.expected_profit_usd,
+            execution_probability=opp.execution_fill_probability if opp.execution_fill_probability is not None else 1.0,
+            holding_time_seconds=opp.holding_period_seconds,
+            capital_usd=opp.capital_usd,
+        )
 
     @staticmethod
     def _score(opp: Opportunity) -> float:

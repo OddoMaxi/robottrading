@@ -147,6 +147,8 @@ class OpportunityRecord(Base):
     holding_period_seconds: Mapped[float | None] = mapped_column(Numeric(12, 2))
     holding_time_category: Mapped[str | None]
     capital_is_liquidity_capped: Mapped[bool] = mapped_column(default=True)
+    capital_velocity_score: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    return_per_minute_pct: Mapped[float | None] = mapped_column(Numeric(14, 6))
 
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
     peak_at: Mapped[datetime | None]

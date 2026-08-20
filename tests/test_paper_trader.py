@@ -49,7 +49,7 @@ def test_liquidity_capped_trade_never_scales_above_its_priced_capital():
     """Cross-Exchange/Triangular/Stablecoin capital_usd is a real VWAP fill —
     scaling it up for a big portfolio would pretend the book has more depth
     than what was actually observed."""
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_opportunity(capital_usd=800.0, holding_period_seconds=8.0, capital_is_liquidity_capped=True)
     portfolio = make_portfolio(25_000.0)
 
@@ -124,7 +124,7 @@ def test_outcome_is_shared_across_portfolios_for_the_same_opportunity():
 
 
 def test_hold_based_trade_scales_up_to_risk_limit_for_a_large_portfolio():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_basis_opportunity()  # priced at $1,000, 0.3% -> $3
     portfolio = make_portfolio(10_000.0)
 
@@ -134,8 +134,30 @@ def test_hold_based_trade_scales_up_to_risk_limit_for_a_large_portfolio():
     assert trade.net_profit_usd == pytest.approx(15.0)  # 5x the $1,000-priced profit, scaled linearly
 
 
+def test_max_capital_per_trade_pct_scales_with_portfolio_size():
+    """Spec section 31 — the default cap is 20% of the portfolio, not a flat dollar figure."""
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_pct=20.0, max_capital_per_trade_usd=5_000))
+    small = make_portfolio(300.0)
+    large = make_portfolio(10_000.0)
+
+    trade_small = trader.simulate(make_basis_opportunity(), small, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+    trade_large = trader.simulate(make_basis_opportunity(), large, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade_small.capital_usd == pytest.approx(60.0)  # 20% of $300
+    assert trade_large.capital_usd == pytest.approx(2_000.0)  # 20% of $10,000, still under the $5k flat ceiling
+
+
+def test_max_capital_per_trade_usd_still_caps_a_very_large_portfolio():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_pct=20.0, max_capital_per_trade_usd=5_000))
+    huge = make_portfolio(100_000.0)  # 20% would be $20k — the flat ceiling should win
+
+    trade = trader.simulate(make_basis_opportunity(), huge, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.capital_usd == pytest.approx(5_000.0)
+
+
 def test_hold_based_trade_respects_a_small_portfolio():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_basis_opportunity()
     portfolio = make_portfolio(300.0)
 
@@ -146,7 +168,7 @@ def test_hold_based_trade_respects_a_small_portfolio():
 
 
 def test_hold_based_trade_locks_capital_on_the_portfolio():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_basis_opportunity()
     portfolio = make_portfolio(1_000.0)
 
@@ -156,7 +178,7 @@ def test_hold_based_trade_locks_capital_on_the_portfolio():
 
 
 def test_no_capital_available_when_already_fully_committed():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     portfolio = make_portfolio(1_000.0)
 
     first = make_basis_opportunity(symbol="BTC/USDT")
@@ -170,7 +192,7 @@ def test_no_capital_available_when_already_fully_committed():
 
 
 def test_locked_capital_frees_up_after_the_holding_period_expires():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     portfolio = make_portfolio(1_000.0)
     opp = make_basis_opportunity(holding_period_seconds=3600.0)
 
