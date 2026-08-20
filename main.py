@@ -51,7 +51,7 @@ from app.risk.risk_engine import risk_engine
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
-from app.simulation.state_recovery import rebuild_open_positions
+from app.simulation.state_recovery import rebuild_portfolio_state
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level)
@@ -169,7 +169,7 @@ async def lifespan(app: FastAPI):
         # letting the engine re-allocate capital that's actually still
         # committed for days or weeks (Basis/Funding). Must run before any
         # collector/detection task starts.
-        await rebuild_open_positions(session, portfolios, portfolio_ids, position_tracker)
+        await rebuild_portfolio_state(session, portfolios, portfolio_ids, position_tracker)
 
     collectors = [
         BinanceCollector(SPOT_SYMBOLS),

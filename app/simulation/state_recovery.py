@@ -1,14 +1,21 @@
-"""Position/Capital State Recovery (Continuous Execution spec — urgent audit fix).
+"""Portfolio State Recovery (Continuous Execution spec — urgent audit fix).
 
-VirtualPortfolio._locked and OpenPositionTracker are in-memory only. A
-process restart — a deploy, a crash, an OOM kill — silently forgets every
-currently-open position, and the engine then happily "opens" a fresh
-position on top of one that, per the trade ledger, is still locked for
-weeks (Basis/Funding hold for up to ~35 days). Confirmed in production:
-every engine restart on 2026-08-20 re-opened a new ~$1,000 BTC/ETH basis
-position within 1-3 seconds of startup, on top of 14+ already open and
-unexpired ones — because the tracker had no memory of them at all. This
-rebuilds both from the trade ledger before the detection loop starts.
+VirtualPortfolio.balances (its actual $ equity) and ._locked (open-position
+capital reservations), plus OpenPositionTracker, are all in-memory only. A
+process restart — a deploy, a crash, an OOM kill — silently forgets both:
+
+  - every currently-open position, so the engine re-opens a *fresh*
+    position on top of one that, per the trade ledger, is still locked for
+    weeks (Basis/Funding hold for up to ~35 days);
+  - all historical profit, since a freshly-constructed VirtualPortfolio
+    starts at exactly initial_capital_usd — the engine's own capital
+    sizing (compound mode references current balance) would silently
+    revert to under-sizing every trade after a restart.
+
+Confirmed in production: every engine restart on 2026-08-20 re-opened a
+new ~$1,000 BTC/ETH basis position within 1-3 seconds of startup, on top
+of 14+ already open and unexpired ones. This rebuilds both from the trade
+ledger before the detection loop starts.
 
 For a given (portfolio, strategy, exchange, symbol) key, only the
 *earliest* still-open trade is treated as the real, legitimate position.
@@ -22,7 +29,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import OpportunityRecord, SimulatedTradeRecord
@@ -38,14 +45,14 @@ logger = logging.getLogger(__name__)
 RECOVERY_LOOKBACK_DAYS = 120
 
 
-async def rebuild_open_positions(
+async def rebuild_portfolio_state(
     session: AsyncSession,
     portfolios: list[VirtualPortfolio],
     portfolio_ids: dict[str, int],
     position_tracker: OpenPositionTracker,
     now: float | None = None,
 ) -> int:
-    """Returns how many positions were recovered, for a startup log line."""
+    """Returns how many open positions were recovered, for a startup log line."""
     now = now if now is not None else time.time()
     now_dt = datetime.fromtimestamp(now, tz=UTC).replace(tzinfo=None)
     cutoff = now_dt - timedelta(days=RECOVERY_LOOKBACK_DAYS)
@@ -53,6 +60,23 @@ async def rebuild_open_positions(
     total_recovered = 0
     for portfolio in portfolios:
         portfolio_id = portfolio_ids[portfolio.name]
+
+        # 1. Balance — a freshly-constructed VirtualPortfolio starts at
+        # exactly initial_capital_usd with none of its historical profit.
+        # Reconstruct true accumulated equity from the full, all-time
+        # ledger (same semantics as app.reporting.simple_summary.build_portfolio_capital,
+        # which the dashboard already uses for the same reason).
+        lifetime_pnl = (
+            await session.execute(
+                select(func.coalesce(func.sum(SimulatedTradeRecord.net_profit_usd), 0)).where(
+                    SimulatedTradeRecord.portfolio_id == portfolio_id,
+                    SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                )
+            )
+        ).scalar() or 0.0
+        portfolio.balances["USDT"] = portfolio.initial_capital_usd + float(lifetime_pnl)
+
+        # 2. Open positions / capital locks.
         rows = (
             await session.execute(
                 select(
@@ -96,6 +120,9 @@ async def rebuild_open_positions(
             position_tracker.open_position((strategy, exchange, symbol), now, remaining_seconds)
             total_recovered += 1
 
-    if total_recovered:
-        logger.warning("state recovery: rebuilt %d open position(s) from the trade ledger after restart", total_recovered)
+    logger.warning(
+        "state recovery: rebuilt balances for %d portfolio(s), %d open position(s), from the trade ledger after restart",
+        len(portfolios),
+        total_recovered,
+    )
     return total_recovered
