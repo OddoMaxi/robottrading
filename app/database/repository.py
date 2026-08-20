@@ -46,6 +46,9 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         market_data_age_seconds=opportunity.market_data_age_seconds,
         annualized_pct=opportunity.annualized_pct,
         days_to_expiry=opportunity.days_to_expiry,
+        holding_period_seconds=opportunity.holding_period_seconds,
+        holding_time_category=opportunity.holding_time_category,
+        capital_is_liquidity_capped=opportunity.capital_is_liquidity_capped,
     )
     session.add(record)
     await session.flush()

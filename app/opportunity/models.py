@@ -8,7 +8,8 @@ mirrors this shape for persistence.
 import uuid
 from dataclasses import dataclass, field
 
-from app.config.constants import OpportunityClassification, OpportunityStatus, Strategy
+from app.config.constants import HoldingTimeCategory, OpportunityClassification, OpportunityStatus, Strategy
+from app.opportunity.holding_time import classify_holding_time
 
 
 @dataclass(slots=True)
@@ -40,11 +41,24 @@ class Opportunity:
     annualized_pct: float | None = None
     days_to_expiry: float | None = None
 
-    # How long this position ties up capital once opened (Basis: until
-    # expiry; Funding: the assumed carry-trade holding period). None means
-    # an instant round-trip (Cross-Exchange, Triangular, Stablecoin) — no
-    # open-position tracking needed for those.
+    # How long this position ties up capital once opened. Every engine sets
+    # this now (Fast-Rotation spec) — Cross-Exchange/Triangular/Stablecoin
+    # use a short nominal execution-time estimate (NOMINAL_FAST_HOLDING_SECONDS),
+    # Funding/Basis use their real multi-day carry period. None only for an
+    # opportunity built outside the normal engines (e.g. in a test).
     holding_period_seconds: float | None = None
+    # Derived from holding_period_seconds in __post_init__ — Fast vs Carry
+    # Mode split (spec section 1) reads this, not the strategy name, since
+    # the same strategy could in principle land in either bucket.
+    holding_time_category: HoldingTimeCategory | None = None
+    # True (default) when capital_usd was derived from a real VWAP fill
+    # against observed order-book depth (Cross-Exchange, Triangular,
+    # Stablecoin) — the Paper Trader must never scale capital *above* that,
+    # since it would pretend the book can absorb more than what was actually
+    # observed. False for Basis/Funding, where capital_usd is just the fixed
+    # detection-time size (no depth data for the futures/perp leg exists to
+    # cap it against) — those *can* scale up to a portfolio's available capital.
+    capital_is_liquidity_capped: bool = True
 
     score: float | None = None  # 0-100, section 15
     classification: OpportunityClassification | None = None
@@ -57,3 +71,7 @@ class Opportunity:
 
     status: OpportunityStatus = OpportunityStatus.DETECTED
     id: uuid.UUID = field(default_factory=uuid.uuid4)
+
+    def __post_init__(self) -> None:
+        if self.holding_period_seconds is not None and self.holding_time_category is None:
+            self.holding_time_category = classify_holding_time(self.holding_period_seconds)

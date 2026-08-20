@@ -119,6 +119,7 @@ class OpportunityRecord(Base):
         # the dashboard started hanging once this table passed ~1M rows.
         Index("ix_opportunities_detected_at", "detected_at", postgresql_using="btree"),
         Index("ix_opportunities_net_spread_pct", "net_spread_pct", postgresql_where=text("net_spread_pct > 0")),
+        Index("ix_opportunities_holding_time_category", "holding_time_category"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -141,6 +142,11 @@ class OpportunityRecord(Base):
     market_data_age_seconds: Mapped[float | None] = mapped_column(Numeric(6, 3))
     annualized_pct: Mapped[float | None] = mapped_column(Numeric(12, 4))
     days_to_expiry: Mapped[float | None] = mapped_column(Numeric(8, 2))
+
+    # Fast-Rotation spec — Fast Mode (default) vs Carry Mode split.
+    holding_period_seconds: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    holding_time_category: Mapped[str | None]
+    capital_is_liquidity_capped: Mapped[bool] = mapped_column(default=True)
 
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
     peak_at: Mapped[datetime | None]

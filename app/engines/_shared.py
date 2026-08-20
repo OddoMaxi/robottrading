@@ -7,7 +7,7 @@ import time
 
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
-from app.config.constants import MarketType, Strategy
+from app.config.constants import NOMINAL_FAST_HOLDING_SECONDS, MarketType, Strategy
 from app.execution.execution_simulator import simulate_best_execution
 from app.market_data.orderbook import OrderBookLevel, simulate_vwap
 from app.market_data.store import MarketDataStore
@@ -121,4 +121,5 @@ class QuoteSpreadScanner:
             execution_mode=best_execution.mode,
             execution_fill_probability=best_execution.fill_probability,
             market_data_age_seconds=market_data_age_seconds,
+            holding_period_seconds=NOMINAL_FAST_HOLDING_SECONDS,
         )

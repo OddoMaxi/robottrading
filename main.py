@@ -95,6 +95,8 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 for opp in opportunities:
                     await save_opportunity(session, opp)
                     if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
+                        now = time.time()
+
                         # A held position (Basis/Funding) already open on this
                         # (strategy, exchange, symbol) blocks paper-trading a
                         # "new" one until it would actually have closed — the
@@ -102,7 +104,6 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         # observation above, just not re-traded.
                         if opp.holding_period_seconds is not None and opp.legs:
                             position_key = (opp.strategy, opp.legs[0].get("exchange"), opp.symbol)
-                            now = time.time()
                             if position_tracker.is_open(position_key, now):
                                 continue
                             position_tracker.open_position(position_key, now, opp.holding_period_seconds)
@@ -112,7 +113,7 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         # virtual portfolio happens to be replaying it.
                         outcome = paper_trader.determine_outcome(opp)
                         for portfolio in portfolios:
-                            trade = paper_trader.simulate(opp, portfolio, outcome)
+                            trade = paper_trader.simulate(opp, portfolio, outcome, now=now)
                             await save_simulated_trade(session, trade, opp.id, portfolio_ids[portfolio.name])
                 await session.commit()
             if opportunities:

@@ -23,8 +23,9 @@ from app.analytics.maker_simulation import MakerAssumptions, best_maker_pair
 from app.config.constants import CROSS_EXCHANGE_ASSETS, PRIORITY_EXCHANGES
 from app.config.fees import DEFAULT_FEE_SCHEDULES, uniform_fee_schedules
 from app.config.settings import get_settings
-from app.database.models import OpportunityRecord, PriceSnapshot
+from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.weekly import Verdict, WeeklyAnalytics, build_weekly_analytics
 
 st.set_page_config(page_title="Robot d'arbitrage crypto", layout="wide", page_icon="🤖")
@@ -437,6 +438,34 @@ def get_weekly_analytics_cached() -> WeeklyAnalytics:
     return asyncio.run(fetch_weekly_analytics())
 
 
+# Reference portfolio for the headline Capital Rotation KPI — matches the
+# Fast-Rotation spec's own worked examples (section 6-9, 58), which all use $5,000.
+ROTATION_REFERENCE_PORTFOLIO = "5K"
+
+
+async def fetch_rotation_report(mode: str | None, hours: float = 24.0) -> RotationReport | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            result = await session.execute(
+                select(VirtualPortfolioRecord).where(VirtualPortfolioRecord.name == ROTATION_REFERENCE_PORTFOLIO)
+            )
+            portfolio = result.scalar_one_or_none()
+            if portfolio is None:
+                return None
+            return await build_rotation_report(
+                session, portfolio.id, portfolio.name, float(portfolio.initial_capital_usd), mode=mode, hours=hours
+            )
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60)
+def get_rotation_report_cached(mode: str | None, hours: float = 24.0) -> RotationReport | None:
+    return asyncio.run(fetch_rotation_report(mode, hours))
+
+
 df = asyncio.run(fetch_opportunities())
 profitable = df[df["Gain net (%)"] > 0] if not df.empty else df
 
@@ -501,6 +530,43 @@ render_stat_cards(
         },
     ]
 )
+
+st.divider()
+
+# --- Fast Rotation Mode : le nouveau KPI principal ---
+st.markdown(
+    '<div style="font-size:1.3rem;font-weight:650;">⚡ Fast Rotation Mode</div>'
+    f'<div style="color:{INK_SECONDARY};margin-top:2px;margin-bottom:14px;">'
+    "Objectif : réutiliser le même capital plusieurs fois plutôt que l'immobiliser longtemps. "
+    f"Référence : portefeuille {ROTATION_REFERENCE_PORTFOLIO} — Carry Mode (Basis/Financement) suivi séparément."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+fast_report = get_rotation_report_cached(mode="fast")
+carry_report = get_rotation_report_cached(mode="carry")
+
+if fast_report is None:
+    st.info("Portefeuille de référence introuvable — le robot vient peut-être de démarrer.")
+else:
+    holding_display = f"{fast_report.avg_holding_time_seconds:.0f} sec" if fast_report.avg_holding_time_seconds else "—"
+    render_stat_cards(
+        [
+            {"label": "Capital utilisé (24h)", "value": f"{fast_report.total_capital_traded_usd:,.0f} $".replace(",", " ")},
+            {"label": "Rotation de capital", "value": f"{fast_report.capital_rotation_rate:.1f}x", "sub": f"sur {fast_report.base_capital_usd:,.0f} $".replace(",", " ")},
+            {"label": "Trades Fast (24h)", "value": f"{fast_report.completed_trades:,}".replace(",", " "), "sub": f"{fast_report.trades_per_hour:.1f} / heure"},
+            {"label": "Détention moyenne", "value": holding_display},
+            {"label": "P&L net Fast (24h)", "value": f"{fast_report.net_pnl_usd:+.2f} $"},
+        ]
+    )
+    if carry_report and carry_report.completed_trades > 0:
+        st.caption(
+            f"Carry Mode (Basis/Financement, à part) : {carry_report.completed_trades} trade(s), "
+            f"P&L net {carry_report.net_pnl_usd:+.2f} $, détention moyenne "
+            f"{carry_report.avg_holding_time_seconds / 86400:.1f} jour(s)"
+            if carry_report.avg_holding_time_seconds
+            else f"Carry Mode (Basis/Financement, à part) : {carry_report.completed_trades} trade(s), P&L net {carry_report.net_pnl_usd:+.2f} $"
+        )
 
 st.divider()
 

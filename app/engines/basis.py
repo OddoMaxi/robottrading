@@ -95,6 +95,7 @@ class BasisArbitrageEngine(ArbitrageEngine):
                         days_to_expiry=days_to_expiry,
                         market_data_age_seconds=spot_freshness.market_data_age_seconds,
                         holding_period_seconds=days_to_expiry * 86400,
+                        capital_is_liquidity_capped=False,  # no depth data for the futures leg
                     )
                 )
         return opportunities

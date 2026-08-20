@@ -37,6 +37,31 @@ class OpportunityStatus(StrEnum):
     EXPIRED = "expired"
 
 
+class HoldingTimeCategory(StrEnum):
+    """Fast-Rotation spec, sections 1 & 12 — every strategy is bucketed by
+    how long it ties up capital, independent of which engine produced it."""
+
+    ULTRA_FAST = "ultra_fast"  # < 30s
+    FAST = "fast"  # 30s - 5min
+    MEDIUM = "medium"  # 5min - 30min
+    CARRY = "carry"  # > 30min — the old carry strategies (Funding, Basis)
+
+
+# Fast-Rotation spec, section 12.
+ULTRA_FAST_MAX_SECONDS = 30.0
+FAST_MAX_SECONDS = 5 * 60.0
+MEDIUM_MAX_SECONDS = 30 * 60.0  # spec section 11's "Maximum Holding Time" — beyond this, it's Carry Mode
+
+# Nominal execution/settlement time assumed for the "instant" round-trip
+# strategies (Cross-Exchange, Triangular, Stablecoin) — a real order still
+# takes a few seconds to place, fill, and confirm even when nothing is
+# "held" in the traditional sense. This also doubles as their minimum
+# re-entry cooldown (spec section 40) via the existing position tracker —
+# the same opportunity can't be re-opened until it elapses, with no need
+# for a second, separate cooldown mechanism.
+NOMINAL_FAST_HOLDING_SECONDS = 8.0
+
+
 # Section 3 — Platforms
 PRIORITY_EXCHANGES = ["binance", "okx", "bybit"]
 NEXT_PHASE_EXCHANGES = ["kraken", "gateio", "kucoin"]

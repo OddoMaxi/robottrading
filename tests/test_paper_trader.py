@@ -4,6 +4,7 @@ import pytest
 
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, Strategy
 from app.opportunity.models import Opportunity
+from app.risk.limits import RiskLimits
 from app.simulation.paper_trader import PaperTrader, TradeStatus
 from app.simulation.portfolios import VirtualPortfolio
 
@@ -23,6 +24,38 @@ def make_opportunity(**overrides) -> Opportunity:
     )
     defaults.update(overrides)
     return Opportunity(**defaults)
+
+
+def make_basis_opportunity(**overrides) -> Opportunity:
+    defaults = dict(
+        strategy=Strategy.BASIS,
+        symbol="BTC/USDT",
+        legs=[{"exchange": "binance", "side": "buy", "market": "spot"}],
+        gross_spread_pct=0.5,
+        net_spread_pct=0.3,
+        capital_usd=DEFAULT_OPPORTUNITY_CAPITAL_USD,  # priced at $1,000
+        expected_profit_usd=3.0,  # 0.3% of $1,000
+        execution_mode=None,
+        execution_fill_probability=None,
+        market_data_age_seconds=0.1,
+        holding_period_seconds=3600.0,
+        capital_is_liquidity_capped=False,  # matches the real BasisArbitrageEngine — no depth data for the futures leg
+    )
+    defaults.update(overrides)
+    return Opportunity(**defaults)
+
+
+def test_liquidity_capped_trade_never_scales_above_its_priced_capital():
+    """Cross-Exchange/Triangular/Stablecoin capital_usd is a real VWAP fill —
+    scaling it up for a big portfolio would pretend the book has more depth
+    than what was actually observed."""
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    opp = make_opportunity(capital_usd=800.0, holding_period_seconds=8.0, capital_is_liquidity_capped=True)
+    portfolio = make_portfolio(25_000.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.capital_usd == pytest.approx(800.0)
 
 
 def make_portfolio(balance: float = 1_000.0) -> VirtualPortfolio:
@@ -88,3 +121,59 @@ def test_outcome_is_shared_across_portfolios_for_the_same_opportunity():
     trade_b = trader.simulate(opp, portfolio_b, outcome)
 
     assert trade_a.status == trade_b.status == outcome
+
+
+def test_hold_based_trade_scales_up_to_risk_limit_for_a_large_portfolio():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    opp = make_basis_opportunity()  # priced at $1,000, 0.3% -> $3
+    portfolio = make_portfolio(10_000.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.capital_usd == pytest.approx(5_000.0)  # capped by the risk limit, not the portfolio's full $10k
+    assert trade.net_profit_usd == pytest.approx(15.0)  # 5x the $1,000-priced profit, scaled linearly
+
+
+def test_hold_based_trade_respects_a_small_portfolio():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    opp = make_basis_opportunity()
+    portfolio = make_portfolio(300.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.capital_usd == pytest.approx(300.0)
+    assert trade.net_profit_usd == pytest.approx(0.9)  # 0.3 * $300
+
+
+def test_hold_based_trade_locks_capital_on_the_portfolio():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    opp = make_basis_opportunity()
+    portfolio = make_portfolio(1_000.0)
+
+    trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert portfolio.available_usd(now=1_000.1) == pytest.approx(0.0)
+
+
+def test_no_capital_available_when_already_fully_committed():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    portfolio = make_portfolio(1_000.0)
+
+    first = make_basis_opportunity(symbol="BTC/USDT")
+    trader.simulate(first, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    second = make_basis_opportunity(symbol="ETH/USDT")  # a different position, same portfolio, no capital left
+    trade = trader.simulate(second, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.1)
+
+    assert trade.status == TradeStatus.NO_CAPITAL_AVAILABLE
+    assert trade.capital_usd == 0.0
+
+
+def test_locked_capital_frees_up_after_the_holding_period_expires():
+    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000))
+    portfolio = make_portfolio(1_000.0)
+    opp = make_basis_opportunity(holding_period_seconds=3600.0)
+
+    trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+    assert portfolio.available_usd(now=1_000.0 + 3600.0 - 1) == pytest.approx(0.0)
+    assert portfolio.available_usd(now=1_000.0 + 3600.0 + 1) == pytest.approx(1_003.0)  # principal + its booked profit, both freed

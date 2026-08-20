@@ -98,6 +98,7 @@ class FundingArbitrageEngine(ArbitrageEngine):
                         expected_profit_usd=net_profit,
                         market_data_age_seconds=spot_freshness.market_data_age_seconds,
                         holding_period_seconds=self.holding_period_funding_events * FUNDING_INTERVAL_SECONDS,
+                        capital_is_liquidity_capped=False,  # no depth data for the perpetual leg
                     )
                 )
         return opportunities

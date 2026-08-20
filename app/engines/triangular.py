@@ -9,7 +9,7 @@ import time
 
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
-from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, TRIANGULAR_PATHS, MarketType, Strategy
+from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, NOMINAL_FAST_HOLDING_SECONDS, TRIANGULAR_PATHS, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
 from app.market_data.store import MarketDataStore, market_data_store
 from app.opportunity.false_opportunity_filter import check_quote_freshness
@@ -108,4 +108,5 @@ class TriangularArbitrageEngine(ArbitrageEngine):
             capital_usd=leg1_spend,
             expected_profit_usd=net_profit,
             market_data_age_seconds=market_data_age_seconds,
+            holding_period_seconds=NOMINAL_FAST_HOLDING_SECONDS,
         )
