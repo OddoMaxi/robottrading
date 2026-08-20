@@ -15,11 +15,14 @@ from app.market_data.symbols import to_native_symbol
 logger = logging.getLogger(__name__)
 
 BYBIT_WS_URL = "wss://stream.bybit.com/v5/public/spot"
-# Bybit v5 public WS rejects a subscribe request with more than 10 args
-# ("success": false, silently — no exception, just no data ever arrives).
-# Found in production: expanding past 10 total symbols made the *entire*
-# subscription fail, leaving the collector connected but permanently empty.
-MAX_ARGS_PER_SUBSCRIBE = 10
+# Bybit v5 public WS rejects a subscribe request outright — for *every*
+# symbol in that request, not just the bad one — if it contains more than
+# 10 args, or if even one symbol in the batch isn't listed on Bybit (our
+# symbol list isn't Bybit-specific: e.g. BNB/BTC or any FDUSD pair). Found
+# in production: batching 10-at-a-time still dropped valid symbols like
+# BTC/USDT whenever they landed in the same alphabetical batch as an
+# unlisted one. One symbol per subscribe message fully isolates failures.
+MAX_ARGS_PER_SUBSCRIBE = 1
 
 
 class BybitCollector(MarketDataCollector):
