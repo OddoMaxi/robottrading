@@ -1,14 +1,16 @@
 """Thin persistence helpers for the tables that already have a clear write path."""
 
 import uuid
+from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Base, Exchange, OpportunityRecord, PriceSnapshot, SimulatedTradeRecord, SystemEvent, VirtualPortfolioRecord
 from app.database.session import engine
 from app.market_data.normalizer import NormalizedQuote
 from app.opportunity.models import Opportunity
+from app.opportunity.tracker import TrackedOpportunity
 from app.simulation.paper_trader import SimulatedTrade
 
 
@@ -28,6 +30,7 @@ async def get_or_create_exchange(session: AsyncSession, name: str, display_name:
 
 
 async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> OpportunityRecord:
+    edge = opportunity.net_spread_pct if opportunity.net_spread_pct is not None else opportunity.gross_spread_pct
     record = OpportunityRecord(
         id=opportunity.id,
         strategy=opportunity.strategy,
@@ -51,10 +54,49 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         capital_is_liquidity_capped=opportunity.capital_is_liquidity_capped,
         capital_velocity_score=opportunity.capital_velocity_score,
         return_per_minute_pct=opportunity.return_per_minute_pct,
+        max_spread_pct=edge,
+        min_spread_pct=edge,
+        avg_spread_pct=edge,
+        updates_count=1,
     )
     session.add(record)
     await session.flush()
     return record
+
+
+async def update_opportunity_tracking(session: AsyncSession, tracked: TrackedOpportunity) -> None:
+    """A continuation of an already-tracked opportunity (Continuous
+    Execution spec, sections 5-11) — updates the one existing row's running
+    stats instead of inserting a duplicate for the same economic event."""
+    await session.execute(
+        update(OpportunityRecord)
+        .where(OpportunityRecord.id == tracked.opportunity_id)
+        .values(
+            status=tracked.status,
+            max_spread_pct=tracked.max_edge_pct,
+            min_spread_pct=tracked.min_edge_pct,
+            avg_spread_pct=tracked.avg_edge_pct,
+            updates_count=tracked.updates_count,
+        )
+    )
+
+
+async def close_opportunity_tracking(session: AsyncSession, tracked: TrackedOpportunity, closed_at: float | None = None) -> None:
+    """The signal has gone quiet (OpportunityTracker.expire_stale) without
+    ever being traded — mark it closed so it stops looking perpetually ACTIVE."""
+    closed_dt = datetime.fromtimestamp(closed_at, tz=UTC).replace(tzinfo=None) if closed_at is not None else datetime.now(UTC).replace(tzinfo=None)
+    await session.execute(
+        update(OpportunityRecord)
+        .where(OpportunityRecord.id == tracked.opportunity_id)
+        .values(
+            status=tracked.status,
+            max_spread_pct=tracked.max_edge_pct,
+            min_spread_pct=tracked.min_edge_pct,
+            avg_spread_pct=tracked.avg_edge_pct,
+            updates_count=tracked.updates_count,
+            closed_at=closed_dt,
+        )
+    )
 
 
 async def save_price_snapshots(session: AsyncSession, quotes: list[NormalizedQuote]) -> None:

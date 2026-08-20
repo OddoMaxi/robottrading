@@ -20,12 +20,16 @@ from app.reporting.daily import DailySummary, build_daily_summary
 from app.reporting.holding_time_performance import HoldingTimeBucketStats, build_holding_time_performance
 from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.simple_summary import (
+    CapitalUtilization,
     EquityPoint,
+    OpenPosition,
     RobotStatus,
     TradeRow,
+    build_capital_utilization,
     build_equity_curve,
     build_portfolio_capital,
     build_robot_status,
+    list_open_positions,
     list_recent_trades,
 )
 from app.reporting.weekly import WeeklyAnalytics, build_weekly_analytics
@@ -354,3 +358,70 @@ async def fetch_recent_trades(limit: int = 50) -> list[TradeRow]:
 @st.cache_data(ttl=15)
 def get_recent_trades_cached(limit: int = 50) -> list[TradeRow]:
     return asyncio.run(fetch_recent_trades(limit))
+
+
+async def fetch_capital_utilization() -> CapitalUtilization | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            total_capital = await build_portfolio_capital(session, portfolio.id, float(portfolio.initial_capital_usd))
+            return await build_capital_utilization(session, portfolio.id, total_capital)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=10)
+def get_capital_utilization_cached() -> CapitalUtilization | None:
+    return asyncio.run(fetch_capital_utilization())
+
+
+async def fetch_open_positions() -> list[OpenPosition]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return []
+            return await list_open_positions(session, portfolio.id)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=10)
+def get_open_positions_cached() -> list[OpenPosition]:
+    return asyncio.run(fetch_open_positions())
+
+
+async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
+    """Continuous Execution spec, sections 41-42 — observed vs unique
+    opportunities, and the validated/attempted/executed/winning funnel."""
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
+        async with session_factory() as session:
+            unique_count, observed_count = (
+                await session.execute(
+                    select(func.count(), func.coalesce(func.sum(OpportunityRecord.updates_count), 0)).where(
+                        OpportunityRecord.detected_at >= cutoff
+                    )
+                )
+            ).first()
+            valid_count = (
+                await session.execute(
+                    select(func.count()).where(OpportunityRecord.detected_at >= cutoff, OpportunityRecord.net_spread_pct > 0)
+                )
+            ).scalar() or 0
+    finally:
+        await engine.dispose()
+    return {"observed": int(observed_count or 0), "unique": int(unique_count or 0), "valid": int(valid_count)}
+
+
+@st.cache_data(ttl=30)
+def get_opportunity_funnel_cached(hours: float = 24.0) -> dict:
+    return asyncio.run(fetch_opportunity_funnel(hours))

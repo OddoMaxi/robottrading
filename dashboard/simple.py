@@ -16,7 +16,7 @@ import streamlit as st
 import dashboard.data as data
 from app.config.constants import PRIORITY_EXCHANGES
 from app.reporting.rotation import RotationReport
-from app.reporting.simple_summary import build_explainer_narrative, pick_robot_state_message
+from app.reporting.simple_summary import CapitalUtilization, OpenPosition, build_explainer_narrative, pick_robot_state_message
 from dashboard.theme import (
     INK_MUTED,
     INK_SECONDARY,
@@ -111,10 +111,14 @@ def render_header(active_page: str) -> None:
 # --- Home cards (spec sections 4-14) ---
 
 
-def render_capital_card(capital: float | None) -> None:
-    body = f'<div class="simple-card-figure">{_money(capital)}</div>' if capital is not None else (
-        '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
-    )
+def render_capital_card(capital: float | None, utilization: CapitalUtilization | None = None) -> None:
+    if capital is None:
+        body = '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
+    else:
+        body = f'<div class="simple-card-figure">{_money(capital)}</div>'
+        if utilization is not None:
+            available = utilization.total_capital_usd - utilization.engaged_usd
+            body += f'<div class="simple-card-sub">Disponible maintenant : <b>{_money(available)}</b></div>'
     st.markdown(f'<div class="simple-card"><div class="simple-card-label">Capital virtuel</div>{body}</div>', unsafe_allow_html=True)
 
 
@@ -130,7 +134,7 @@ def render_gain_card(capital: float | None, today: RotationReport | None) -> Non
     st.markdown(f'<div class="simple-card"><div class="simple-card-label">Gain aujourd\'hui</div>{body}</div>', unsafe_allow_html=True)
 
 
-def render_trades_rotation_grid(today: RotationReport | None) -> None:
+def render_trades_rotation_grid(today: RotationReport | None, utilization: CapitalUtilization | None) -> None:
     if today is None or today.completed_trades == 0:
         trades_body = '<div class="simple-card-figure">0</div><div class="simple-card-sub">Aucun trade pour l\'instant</div>'
         rotation_body = '<div class="simple-card-figure">—</div>'
@@ -138,13 +142,41 @@ def render_trades_rotation_grid(today: RotationReport | None) -> None:
         trades_body = f'<div class="simple-card-figure">{today.completed_trades}</div><div class="simple-card-sub">{today.win_count} gagnants · {today.loss_count} perdants</div>'
         rotation_body = (
             f'<div class="simple-card-figure">{today.capital_rotation_rate:.1f}×</div>'
-            f'<div class="simple-card-sub">Le capital a été utilisé l\'équivalent de {today.capital_rotation_rate:.1f} fois aujourd\'hui.</div>'
+            f'<div class="simple-card-sub">Capital traité aujourd\'hui : {_money(today.total_capital_traded_usd)}</div>'
+        )
+    if utilization is None:
+        utilization_body = '<div class="simple-card-figure">—</div>'
+    else:
+        utilization_body = (
+            f'<div class="simple-card-figure">{utilization.utilization_pct:.0f} %</div>'
+            f'<div class="simple-card-sub">{utilization.open_position_count} position(s) en cours</div>'
         )
     st.markdown(
         '<div class="simple-grid-2">'
         f'<div class="simple-card"><div class="simple-card-label">Trades</div>{trades_body}</div>'
         f'<div class="simple-card"><div class="simple-card-label">Rotation</div>{rotation_body}</div>'
+        f'<div class="simple-card"><div class="simple-card-label">Utilisation actuelle</div>{utilization_body}</div>'
         "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_positions_card(positions: list[OpenPosition]) -> None:
+    """Continuous Execution spec, section 47 — no more than symbol / capital
+    / booked P&L per position; full detail stays in Mode Expert."""
+    if not positions:
+        return
+    rows = []
+    for p in positions:
+        asset = p.symbol.split("->")[0].split("/")[0]
+        tone_color = STATUS_GOOD if p.net_profit_usd >= 0 else STATUS_CRITICAL
+        rows.append(
+            f'<div class="simple-opp-row"><span class="k">{asset}</span>'
+            f'<span class="v">{_money(p.capital_usd)}</span>'
+            f'<span class="v" style="color:{tone_color};margin-left:10px;">{p.net_profit_usd:+.2f} $</span></div>'
+        )
+    st.markdown(
+        '<div class="simple-card"><div class="simple-card-label">Positions en cours</div>' + "".join(rows) + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -222,10 +254,12 @@ def render_ignored_example(df: pd.DataFrame) -> None:
         )
 
 
-def render_explainer(daily, today: RotationReport | None) -> None:
+def render_explainer(today: RotationReport | None) -> None:
     executed = today.completed_trades if today else 0
+    winning = today.win_count if today else 0
     net_pnl = today.net_pnl_usd if today else 0.0
-    narrative = build_explainer_narrative(daily.detected, daily.net_positive, executed, net_pnl)
+    funnel = data.get_opportunity_funnel_cached(hours=24.0)
+    narrative = build_explainer_narrative(funnel["observed"], funnel["valid"], executed, winning, net_pnl)
     st.markdown(
         '<div class="simple-card"><div class="simple-card-label">🤖 Robot explique</div>'
         f'<div class="simple-card-sub" style="color:{INK_SECONDARY};">{narrative}</div></div>',
@@ -280,14 +314,17 @@ def render_accueil() -> None:
     capital = data.get_simple_capital_cached()
     today_report = data.get_rotation_report_cached(mode=None, hours=24.0)
     daily = data.get_daily_summary_cached()
+    utilization = data.get_capital_utilization_cached()
+    positions = data.get_open_positions_cached()
 
-    render_capital_card(capital)
+    render_capital_card(capital, utilization)
     render_gain_card(capital, today_report)
-    render_trades_rotation_grid(today_report)
+    render_trades_rotation_grid(today_report, utilization)
+    render_positions_card(positions)
     render_state_card(daily)
     render_opportunity_card(df)
     render_ignored_example(df)
-    render_explainer(daily, today_report)
+    render_explainer(today_report)
     render_performance_summary()
     if st.button("Voir plus →", key="perf_see_more"):
         st.session_state.simple_page = "performance"

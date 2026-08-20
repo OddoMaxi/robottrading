@@ -70,13 +70,13 @@ def test_robot_state_good_when_healthy_and_profitable():
 
 
 def test_explainer_narrative_matches_spec_example_shape():
-    narrative = build_explainer_narrative(detected=17, profitable=5, executed=3, net_pnl_usd=4.82)
-    assert "17 opportunités" in narrative
-    assert "12" in narrative  # ignored = 17 - 5
-    assert "5" in narrative
-    assert "3" in narrative
-    assert "+4.82 $" in narrative
+    narrative = build_explainer_narrative(observed=18430, valid=163, executed=41, winning=31, net_pnl_usd=27.60)
+    assert "18 430" in narrative
+    assert "163" in narrative
+    assert "41" in narrative
+    assert "31" in narrative
+    assert "+27.60 $" in narrative
 
 
-def test_explainer_narrative_handles_zero_detected():
-    assert "pas encore" in build_explainer_narrative(detected=0, profitable=0, executed=0, net_pnl_usd=0.0).lower()
+def test_explainer_narrative_handles_zero_observed():
+    assert "pas encore" in build_explainer_narrative(observed=0, valid=0, executed=0, winning=0, net_pnl_usd=0.0).lower()

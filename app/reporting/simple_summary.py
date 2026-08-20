@@ -96,6 +96,120 @@ async def build_portfolio_capital(session: AsyncSession, portfolio_id: int, init
 
 
 @dataclass(slots=True)
+class CapitalUtilization:
+    engaged_usd: float
+    total_capital_usd: float
+    utilization_pct: float
+    open_position_count: int
+
+
+async def build_capital_utilization(
+    session: AsyncSession, portfolio_id: int, total_capital_usd: float, now: datetime | None = None
+) -> CapitalUtilization:
+    """Currently Engaged Capital / Total Capital (Continuous Execution
+    spec, sections 23-24) — a point-in-time snapshot of how much of the
+    portfolio is tied up *right now*, distinct from Capital Rotation
+    (cumulative volume / starting capital, app/reporting/rotation.py). The
+    spec is explicit these must be two separate KPIs, not one computed
+    from the other.
+
+    "Still open" is reconstructed from the trade ledger — capital plus its
+    booked profit locks until executed_at + holding_period_seconds,
+    matching PaperTrader.simulate's own lock semantics — rather than a new
+    write path, since the engine's live lock state is in-memory only.
+    """
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    # Bounded to a window comfortably wider than the longest real holding
+    # period (Basis/Funding run at most a few months) so this stays a cheap,
+    # indexed portfolio_id scan rather than reading the whole ledger.
+    lookback_cutoff = now - timedelta(days=120)
+
+    rows = (
+        await session.execute(
+            select(SimulatedTradeRecord.capital_usd, SimulatedTradeRecord.net_profit_usd, SimulatedTradeRecord.executed_at, OpportunityRecord.holding_period_seconds)
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                OpportunityRecord.holding_period_seconds.is_not(None),
+                SimulatedTradeRecord.executed_at >= lookback_cutoff,
+            )
+        )
+    ).all()
+
+    engaged = 0.0
+    open_count = 0
+    for capital_usd, net_profit_usd, executed_at, holding_period_seconds in rows:
+        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
+        if closes_at > now:
+            engaged += float(capital_usd) + float(net_profit_usd)
+            open_count += 1
+
+    return CapitalUtilization(
+        engaged_usd=engaged,
+        total_capital_usd=total_capital_usd,
+        utilization_pct=(engaged / total_capital_usd * 100) if total_capital_usd else 0.0,
+        open_position_count=open_count,
+    )
+
+
+@dataclass(slots=True)
+class OpenPosition:
+    symbol: str
+    strategy: str
+    capital_usd: float
+    net_profit_usd: float
+    opened_at: datetime
+    closes_at: datetime
+
+
+async def list_open_positions(session: AsyncSession, portfolio_id: int, now: datetime | None = None) -> list[OpenPosition]:
+    """Continuous Execution spec, section 47 — "Positions en cours" for
+    Simple Mode. Same "still open" reconstruction as build_capital_utilization,
+    just returned per-position instead of aggregated."""
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    lookback_cutoff = now - timedelta(days=120)
+
+    rows = (
+        await session.execute(
+            select(
+                OpportunityRecord.symbol,
+                OpportunityRecord.strategy,
+                SimulatedTradeRecord.capital_usd,
+                SimulatedTradeRecord.net_profit_usd,
+                SimulatedTradeRecord.executed_at,
+                OpportunityRecord.holding_period_seconds,
+            )
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                OpportunityRecord.holding_period_seconds.is_not(None),
+                SimulatedTradeRecord.executed_at >= lookback_cutoff,
+            )
+        )
+    ).all()
+
+    positions = []
+    for symbol, strategy, capital_usd, net_profit_usd, executed_at, holding_period_seconds in rows:
+        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
+        if closes_at > now:
+            positions.append(
+                OpenPosition(
+                    symbol=symbol,
+                    strategy=strategy,
+                    capital_usd=float(capital_usd),
+                    net_profit_usd=float(net_profit_usd),
+                    opened_at=executed_at,
+                    closes_at=closes_at,
+                )
+            )
+    return positions
+
+
+@dataclass(slots=True)
 class EquityPoint:
     at: datetime
     capital_usd: float
@@ -178,19 +292,21 @@ def pick_robot_state_message(robot: RobotStatus, opportunities_today: int, profi
     return RobotStateMessage("good", "🟢 Tout va bien", "Le robot fonctionne normalement. Il surveille le marché en continu et ne détecte aucun problème.")
 
 
-def build_explainer_narrative(detected: int, profitable: int, executed: int, net_pnl_usd: float) -> str:
-    """ROBOT EXPLIQUE (spec section 24) — the day's opportunity funnel as
-    one plain-language paragraph instead of separate technical counters."""
-    if detected == 0:
+def build_explainer_narrative(observed: int, valid: int, executed: int, winning: int, net_pnl_usd: float) -> str:
+    """ROBOT EXPLIQUE (Continuous Execution spec, sections 24, 45) — the
+    day's opportunity funnel as one plain-language paragraph. `observed`
+    counts every raw scan tick (sum of updates_count across opportunities,
+    i.e. before deduplication); `valid` is the deduplicated count that
+    actually cleared fees (net_spread_pct > 0)."""
+    if observed == 0:
         return "Le robot n'a pas encore trouvé d'opportunité aujourd'hui. Il continue de surveiller le marché."
-    ignored = detected - profitable
-    lines = [f"Le robot a trouvé {detected} opportunité{'s' if detected != 1 else ''} aujourd'hui."]
-    if ignored > 0:
-        lines.append(f"{ignored} {'ont' if ignored != 1 else 'a'} été ignorée{'s' if ignored != 1 else ''} car les frais étaient trop élevés.")
-    lines.append(f"{profitable} {'ont' if profitable != 1 else 'a'} passé les critères.")
+    observed_display = f"{observed:,}".replace(",", " ")
+    lines = [f"Le robot a observé {observed_display} écart{'s' if observed != 1 else ''} aujourd'hui."]
+    lines.append(f"{valid} {'étaient' if valid != 1 else 'était'} réellement intéressant{'s' if valid != 1 else ''} après frais.")
     if executed > 0:
-        lines.append(f"{executed} {'ont' if executed != 1 else 'a'} été exécutée{'s' if executed != 1 else ''} en simulation.")
-    lines.append(f"Résultat net : {net_pnl_usd:+.2f} $.")
+        lines.append(f"{executed} trade{'s' if executed != 1 else ''} {'ont' if executed != 1 else 'a'} été exécuté{'s' if executed != 1 else ''} en simulation.")
+        lines.append(f"{winning} {'ont' if winning != 1 else 'a'} terminé positif{'s' if winning != 1 else ''}.")
+    lines.append(f"Gain net : {net_pnl_usd:+.2f} $.")
     return " ".join(lines)
 
 

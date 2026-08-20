@@ -29,12 +29,14 @@ from app.config.constants import (
 )
 from app.config.settings import get_settings
 from app.database.repository import (
+    close_opportunity_tracking,
     create_all_tables,
     get_or_create_exchange,
     get_or_create_portfolio,
     save_opportunity,
     save_price_snapshots,
     save_simulated_trade,
+    update_opportunity_tracking,
 )
 from app.database.session import async_session_factory
 from app.engines.basis import BasisArbitrageEngine
@@ -44,6 +46,7 @@ from app.engines.stablecoin import StablecoinArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
 from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
+from app.opportunity.tracker import OpportunityTracker
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
@@ -76,6 +79,12 @@ paper_trader = PaperTrader()
 # in production: a $1,000 portfolio showed $52,614 of cumulative simulated
 # basis profit from 21,640 paper trades of the *same* underlying position.
 position_tracker = OpenPositionTracker()
+# Continuous Execution spec, sections 3, 5-11 — a spread persisting for
+# several scans is one opportunity with many observations, not a new row
+# each time. Without this, the opportunities table records the same
+# economic event thousands of times over (event-driven detection can
+# re-fire several times a second).
+opportunity_tracker = OpportunityTracker()
 background_tasks: list[asyncio.Task] = []
 
 
@@ -89,13 +98,18 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 for symbol in CHART_SYMBOLS
                 if (q := market_data_store.get_quote(exchange, MarketType.SPOT, symbol)) is not None
             ]
+            scan_time = time.time()
             async with async_session_factory() as session:
                 if quotes:
                     await save_price_snapshots(session, quotes)
                 for opp in opportunities:
-                    await save_opportunity(session, opp)
+                    observation = opportunity_tracker.observe(opp, now=scan_time)
+                    if observation.is_new:
+                        await save_opportunity(session, opp)
+                    else:
+                        await update_opportunity_tracking(session, observation.tracked)
                     if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
-                        now = time.time()
+                        now = scan_time
 
                         # A held position (Basis/Funding) already open on this
                         # (strategy, exchange, symbol) blocks paper-trading a
@@ -115,6 +129,13 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         for portfolio in portfolios:
                             trade = paper_trader.simulate(opp, portfolio, outcome, now=now)
                             await save_simulated_trade(session, trade, opp.id, portfolio_ids[portfolio.name])
+
+                # Signals that stopped being observed this scan — close them
+                # out rather than leaving them ACTIVE forever. A later
+                # re-emergence of the same key is then correctly treated as
+                # a brand new opportunity (spec section 11).
+                for tracked in opportunity_tracker.expire_stale(now=scan_time):
+                    await close_opportunity_tracking(session, tracked, closed_at=scan_time)
                 await session.commit()
             if opportunities:
                 logger.info("scan: %d opportunities detected", len(opportunities))

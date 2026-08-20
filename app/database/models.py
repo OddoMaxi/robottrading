@@ -162,7 +162,14 @@ class OpportunityRecord(Base):
     peak_at: Mapped[datetime | None]
     closed_at: Mapped[datetime | None]
     max_spread_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    min_spread_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
     avg_spread_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    # Continuous Execution spec, sections 8 & 41-42 — how many raw scan
+    # ticks observed this same underlying signal (deduplicated via
+    # OpportunityTracker) before it either closed or expired. 1 unless a
+    # continuation updated it. "observed" in the funnel KPI = sum of this
+    # across every row; "unique opportunities" = row count.
+    updates_count: Mapped[int] = mapped_column(default=1)
 
 
 class VirtualPortfolioRecord(Base):

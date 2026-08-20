@@ -31,10 +31,11 @@ class OpportunityClassification(StrEnum):
 
 
 class OpportunityStatus(StrEnum):
-    DETECTED = "detected"
-    OPEN = "open"
-    CLOSED = "closed"
-    EXPIRED = "expired"
+    DETECTED = "detected"  # first observation of this economic event
+    ACTIVE = "active"  # same signal still being observed on later scans (Continuous Execution spec, section 7)
+    OPEN = "open"  # a trade was actually opened against it
+    CLOSED = "closed"  # its position closed
+    EXPIRED = "expired"  # the signal faded without ever being traded
 
 
 class HoldingTimeCategory(StrEnum):
