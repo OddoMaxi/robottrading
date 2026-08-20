@@ -4,6 +4,7 @@ pollers, and the detection/paper-trading loop as background asyncio tasks.
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -45,6 +46,7 @@ from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
+from app.simulation.position_tracker import OpenPositionTracker
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level)
@@ -68,6 +70,12 @@ PAPER_TRADE_CLASSIFICATIONS = {
 
 portfolios = build_default_portfolios()
 paper_trader = PaperTrader()
+# Basis/Funding positions tie up capital for days once opened — without
+# this, the same persistent condition re-detected every scan (several
+# times a second) gets paper-traded as a brand new trade each time. Found
+# in production: a $1,000 portfolio showed $52,614 of cumulative simulated
+# basis profit from 21,640 paper trades of the *same* underlying position.
+position_tracker = OpenPositionTracker()
 background_tasks: list[asyncio.Task] = []
 
 
@@ -87,6 +95,18 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 for opp in opportunities:
                     await save_opportunity(session, opp)
                     if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
+                        # A held position (Basis/Funding) already open on this
+                        # (strategy, exchange, symbol) blocks paper-trading a
+                        # "new" one until it would actually have closed — the
+                        # opportunity is still detected and saved for
+                        # observation above, just not re-traded.
+                        if opp.holding_period_seconds is not None and opp.legs:
+                            position_key = (opp.strategy, opp.legs[0].get("exchange"), opp.symbol)
+                            now = time.time()
+                            if position_tracker.is_open(position_key, now):
+                                continue
+                            position_tracker.open_position(position_key, now, opp.holding_period_seconds)
+
                         # Sampled once per opportunity — a maker leg's fill
                         # outcome is a property of the market, not of which
                         # virtual portfolio happens to be replaying it.

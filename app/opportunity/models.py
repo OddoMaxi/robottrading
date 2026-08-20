@@ -40,6 +40,12 @@ class Opportunity:
     annualized_pct: float | None = None
     days_to_expiry: float | None = None
 
+    # How long this position ties up capital once opened (Basis: until
+    # expiry; Funding: the assumed carry-trade holding period). None means
+    # an instant round-trip (Cross-Exchange, Triangular, Stablecoin) — no
+    # open-position tracking needed for those.
+    holding_period_seconds: float | None = None
+
     score: float | None = None  # 0-100, section 15
     classification: OpportunityClassification | None = None
 

@@ -18,6 +18,7 @@ from app.opportunity.models import Opportunity
 # against the full one-time entry cost of both legs understates the trade by
 # construction. 9 periods ≈ 3 days is a conservative minimum realistic hold.
 HOLDING_PERIOD_FUNDING_EVENTS = 9
+FUNDING_INTERVAL_SECONDS = 8 * 3600
 
 
 class FundingArbitrageEngine(ArbitrageEngine):
@@ -96,6 +97,7 @@ class FundingArbitrageEngine(ArbitrageEngine):
                         capital_usd=self.capital_usd,
                         expected_profit_usd=net_profit,
                         market_data_age_seconds=spot_freshness.market_data_age_seconds,
+                        holding_period_seconds=self.holding_period_funding_events * FUNDING_INTERVAL_SECONDS,
                     )
                 )
         return opportunities

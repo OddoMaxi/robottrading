@@ -94,6 +94,7 @@ class BasisArbitrageEngine(ArbitrageEngine):
                         annualized_pct=annualized_pct,
                         days_to_expiry=days_to_expiry,
                         market_data_age_seconds=spot_freshness.market_data_age_seconds,
+                        holding_period_seconds=days_to_expiry * 86400,
                     )
                 )
         return opportunities
