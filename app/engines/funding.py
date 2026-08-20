@@ -9,6 +9,7 @@ import time
 from app.analytics.fees import FeeEngine
 from app.config.constants import CROSS_EXCHANGE_ASSETS, DEFAULT_OPPORTUNITY_CAPITAL_USD, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
+from app.market_data.quality import FUNDING_POLL_CADENCE_SECONDS, blocks_new_execution, build_feed_status
 from app.market_data.store import MarketDataStore, market_data_store
 from app.opportunity.false_opportunity_filter import check_quote_freshness
 from app.opportunity.models import Opportunity
@@ -56,6 +57,15 @@ class FundingArbitrageEngine(ArbitrageEngine):
                 # perfectly valid funding data).
                 spot_freshness = check_quote_freshness(spot, time.time())
                 if not spot_freshness.is_valid:
+                    continue
+
+                # Market Data Quality Engine (Reality Engine spec, section 5)
+                # — the funding snapshot itself was never checked for
+                # staleness before this: if the funding poller died but spot
+                # kept ticking, this engine would happily keep pricing
+                # opportunities off an arbitrarily old funding rate.
+                funding_status = build_feed_status(exchange, symbol, "funding", funding.received_at, FUNDING_POLL_CADENCE_SECONDS)
+                if blocks_new_execution(funding_status.health):
                     continue
 
                 basis_pct = (funding.mark_price - spot.ask) / spot.ask * 100

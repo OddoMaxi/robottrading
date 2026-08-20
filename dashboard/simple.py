@@ -9,6 +9,8 @@ dashboard/data.py and app/reporting/simple_summary.py. No trading,
 strategy, or risk logic lives here (spec section 31).
 """
 
+import math
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -193,6 +195,26 @@ def render_state_card(daily) -> None:
     )
 
 
+def render_reality_indicator() -> None:
+    """Reality Engine spec, section 38 — "FIABILITÉ DE LA SIMULATION": how
+    much of the spread the robot sees at detection actually survives a
+    realistic simulated fill, on average. A low number isn't a bug — it's
+    the whole point of V5 (section 1's "profit théorique vs profit
+    réalistement exécutable")."""
+    report = data.get_reality_capture_cached(hours=24.0)
+    if report is None or report.trade_count == 0:
+        return
+    ratio = report.capture_ratio_pct
+    tone = "good" if ratio >= 50 else "warn" if ratio >= 0 else "bad"
+    st.markdown(
+        '<div class="simple-card"><div class="simple-card-label">Fiabilité de la simulation</div>'
+        f'<div class="simple-card-figure {tone}">{ratio:.0f} %</div>'
+        f'<div class="simple-card-sub">En moyenne, le robot conserve {ratio:.0f} % du gain initialement détecté '
+        "après simulation réaliste (frais, slippage, échecs d'exécution inclus).</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_opportunity_card(df: pd.DataFrame) -> None:
     candidates = df[df["_classification"].isin(GOOD_CLASSIFICATIONS)] if not df.empty else df
     if df.empty or candidates.empty:
@@ -291,7 +313,15 @@ def render_performance_summary() -> None:
 
 
 def render_equity_chart(hours: float = 24.0) -> None:
+    """Reality Engine spec, section 36 — sources exclusively from the
+    Portfolio Ledger's own equity reconstruction (build_equity_curve), never
+    a value invented for display. Points with a missing/non-finite capital
+    value are dropped defensively — Plotly renders a `null` y as a gap, but
+    a bare unlabeled trace hovering over one can show "undefined" in the
+    tooltip, which is the bug this was reported against; an explicit name
+    and hovertemplate remove the ambiguity regardless of the exact cause."""
     points = data.get_equity_curve_cached(hours=hours)
+    points = [p for p in points if p.at is not None and p.capital_usd is not None and math.isfinite(p.capital_usd)]
     st.markdown('<div class="simple-card-label" style="margin-top:6px;">Évolution du capital</div>', unsafe_allow_html=True)
     if len(points) < 2:
         st.info("Pas encore assez de données pour tracer l'évolution du capital.")
@@ -301,9 +331,11 @@ def render_equity_chart(hours: float = 24.0) -> None:
             x=[p.at for p in points],
             y=[p.capital_usd for p in points],
             mode="lines",
+            name="Capital",
             line=dict(color=SEQUENTIAL_BLUE, width=2.5),
             fill="tozeroy",
             fillcolor="rgba(57,135,229,0.08)",
+            hovertemplate="%{x|%d/%m %H:%M}<br>%{y:.2f} $<extra></extra>",
         )
     )
     fig.update_yaxes(title=None)
@@ -324,6 +356,7 @@ def render_accueil() -> None:
     render_trades_rotation_grid(today_report, utilization)
     render_positions_card(positions)
     render_state_card(daily)
+    render_reality_indicator()
     render_opportunity_card(df)
     render_ignored_example(df)
     render_explainer(today_report)

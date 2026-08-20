@@ -61,3 +61,19 @@ async def test_no_future_data_yields_nothing():
 
     engine = BasisArbitrageEngine(assets=["BTC"], store=store, capital_usd=1_000)
     assert await engine.detect() == []
+
+
+@pytest.mark.asyncio
+async def test_stale_future_snapshot_is_rejected_even_with_fresh_spot():
+    """Market Data Quality Engine (Reality Engine spec, section 5) — the
+    delivery-futures poller runs every ~60s; if it stalls for several
+    cycles while spot keeps ticking, this must not keep pricing basis off
+    an arbitrarily old futures reading."""
+    store = MarketDataStore()
+    store.update_quote(make_spot_quote(bid=99_990, ask=100_000))
+    stale_future = make_future(price=101_000, days_to_expiry=90)
+    stale_future.received_at = time.time() - 700  # ~11.5 missed 60s polls
+    store.update_delivery_future(stale_future)
+
+    engine = BasisArbitrageEngine(assets=["BTC"], store=store, capital_usd=1_000)
+    assert await engine.detect() == []

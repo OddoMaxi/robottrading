@@ -447,3 +447,76 @@ async def build_trade_status_breakdown(
     return TradeStatusBreakdown(
         closed=counts["closed"], winning=counts["winning"], losing=counts["losing"], open=counts["open"], failed=counts["failed"]
     )
+
+
+@dataclass(slots=True)
+class RealityCaptureReport:
+    potential_usd: float
+    expected_usd: float
+    realistic_usd: float
+    capture_ratio_pct: float
+    trade_count: int
+
+
+async def build_reality_capture(
+    session: AsyncSession, portfolio_id: int, hours: float = 24.0, now: datetime | None = None
+) -> RealityCaptureReport:
+    """Reality Engine spec, sections 3-4 — the flagship V5 KPI: how much of
+    the spread the robot actually saw at detection survives all the way to
+    a realistically simulated fill.
+
+    Three numbers per trade, never mixed on the dashboard:
+      - POTENTIAL: capital * gross_spread_pct/100 — the raw spread at
+        detection, before any cost is subtracted.
+      - EXPECTED: the opportunity's own expected_profit_usd — net of fees
+        and the VWAP-priced fill, using the certain-fill taker/taker
+        baseline (app.opportunity.detector), before execution-time risk.
+      - REALISTIC: the trade's actual booked net_profit_usd — after
+        PaperTrader's execution slippage and leg-failure risk (urgent audit
+        item 5) were applied.
+    """
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(hours=hours)
+
+    rows = (
+        await session.execute(
+            select(
+                SimulatedTradeRecord.capital_usd,
+                SimulatedTradeRecord.net_profit_usd,
+                OpportunityRecord.gross_spread_pct,
+                OpportunityRecord.expected_profit_usd,
+                OpportunityRecord.capital_usd,
+            )
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                SimulatedTradeRecord.executed_at >= cutoff,
+            )
+        )
+    ).all()
+    return _aggregate_reality_capture(rows)
+
+
+def _aggregate_reality_capture(rows: list[tuple]) -> RealityCaptureReport:
+    """Pure aggregation step behind build_reality_capture, split out so the
+    Potential/Expected/Realistic math is unit-testable without a database."""
+    potential = 0.0
+    expected = 0.0
+    realistic = 0.0
+    for trade_capital, trade_net_profit, gross_spread_pct, opp_expected_profit, opp_capital in rows:
+        trade_capital = float(trade_capital)
+        # Expected/potential scale down proportionally when a trade only
+        # partially filled, same as PaperTrader's own scale factor —
+        # otherwise a partial fill would understate capture by comparing a
+        # full-size potential against a part-size realistic result.
+        scale = (trade_capital / float(opp_capital)) if opp_capital else 0.0
+        potential += trade_capital * (float(gross_spread_pct) / 100)
+        expected += float(opp_expected_profit) * scale
+        realistic += float(trade_net_profit)
+
+    capture_ratio_pct = (realistic / potential * 100) if potential else 0.0
+    return RealityCaptureReport(
+        potential_usd=potential, expected_usd=expected, realistic_usd=realistic, capture_ratio_pct=capture_ratio_pct, trade_count=len(rows)
+    )

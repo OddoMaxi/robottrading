@@ -1,8 +1,11 @@
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.reporting.simple_summary import (
     RobotHealth,
     RobotStatus,
+    _aggregate_reality_capture,
     _classify_trade_status,
     _reconstruct_open_positions,
     build_explainer_narrative,
@@ -172,3 +175,46 @@ def test_classify_past_holding_period_with_loss_is_losing():
 
 def test_classify_emergency_unwind_counts_as_a_realized_loss():
     assert _classify_trade_status("emergency_unwind", -2.5, NOW - timedelta(seconds=10), 8.0, NOW) == "losing"
+
+
+# --- Reality Engine spec, sections 3-4: Potential / Expected / Realistic, Reality Capture Ratio ---
+
+
+def test_reality_capture_matches_spec_worked_example():
+    # capital=1000, gross_spread_pct=0.30 -> potential = $3.00; realistic booked = $1.80 -> 60% capture.
+    rows = [(1000.0, 1.80, 0.30, 2.20, 1000.0)]
+    report = _aggregate_reality_capture(rows)
+    assert report.potential_usd == pytest.approx(3.00)
+    assert report.expected_usd == pytest.approx(2.20)
+    assert report.realistic_usd == pytest.approx(1.80)
+    assert report.capture_ratio_pct == pytest.approx(60.0)
+
+
+def test_reality_capture_scales_expected_and_potential_for_a_partial_fill():
+    # Opportunity priced at $1,000 capital but only $500 actually filled —
+    # potential/expected must scale down to match, not stay at full size.
+    rows = [(500.0, 0.90, 0.30, 3.00, 1000.0)]
+    report = _aggregate_reality_capture(rows)
+    assert report.potential_usd == pytest.approx(1.50)  # 500 * 0.30%
+    assert report.expected_usd == pytest.approx(1.50)  # 3.00 * (500/1000)
+
+
+def test_reality_capture_can_be_negative_when_realistic_pnl_is_negative():
+    rows = [(500.0, -0.75, 0.20, 1.00, 500.0)]
+    report = _aggregate_reality_capture(rows)
+    assert report.realistic_usd == pytest.approx(-0.75)
+    assert report.capture_ratio_pct < 0
+
+
+def test_reality_capture_zero_potential_gives_zero_ratio_not_a_crash():
+    rows = [(500.0, 0.0, 0.0, 0.0, 500.0)]
+    report = _aggregate_reality_capture(rows)
+    assert report.capture_ratio_pct == 0.0
+
+
+def test_reality_capture_empty_rows():
+    report = _aggregate_reality_capture([])
+    assert report.potential_usd == 0.0
+    assert report.realistic_usd == 0.0
+    assert report.capture_ratio_pct == 0.0
+    assert report.trade_count == 0

@@ -14,6 +14,7 @@ trade (backwardation) isn't modeled.
 from app.analytics.fees import FeeEngine
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, DELIVERY_FUTURES_ASSETS, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
+from app.market_data.quality import DELIVERY_FUTURES_POLL_CADENCE_SECONDS, blocks_new_execution, build_feed_status
 from app.market_data.store import MarketDataStore, market_data_store
 from app.opportunity.false_opportunity_filter import check_quote_freshness
 from app.opportunity.models import Opportunity
@@ -51,6 +52,17 @@ class BasisArbitrageEngine(ArbitrageEngine):
 
                 spot_freshness = check_quote_freshness(spot, future.received_at)
                 if not spot_freshness.is_valid:
+                    continue
+
+                # Market Data Quality Engine (Reality Engine spec, section 5)
+                # — the delivery-futures snapshot itself was never checked
+                # for staleness before this: if the REST poller died but
+                # spot kept ticking, this engine would happily keep pricing
+                # basis off an arbitrarily old futures price.
+                future_status = build_feed_status(
+                    exchange, symbol, "delivery_futures", future.received_at, DELIVERY_FUTURES_POLL_CADENCE_SECONDS
+                )
+                if blocks_new_execution(future_status.health):
                     continue
 
                 days_to_expiry = max(MIN_DAYS_TO_EXPIRY, (future.delivery_time - future.received_at) / 86400)

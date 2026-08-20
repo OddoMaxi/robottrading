@@ -241,8 +241,10 @@ def inject_css() -> None:
         .simple-card-sub {{ color: {INK_SECONDARY}; font-size: 0.95rem; margin-top: 6px; }}
         .simple-card-sub.good {{ color: {STATUS_GOOD}; }}
         .simple-card-sub.bad {{ color: {STATUS_CRITICAL}; }}
+        .simple-card-sub.warn {{ color: {STATUS_WARNING}; }}
         .simple-card-figure.good {{ color: #4ade80; }}
         .simple-card-figure.bad {{ color: #f87171; }}
+        .simple-card-figure.warn {{ color: {STATUS_WARNING}; }}
 
         .simple-grid-2 {{
             display: grid;
