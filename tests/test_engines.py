@@ -96,3 +96,45 @@ async def test_triangular_fdusd_stablecoin_loop():
     assert len(fdusd_opps) == 1
     assert fdusd_opps[0].gross_spread_pct > 0
     assert fdusd_opps[0].legs[1]["symbol"] == "FDUSD/USDC"
+
+
+@pytest.mark.asyncio
+async def test_triangular_auto_generated_stablecoin_bridge_loop_resolves_real_directions():
+    """Section 5 — a bridge loop between two *different* stablecoins via a
+    crypto asset (e.g. USDC -> ETH -> USDT -> USDC) must resolve to
+    buy/sell/buy in real Binance market directions (ETH/USDC, ETH/USDT,
+    USDC/USDT — crypto is always the listed base, never the stablecoin),
+    not the original fixed buy/buy/sell shape."""
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "ETH/USDC", bid=2_999, ask=3_000, qty=100))
+    store.update_quote(make_quote("binance", "ETH/USDT", bid=3_030, ask=3_031, qty=100))
+    store.update_quote(make_quote("binance", "USDC/USDT", bid=0.999, ask=1.0, qty=100_000))
+
+    engine = TriangularArbitrageEngine(exchange="binance", store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    opp = next(o for o in opportunities if o.symbol == "USDC->ETH->USDT->USDC")
+    assert [leg["side"] for leg in opp.legs] == ["buy", "sell", "buy"]
+    assert [leg["symbol"] for leg in opp.legs] == ["ETH/USDC", "ETH/USDT", "USDC/USDT"]
+    assert opp.gross_spread_pct == pytest.approx(1.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_triangular_middle_leg_fee_uses_correct_usd_notional():
+    """Regression: the middle leg's fee must be computed on its real USD
+    notional (spend * that asset's own USD price at that point in the
+    loop), not on the raw BTC-denominated quantity — treating 0.01 BTC as
+    "$0.01 notional" would understate that leg's fee by ~5 orders of
+    magnitude and make triangular loops look far more profitable than they are."""
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000, qty=100))
+    store.update_quote(make_quote("binance", "ETH/BTC", bid=0.0199, ask=0.02, qty=1_000))
+    store.update_quote(make_quote("binance", "ETH/USDT", bid=2_020, ask=2_021, qty=1_000))
+
+    engine = TriangularArbitrageEngine(exchange="binance", store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    opp = next(o for o in opportunities if o.symbol == "USDT->BTC->ETH->USDT")
+    expected_fee_per_leg = engine.fee_engine.trading_fee("binance", MarketType.SPOT, 1_000.0, is_maker=False)
+    expected_net_profit = (opp.gross_spread_pct / 100 * opp.capital_usd) - 3 * expected_fee_per_leg
+    assert opp.expected_profit_usd == pytest.approx(expected_net_profit, rel=1e-6)

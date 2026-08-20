@@ -98,7 +98,35 @@ DELIVERY_FUTURES_ASSETS = ["BTC", "ETH"]
 # Binance-only (confirmed absent from OKX/Bybit again on the same date), so
 # it can't feed the cross-exchange Stablecoin engine, but a same-exchange
 # triangular loop only needs it listed on the one exchange it runs on.
-TRIANGULAR_CROSS_PAIRS = ["ETH/BTC", "SOL/BTC", "BNB/BTC", "XRP/BTC", "FDUSD/USDC", "FDUSD/USDT"]
+# BRIDGE_ASSETS x {USDC, FDUSD} verified live on Binance (2026-08-20) — needed
+# so the auto-generated stablecoin-bridge loops below (e.g. USDC -> ETH ->
+# USDT -> USDC) have real quotes to resolve against on every hop.
+_BRIDGE_ASSETS = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+TRIANGULAR_CROSS_PAIRS = (
+    ["ETH/BTC", "SOL/BTC", "BNB/BTC", "XRP/BTC", "FDUSD/USDC", "FDUSD/USDT"]
+    + [f"{asset}/USDC" for asset in _BRIDGE_ASSETS]
+    + [f"{asset}/FDUSD" for asset in _BRIDGE_ASSETS]
+)
+
+
+def _generate_stablecoin_bridge_paths() -> list[tuple[str, str, str]]:
+    """Section 5 — every (stablecoin -> crypto bridge -> other stablecoin ->
+    back to the first stablecoin) loop, generated mechanically rather than
+    hand-picked, since the shape is the same for every combination once the
+    crypto/stablecoin pairs are verified listed. E.g. USDC -> ETH -> USDT ->
+    USDC. Distinct from the hand-picked crypto-bridge paths below (which loop
+    back to the *same* stablecoin via two different cryptos) and from the
+    pure stablecoin triangle (bridges via a third stablecoin, not a crypto)."""
+    stablecoins = ["USDT", "USDC", "FDUSD"]
+    return [
+        (base, bridge, other)
+        for base in stablecoins
+        for other in stablecoins
+        if other != base
+        for bridge in _BRIDGE_ASSETS
+    ]
+
+
 # Each path is (base, leg1_asset, leg2_asset): base -> leg1 -> leg2 -> base.
 TRIANGULAR_PATHS: list[tuple[str, str, str]] = [
     ("USDT", "BTC", "ETH"),
@@ -106,6 +134,7 @@ TRIANGULAR_PATHS: list[tuple[str, str, str]] = [
     ("USDT", "BTC", "BNB"),
     ("USDT", "BTC", "XRP"),
     ("USDT", "USDC", "FDUSD"),  # pure stablecoin triangle: USDT -> USDC -> FDUSD -> USDT
+    *_generate_stablecoin_bridge_paths(),
 ]
 
 # Representative capital used to price a freshly detected opportunity before

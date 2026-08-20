@@ -1,19 +1,38 @@
 """Engine C — Triangular Arbitrage (section 6).
 
-Walks fixed conversion loops within a single exchange (base -> leg1 -> leg2
--> base, e.g. USDT -> BTC -> ETH -> USDT), capped at each leg by the
-available top-of-book depth, net of all three legs' taker fees.
+Walks a 3-asset conversion loop within a single exchange — e.g. USDT ->
+BTC -> ETH -> USDT, or a stablecoin-bridge loop like USDC -> ETH -> USDT
+-> USDC — capped at each hop by the available top-of-book depth, net of
+all three legs' taker fees.
+
+Each hop can be a BUY or a SELL depending on which direction is actually
+listed: real markets only ever list a crypto asset as the base against a
+stablecoin (or BTC) quote, never the reverse. The engine discovers the
+right direction per hop instead of assuming a fixed buy/buy/sell shape —
+that's what lets a stablecoin-bridge loop (which resolves to buy, sell,
+buy — e.g. USDC -> ETH is a buy, ETH -> USDT is a sell, USDT -> USDC is a
+buy) run through the same code path as the original crypto-bridge loops
+(buy, buy, sell).
 """
 
 import time
+from dataclasses import dataclass
 
 from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, NOMINAL_FAST_HOLDING_SECONDS, TRIANGULAR_PATHS, MarketType, Strategy
 from app.engines.base import ArbitrageEngine
+from app.market_data.normalizer import NormalizedQuote
 from app.market_data.store import MarketDataStore, market_data_store
 from app.opportunity.false_opportunity_filter import check_quote_freshness
 from app.opportunity.models import Opportunity
+
+
+@dataclass(slots=True)
+class _Hop:
+    symbol: str
+    side: str  # "buy" or "sell"
+    quote: NormalizedQuote
 
 
 class TriangularArbitrageEngine(ArbitrageEngine):
@@ -45,39 +64,71 @@ class TriangularArbitrageEngine(ArbitrageEngine):
                 opportunities.append(opp)
         return opportunities
 
-    def _evaluate_path(self, base: str, leg1_asset: str, leg2_asset: str) -> Opportunity | None:
-        sym1 = f"{leg1_asset}/{base}"  # e.g. BTC/USDT
-        sym2 = f"{leg2_asset}/{leg1_asset}"  # e.g. ETH/BTC
-        sym3 = f"{leg2_asset}/{base}"  # e.g. ETH/USDT
+    def _find_hop(self, from_asset: str, to_asset: str) -> _Hop | None:
+        """Whichever direction is actually listed: buy `to_asset` with
+        `from_asset` if <to>/<from> exists, else sell `from_asset` for
+        `to_asset` if <from>/<to> exists."""
+        buy_symbol = f"{to_asset}/{from_asset}"
+        q = self.store.get_quote(self.exchange, MarketType.SPOT, buy_symbol)
+        if q and q.ask > 0:
+            return _Hop(buy_symbol, "buy", q)
+        sell_symbol = f"{from_asset}/{to_asset}"
+        q = self.store.get_quote(self.exchange, MarketType.SPOT, sell_symbol)
+        if q and q.bid > 0:
+            return _Hop(sell_symbol, "sell", q)
+        return None
 
-        q1 = self.store.get_quote(self.exchange, MarketType.SPOT, sym1)
-        q2 = self.store.get_quote(self.exchange, MarketType.SPOT, sym2)
-        q3 = self.store.get_quote(self.exchange, MarketType.SPOT, sym3)
-        if not (q1 and q2 and q3) or q1.ask <= 0 or q2.ask <= 0 or q3.bid <= 0:
+    def _evaluate_path(self, base: str, leg1_asset: str, leg2_asset: str) -> Opportunity | None:
+        loop = [base, leg1_asset, leg2_asset, base]
+        hops = [self._find_hop(loop[i], loop[i + 1]) for i in range(3)]
+        if any(h is None for h in hops):
             return None
 
         # False Opportunity Filter: all 3 legs must be reasonably fresh —
         # a triangle priced off a stale rate on one hop isn't real.
         now = time.time()
-        checks = [check_quote_freshness(q1, now), check_quote_freshness(q2, now), check_quote_freshness(q3, now)]
+        checks = [check_quote_freshness(h.quote, now) for h in hops]
         if any(not c.is_valid for c in checks):
             return None
         market_data_age_seconds = max(c.market_data_age_seconds for c in checks)
 
-        # Leg 1: BUY leg1_asset with base, capped by top-of-book ask depth.
-        leg1_spend = min(self.capital_usd, q1.ask * q1.ask_quantity)
-        leg1_qty = leg1_spend / q1.ask
+        # Walk the loop once, tracking the running quantity in whatever
+        # asset we currently hold and that asset's own USD price (so each
+        # hop's fee — always a % of USD notional — is computed correctly
+        # even for a middle hop priced in a non-stablecoin, e.g. ETH/BTC).
+        quantity = self.capital_usd  # units of `base`, a stablecoin ≈ $1/unit
+        asset_usd_price = 1.0
+        legs = []
+        fee_notionals_usd = []
 
-        # Leg 2: BUY leg2_asset with leg1_asset, capped by top-of-book ask depth.
-        leg2_spend = min(leg1_qty, q2.ask * q2.ask_quantity)
-        leg2_qty = leg2_spend / q2.ask
+        for hop in hops:
+            q = hop.quote
+            if hop.side == "buy":
+                # Market is to_asset/from_asset: spend `quantity` units of
+                # from_asset, capped by ask depth (in from_asset terms as
+                # price * ask_quantity); receive to_asset.
+                spend = min(quantity, q.ask * q.ask_quantity)
+                if spend <= 0:
+                    return None
+                received = spend / q.ask
+                legs.append({"exchange": self.exchange, "side": "buy", "market": "spot", "symbol": hop.symbol, "price": q.ask, "quantity": received})
+                fee_notionals_usd.append(spend * asset_usd_price)
+                asset_usd_price *= q.ask
+            else:  # sell
+                # Market is from_asset/to_asset: sell `quantity` units of
+                # from_asset, capped by bid depth (in from_asset units);
+                # receive to_asset.
+                sell_qty = min(quantity, q.bid_quantity)
+                if sell_qty <= 0:
+                    return None
+                received = sell_qty * q.bid
+                legs.append({"exchange": self.exchange, "side": "sell", "market": "spot", "symbol": hop.symbol, "price": q.bid, "quantity": sell_qty})
+                fee_notionals_usd.append(sell_qty * asset_usd_price)
+                asset_usd_price /= q.bid
+            quantity = received
 
-        # Leg 3: SELL leg2_asset for base, capped by top-of-book bid depth.
-        leg3_qty = min(leg2_qty, q3.bid_quantity)
-        end_capital = leg3_qty * q3.bid
-
-        if leg1_spend <= 0 or leg2_spend <= 0 or leg3_qty <= 0:
-            return None
+        end_capital = quantity  # back in `base` units, a stablecoin ≈ $1/unit
+        leg1_spend = fee_notionals_usd[0]  # asset_usd_price was still 1.0 at hop 0
 
         gross_spread_pct = (end_capital - leg1_spend) / leg1_spend * 100
         if gross_spread_pct <= 0:
@@ -88,20 +139,14 @@ class TriangularArbitrageEngine(ArbitrageEngine):
         if gross_spread_pct < self.break_even_pct:
             return None
 
-        fee1 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, leg1_spend, is_maker=False)
-        fee2 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, leg2_spend, is_maker=False)
-        fee3 = self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, end_capital, is_maker=False)
-        net_profit = end_capital - leg1_spend - fee1 - fee2 - fee3
+        fees_usd = [self.fee_engine.trading_fee(self.exchange, MarketType.SPOT, n, is_maker=False) for n in fee_notionals_usd]
+        net_profit = end_capital - leg1_spend - sum(fees_usd)
         net_spread_pct = net_profit / leg1_spend * 100
 
         return Opportunity(
             strategy=Strategy.TRIANGULAR,
             symbol=f"{base}->{leg1_asset}->{leg2_asset}->{base}",
-            legs=[
-                {"exchange": self.exchange, "side": "buy", "market": "spot", "symbol": sym1, "price": q1.ask, "quantity": leg1_qty},
-                {"exchange": self.exchange, "side": "buy", "market": "spot", "symbol": sym2, "price": q2.ask, "quantity": leg2_qty},
-                {"exchange": self.exchange, "side": "sell", "market": "spot", "symbol": sym3, "price": q3.bid, "quantity": leg3_qty},
-            ],
+            legs=legs,
             gross_spread_pct=gross_spread_pct,
             net_spread_pct=net_spread_pct,
             break_even_pct=self.break_even_pct,
