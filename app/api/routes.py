@@ -18,14 +18,16 @@ async def health() -> dict:
 
 
 @router.get("/market-data/health")
-async def market_data_health() -> list[dict]:
+async def market_data_health(symbols: str | None = None) -> list[dict]:
     """Per-(exchange, symbol) quote age for every triangular/stablecoin
-    cross-pair — diagnostic for whether a WS feed has gone quiet (missing
-    entry) or just stale (large age_seconds), without needing DB access."""
+    cross-pair (or a custom comma-separated `symbols` list) — diagnostic for
+    whether a WS feed has gone quiet (missing entry) or just stale (large
+    age_seconds), without needing DB access."""
     now = time.time()
     rows = []
+    symbol_list = symbols.split(",") if symbols else TRIANGULAR_CROSS_PAIRS
     for exchange in PRIORITY_EXCHANGES:
-        for symbol in TRIANGULAR_CROSS_PAIRS:
+        for symbol in symbol_list:
             quote = market_data_store.get_quote(exchange, MarketType.SPOT, symbol)
             rows.append(
                 {
