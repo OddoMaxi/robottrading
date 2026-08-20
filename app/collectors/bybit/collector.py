@@ -1,4 +1,13 @@
-"""Bybit spot WebSocket collector — v5 public "tickers" topic."""
+"""Bybit spot WebSocket collector — v5 public "orderbook.1" (L1) topic.
+
+Originally subscribed to the "tickers" topic, but Bybit stopped including
+bid1Price/ask1Price on it — confirmed live: 265 consecutive messages for
+BTCUSDT/ETHUSDT, zero with a bid1Price field, meaning normalize_bybit_ticker
+silently discarded every single one and the collector never stored a Bybit
+quote at all. "orderbook.1" is Bybit's dedicated top-of-book channel and
+sends a full snapshot (both sides) on every update — no delta-suppression
+gap to fall into.
+"""
 
 import asyncio
 import json
@@ -8,7 +17,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from app.collectors.base import MarketDataCollector
-from app.market_data.normalizer import normalize_bybit_ticker
+from app.market_data.normalizer import normalize_bybit_orderbook
 from app.market_data.store import MarketDataStore
 from app.market_data.symbols import to_native_symbol
 
@@ -30,9 +39,9 @@ class BybitCollector(MarketDataCollector):
 
     async def _run_once(self, store: MarketDataStore) -> None:
         async with websockets.connect(BYBIT_WS_URL) as ws:
-            topics = [f"tickers.{to_native_symbol('bybit', s)}" for s in self.symbols]
+            topics = [f"orderbook.1.{to_native_symbol('bybit', s)}" for s in self.symbols]
             # Sent as separate messages (not awaiting each ack before the
-            # next) — acks and ticker data can interleave once earlier
+            # next) — acks and book data can interleave once earlier
             # batches are live, so acks are handled in the main loop below
             # instead of assuming a strict one-recv-per-subscribe order.
             for i in range(0, len(topics), MAX_ARGS_PER_SUBSCRIBE):
@@ -44,15 +53,13 @@ class BybitCollector(MarketDataCollector):
             keepalive = asyncio.create_task(self._keepalive(ws))
             try:
                 async for raw in ws:
-                    if "BTCUSDT" in raw or "ETHUSDT" in raw:
-                        logger.warning("bybit raw: %s", raw)
                     message = json.loads(raw)
                     if message.get("op") == "subscribe" and not message.get("success", True):
                         logger.warning("bybit subscribe batch rejected: %s", message.get("ret_msg"))
                         continue
                     topic = message.get("topic", "")
-                    if topic.startswith("tickers."):
-                        quote = normalize_bybit_ticker(message.get("data", {}), message.get("ts"))
+                    if topic.startswith("orderbook.1."):
+                        quote = normalize_bybit_orderbook(message.get("data", {}), message.get("ts"))
                         if quote:
                             store.update_quote(quote)
             finally:

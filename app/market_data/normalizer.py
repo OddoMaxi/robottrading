@@ -53,20 +53,23 @@ def normalize_okx_ticker(item: dict) -> NormalizedQuote | None:
     )
 
 
-def normalize_bybit_ticker(data: dict, ts_ms: float | None) -> NormalizedQuote | None:
-    # Bybit's v5 spot "tickers" channel omits bid1Price/ask1Price on delta
-    # updates that didn't change the top of book — skip those, keep last value.
-    bid_px, ask_px = data.get("bid1Price"), data.get("ask1Price")
-    if not bid_px or not ask_px:
+def normalize_bybit_orderbook(data: dict, ts_ms: float | None) -> NormalizedQuote | None:
+    # Bybit's v5 "orderbook.1" (L1) topic sends a full snapshot — both sides
+    # — on every update, unlike "tickers" which stopped carrying
+    # bid1Price/ask1Price at all (confirmed live, 2026-08-20).
+    bids, asks = data.get("b"), data.get("a")
+    if not bids or not asks:
         return None
+    bid_px, bid_qty = bids[0]
+    ask_px, ask_qty = asks[0]
     return NormalizedQuote(
         exchange="bybit",
         market=MarketType.SPOT,
-        symbol=to_common_symbol("bybit", data["symbol"]),
+        symbol=to_common_symbol("bybit", data["s"]),
         bid=float(bid_px),
         ask=float(ask_px),
-        bid_quantity=float(data.get("bid1Size") or 0),
-        ask_quantity=float(data.get("ask1Size") or 0),
+        bid_quantity=float(bid_qty),
+        ask_quantity=float(ask_qty),
         exchange_timestamp=(float(ts_ms) / 1000) if ts_ms else time.time(),
         received_at=time.time(),
     )
