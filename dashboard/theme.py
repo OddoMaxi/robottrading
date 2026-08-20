@@ -58,6 +58,15 @@ EXECUTION_MODE_LABELS = {
     "maker_maker": "Limite / Limite",
 }
 
+# Continuous Execution spec, section 43 — plain-language labels for
+# app.execution.validator.RejectionReason values.
+REJECTION_REASON_LABELS = {
+    "stale_data": "Données trop anciennes",
+    "fees_too_high": "Frais trop élevés",
+    "edge_too_low": "Écart trop faible",
+    "position_already_open": "Déjà en position",
+}
+
 ILLUSTRATIVE_CAPITAL_USD = 1_000
 
 

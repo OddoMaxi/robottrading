@@ -398,8 +398,8 @@ def get_open_positions_cached() -> list[OpenPosition]:
 
 
 async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
-    """Continuous Execution spec, sections 41-42 — observed vs unique
-    opportunities, and the validated/attempted/executed/winning funnel."""
+    """Continuous Execution spec, sections 41-43 — observed vs unique
+    opportunities, the validated funnel, and why the rest were rejected."""
     engine = create_async_engine(get_settings().database_url)
     try:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -417,9 +417,22 @@ async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
                     select(func.count()).where(OpportunityRecord.detected_at >= cutoff, OpportunityRecord.net_spread_pct > 0)
                 )
             ).scalar() or 0
+            rejection_rows = (
+                await session.execute(
+                    select(OpportunityRecord.rejection_reason, func.count())
+                    .where(OpportunityRecord.detected_at >= cutoff, OpportunityRecord.rejection_reason.is_not(None))
+                    .group_by(OpportunityRecord.rejection_reason)
+                    .order_by(func.count().desc())
+                )
+            ).all()
     finally:
         await engine.dispose()
-    return {"observed": int(observed_count or 0), "unique": int(unique_count or 0), "valid": int(valid_count)}
+    return {
+        "observed": int(observed_count or 0),
+        "unique": int(unique_count or 0),
+        "valid": int(valid_count),
+        "rejections": [(reason, int(count)) for reason, count in rejection_rows],
+    }
 
 
 @st.cache_data(ttl=30)

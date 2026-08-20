@@ -19,7 +19,9 @@ from app.reporting.rotation import RotationReport
 from app.reporting.simple_summary import CapitalUtilization, OpenPosition, build_explainer_narrative, pick_robot_state_message
 from dashboard.theme import (
     INK_MUTED,
+    INK_PRIMARY,
     INK_SECONDARY,
+    REJECTION_REASON_LABELS,
     SEQUENTIAL_BLUE,
     STATUS_CRITICAL,
     STATUS_GOOD,
@@ -27,9 +29,9 @@ from dashboard.theme import (
     style_fig,
 )
 
-# Same set the engine itself uses to decide whether an opportunity is worth
-# paper-trading (main.py's PAPER_TRADE_CLASSIFICATIONS) — Simple Mode's
-# "current opportunity" card only ever shows one that clears this bar.
+# Same set app.execution.validator.validate() uses to approve an
+# opportunity for paper-trading — Simple Mode's "current opportunity" card
+# only ever shows one that clears this bar.
 GOOD_CLASSIFICATIONS = {"interesting", "good", "strong", "exceptional"}
 
 CLASSIFICATION_BADGES = {
@@ -359,13 +361,51 @@ def render_trades_page() -> None:
             st.markdown("\n".join(detail_lines))
 
 
-# --- Performance page (spec sections 13-14) ---
+# --- Performance page (spec sections 13-14, 42-43) ---
+
+
+def render_opportunity_funnel() -> None:
+    """Continuous Execution spec, sections 42-43 — how many raw ticks came
+    in, how many were genuinely distinct, how many cleared fees, and why
+    the rest never got attempted."""
+    funnel = data.get_opportunity_funnel_cached(hours=24.0)
+    today = data.get_rotation_report_cached(mode=None, hours=24.0)
+    executed = today.completed_trades if today else 0
+    winning = today.win_count if today else 0
+
+    st.markdown('<div class="simple-card-label" style="margin-top:6px;">Entonnoir des opportunités (24h)</div>', unsafe_allow_html=True)
+    stages = [
+        ("Observées", funnel["observed"]),
+        ("Uniques", funnel["unique"]),
+        ("Valides après frais", funnel["valid"]),
+        ("Exécutées", executed),
+        ("Gagnantes", winning),
+    ]
+    rows = "".join(
+        f'<div class="simple-perf-row"><span class="k">{label}</span><span class="v">{value:,}</span></div>'.replace(",", " ")
+        for label, value in stages
+    )
+    st.markdown(f'<div class="simple-card">{rows}</div>', unsafe_allow_html=True)
+
+    if funnel["rejections"]:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Pourquoi les opportunités sont rejetées ?</div>', unsafe_allow_html=True)
+        total_rejections = sum(count for _, count in funnel["rejections"])
+        reason_rows = []
+        for reason, count in funnel["rejections"]:
+            label = REJECTION_REASON_LABELS.get(reason, reason)
+            share = count / total_rejections * 100 if total_rejections else 0.0
+            reason_rows.append(
+                f'<div class="simple-perf-row"><span class="k">{label}</span>'
+                f'<span class="v" style="color:{INK_PRIMARY};">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({share:.0f} %)</span></span></div>'.replace(",", " ")
+            )
+        st.markdown(f'<div class="simple-card">{"".join(reason_rows)}</div>', unsafe_allow_html=True)
 
 
 def render_performance_page() -> None:
     st.markdown('<div style="font-size:1.4rem;font-weight:700;margin:6px 0 14px 0;">Performance</div>', unsafe_allow_html=True)
     render_performance_summary()
     render_equity_chart(hours=24.0 * 7)
+    render_opportunity_funnel()
 
 
 # --- Paramètres page (spec sections 15, 27) ---

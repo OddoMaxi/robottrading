@@ -75,6 +75,10 @@ class Opportunity:
     avg_spread_pct: float | None = None
 
     status: OpportunityStatus = OpportunityStatus.DETECTED
+    # Continuous Execution spec, sections 12-15, 43 — set by
+    # app.execution.validator.validate() once the detection loop runs it
+    # through the gate. None while still unvalidated, or once APPROVED.
+    rejection_reason: str | None = None
     id: uuid.UUID = field(default_factory=uuid.uuid4)
 
     def __post_init__(self) -> None:

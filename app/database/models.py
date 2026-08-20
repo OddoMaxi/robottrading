@@ -144,6 +144,9 @@ class OpportunityRecord(Base):
     score: Mapped[float | None] = mapped_column(Numeric(5, 2))
     classification: Mapped[str | None]
     status: Mapped[str] = mapped_column(default="detected")
+    # Continuous Execution spec, sections 12-15, 43 — None once APPROVED
+    # (or not yet validated); one of app.execution.validator.RejectionReason otherwise.
+    rejection_reason: Mapped[str | None]
 
     execution_mode: Mapped[str | None]
     execution_fill_probability: Mapped[float | None] = mapped_column(Numeric(5, 4))

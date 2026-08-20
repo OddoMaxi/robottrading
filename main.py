@@ -22,7 +22,6 @@ from app.config.constants import (
     CROSS_EXCHANGE_ASSETS,
     DELIVERY_FUTURES_ASSETS,
     MarketType,
-    OpportunityClassification,
     PRIORITY_EXCHANGES,
     STABLECOIN_PAIRS,
     TRIANGULAR_CROSS_PAIRS,
@@ -44,6 +43,7 @@ from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.engines.funding import FundingArbitrageEngine
 from app.engines.stablecoin import StablecoinArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
+from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
@@ -64,12 +64,6 @@ CHART_SYMBOLS = [f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS]
 # rate); MAX is the fallback so the loop still ticks even with no new data.
 MIN_SCAN_INTERVAL_SECONDS = 0.25
 MAX_SCAN_WAIT_SECONDS = 3.0
-PAPER_TRADE_CLASSIFICATIONS = {
-    OpportunityClassification.INTERESTING,
-    OpportunityClassification.GOOD,
-    OpportunityClassification.STRONG,
-    OpportunityClassification.EXCEPTIONAL,
-}
 
 portfolios = build_default_portfolios()
 paper_trader = PaperTrader()
@@ -103,23 +97,27 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 if quotes:
                     await save_price_snapshots(session, quotes)
                 for opp in opportunities:
+                    # Continuous Execution spec, sections 12-15 — the single
+                    # gate deciding whether this is even worth attempting,
+                    # with a traceable reason when it isn't (replaces the
+                    # old inline classification + position-open checks).
+                    validation = validate(opp, position_tracker, now=scan_time)
+                    opp.rejection_reason = validation.reason.value if validation.reason else None
+
                     observation = opportunity_tracker.observe(opp, now=scan_time)
                     if observation.is_new:
                         await save_opportunity(session, opp)
                     else:
-                        await update_opportunity_tracking(session, observation.tracked)
-                    if opp.classification in PAPER_TRADE_CLASSIFICATIONS:
-                        now = scan_time
+                        await update_opportunity_tracking(session, observation.tracked, rejection_reason=opp.rejection_reason)
 
-                        # A held position (Basis/Funding) already open on this
-                        # (strategy, exchange, symbol) blocks paper-trading a
-                        # "new" one until it would actually have closed — the
-                        # opportunity is still detected and saved for
-                        # observation above, just not re-traded.
+                    if validation.approved:
+                        now = scan_time
+                        # A held position (Basis/Funding) ties up its
+                        # (strategy, exchange, symbol) until it would
+                        # actually have closed — validate() already checked
+                        # this wasn't already open, so it's safe to mark it now.
                         if opp.holding_period_seconds is not None and opp.legs:
                             position_key = (opp.strategy, opp.legs[0].get("exchange"), opp.symbol)
-                            if position_tracker.is_open(position_key, now):
-                                continue
                             position_tracker.open_position(position_key, now, opp.holding_period_seconds)
 
                         # Sampled once per opportunity — a maker leg's fill

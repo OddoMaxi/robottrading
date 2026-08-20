@@ -58,16 +58,22 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         min_spread_pct=edge,
         avg_spread_pct=edge,
         updates_count=1,
+        rejection_reason=opportunity.rejection_reason,
     )
     session.add(record)
     await session.flush()
     return record
 
 
-async def update_opportunity_tracking(session: AsyncSession, tracked: TrackedOpportunity) -> None:
+async def update_opportunity_tracking(
+    session: AsyncSession, tracked: TrackedOpportunity, rejection_reason: str | None = None
+) -> None:
     """A continuation of an already-tracked opportunity (Continuous
     Execution spec, sections 5-11) — updates the one existing row's running
-    stats instead of inserting a duplicate for the same economic event."""
+    stats instead of inserting a duplicate for the same economic event.
+    `rejection_reason` reflects this latest observation's validation
+    outcome (sections 12-15), since a signal can drift in or out of being
+    worth attempting as the market moves."""
     await session.execute(
         update(OpportunityRecord)
         .where(OpportunityRecord.id == tracked.opportunity_id)
@@ -77,6 +83,7 @@ async def update_opportunity_tracking(session: AsyncSession, tracked: TrackedOpp
             min_spread_pct=tracked.min_edge_pct,
             avg_spread_pct=tracked.avg_edge_pct,
             updates_count=tracked.updates_count,
+            rejection_reason=rejection_reason,
         )
     )
 
