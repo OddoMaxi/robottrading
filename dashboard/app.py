@@ -303,6 +303,16 @@ def get_last_profitable_spike_cached() -> dict | None:
     return asyncio.run(fetch_last_profitable_spike())
 
 
+# price_snapshots grows fast (event-driven detection writes a tick almost
+# every scan). Charting only needs enough points to fill 1-15min candles —
+# capping the row count bounds worst-case query time, pandas memory, and
+# resample cost regardless of how large the table gets or how long a
+# lookback window is requested. Ordered newest-first to keep the *most
+# recent* N points, then re-ascended for charting.
+MAX_PRICE_HISTORY_ROWS = 20_000
+MAX_BID_ASK_HISTORY_ROWS = 150_000
+
+
 async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
     engine = create_async_engine(get_settings().database_url)
     try:
@@ -315,12 +325,13 @@ async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
             result = await session.execute(
                 select(PriceSnapshot)
                 .where(PriceSnapshot.symbol == symbol, PriceSnapshot.recorded_at >= cutoff)
-                .order_by(PriceSnapshot.recorded_at)
+                .order_by(PriceSnapshot.recorded_at.desc())
+                .limit(MAX_PRICE_HISTORY_ROWS)
             )
             rows = result.scalars().all()
     finally:
         await engine.dispose()
-    return pd.DataFrame(
+    history_df = pd.DataFrame(
         [
             {
                 "exchange": r.exchange,
@@ -330,6 +341,7 @@ async def fetch_price_history(symbol: str, hours: float = 3.0) -> pd.DataFrame:
             for r in rows
         ]
     )
+    return history_df.sort_values("recorded_at") if not history_df.empty else history_df
 
 
 async def fetch_bid_ask_history(symbols: list[str], hours: float = 2.0) -> pd.DataFrame:
@@ -339,17 +351,21 @@ async def fetch_bid_ask_history(symbols: list[str], hours: float = 2.0) -> pd.Da
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
         async with session_factory() as session:
             result = await session.execute(
-                select(PriceSnapshot).where(PriceSnapshot.symbol.in_(symbols), PriceSnapshot.recorded_at >= cutoff)
+                select(PriceSnapshot)
+                .where(PriceSnapshot.symbol.in_(symbols), PriceSnapshot.recorded_at >= cutoff)
+                .order_by(PriceSnapshot.recorded_at.desc())
+                .limit(MAX_BID_ASK_HISTORY_ROWS)
             )
             rows = result.scalars().all()
     finally:
         await engine.dispose()
-    return pd.DataFrame(
+    bid_ask_df = pd.DataFrame(
         [
             {"symbol": r.symbol, "exchange": r.exchange, "recorded_at": r.recorded_at, "bid": float(r.bid), "ask": float(r.ask)}
             for r in rows
         ]
     )
+    return bid_ask_df.sort_values("recorded_at") if not bid_ask_df.empty else bid_ask_df
 
 
 @st.cache_data(ttl=30)

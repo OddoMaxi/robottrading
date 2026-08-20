@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, ForeignKey, Index, Numeric, UniqueConstraint
+from sqlalchemy import JSON, ForeignKey, Index, Numeric, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -85,7 +85,9 @@ class PriceSnapshot(Base):
     """
 
     __tablename__ = "price_snapshots"
-    __table_args__ = (Index("ix_price_snapshots_symbol_time", "exchange", "symbol", "recorded_at"),)
+    # Every query filters by symbol (+ optionally recorded_at) — never by
+    # exchange alone — so the index leads with symbol, not exchange.
+    __table_args__ = (Index("ix_price_snapshots_symbol_recorded_at", "symbol", "recorded_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     exchange: Mapped[str]
@@ -109,9 +111,18 @@ class FundingRate(Base):
 
 class OpportunityRecord(Base):
     __tablename__ = "opportunities"
+    __table_args__ = (
+        # This table grows fast (event-driven detection ⇒ hundreds of
+        # thousands of rows within a day) — every dashboard/report query
+        # filters or sorts on these, and a missing index here turns into a
+        # full table scan that gets slower every day. Learned the hard way:
+        # the dashboard started hanging once this table passed ~1M rows.
+        Index("ix_opportunities_detected_at", "detected_at", postgresql_using="btree"),
+        Index("ix_opportunities_net_spread_pct", "net_spread_pct", postgresql_where=text("net_spread_pct > 0")),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    strategy: Mapped[str]  # stablecoin | cross_exchange | triangular | funding
+    strategy: Mapped[str] = mapped_column(index=True)  # stablecoin | cross_exchange | triangular | funding
     symbol: Mapped[str] = mapped_column(index=True)
     legs: Mapped[list] = mapped_column(JSON)
 
