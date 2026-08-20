@@ -42,6 +42,12 @@ class VirtualPortfolio:
         locked_total = sum(amount for amount, _ in self._locked.values())
         return max(0.0, self.current_value_usd - locked_total)
 
+    def open_position_count(self, now: float) -> int:
+        """Continuous Execution spec, section 27 — how many positions this
+        portfolio currently has open, for enforcing max_concurrent_trades."""
+        self._prune_expired(now)
+        return len(self._locked)
+
     def lock_capital(self, position_key: str, amount: float, expiry: float) -> None:
         self._locked[position_key] = (amount, expiry)
 

@@ -1,6 +1,7 @@
 import time
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,7 @@ from app.config.constants import PRIORITY_EXCHANGES, TRIANGULAR_CROSS_PAIRS, Mar
 from app.database.models import OpportunityRecord
 from app.database.session import get_session
 from app.market_data.store import market_data_store
+from app.risk.risk_engine import risk_engine
 
 router = APIRouter()
 
@@ -15,6 +17,35 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+class KillSwitchRequest(BaseModel):
+    reason: str = "manual"
+
+
+@router.get("/risk/status")
+async def risk_status() -> dict:
+    return {
+        "kill_switch_engaged": risk_engine.kill_switch_engaged,
+        "max_capital_per_trade_usd": risk_engine.limits.max_capital_per_trade_usd,
+        "max_concurrent_trades": risk_engine.limits.max_concurrent_trades,
+        "max_daily_loss_usd": risk_engine.limits.max_daily_loss_usd,
+    }
+
+
+@router.post("/risk/kill-switch/engage")
+async def engage_kill_switch(body: KillSwitchRequest) -> dict:
+    """Continuous Execution spec, section 61 — stops all *new* paper
+    executions immediately. Detection and observation keep running; only
+    capital allocation is halted, and it takes effect on the very next scan."""
+    risk_engine.engage_kill_switch(body.reason)
+    return {"kill_switch_engaged": True, "reason": body.reason}
+
+
+@router.post("/risk/kill-switch/disengage")
+async def disengage_kill_switch() -> dict:
+    risk_engine.disengage_kill_switch()
+    return {"kill_switch_engaged": False}
 
 
 @router.get("/market-data/health")

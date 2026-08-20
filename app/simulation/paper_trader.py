@@ -32,6 +32,7 @@ class TradeStatus(StrEnum):
     MISSED = "missed"  # a maker leg didn't fill in time — costs nothing, see app.execution.maker_taker
     SIMULATED_FAILED = "simulated_failed"  # market data was already stale when priced
     NO_CAPITAL_AVAILABLE = "no_capital_available"  # portfolio's capital is already locked in other open positions
+    MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"  # portfolio already holds max_concurrent_trades open positions
 
 
 @dataclass(slots=True)
@@ -88,6 +89,14 @@ class PaperTrader:
 
         is_held = opportunity.holding_period_seconds is not None
         if is_held:
+            # Continuous Execution spec, section 27 — a portfolio can hold
+            # at most max_concurrent_trades simultaneously-open positions,
+            # independent of whether it technically has the capital for one
+            # more (that's the whole point of a concurrency cap, not a
+            # capital cap).
+            if portfolio.open_position_count(now) >= self._risk_limits.max_concurrent_trades:
+                return SimulatedTrade(str(opportunity.id), portfolio.name, TradeStatus.MAX_CONCURRENT_POSITIONS, 0.0, 0.0, 0.0, 0.0)
+
             # Every strategy now ties up capital for *some* duration — from
             # ~8s for an instant round-trip up to weeks for Basis/Funding —
             # and can only deploy what this portfolio doesn't already have

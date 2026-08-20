@@ -47,6 +47,7 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
+from app.risk.risk_engine import risk_engine
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
@@ -110,7 +111,11 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                     else:
                         await update_opportunity_tracking(session, observation.tracked, rejection_reason=opp.rejection_reason)
 
-                    if validation.approved:
+                    # Kill switch (spec section 61) — stops new executions
+                    # immediately, in simulation too. Detection, tracking,
+                    # and persistence above are unaffected; only capital
+                    # allocation halts.
+                    if validation.approved and not risk_engine.kill_switch_engaged:
                         now = scan_time
                         # A held position (Basis/Funding) ties up its
                         # (strategy, exchange, symbol) until it would

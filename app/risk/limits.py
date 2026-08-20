@@ -17,6 +17,10 @@ class RiskLimits:
     max_slippage_pct: float = 0.15
     min_liquidity_usd: float = 1_000  # minimum depth required at the test amount
     max_latency_ms: float = 500
+    # Continuous Execution spec, section 27 — a portfolio can hold at most
+    # this many simultaneously-open positions, regardless of how much
+    # capital is still available.
+    max_concurrent_trades: int = 5
 
     def max_capital_for_portfolio(self, portfolio_value_usd: float) -> float:
         return min(portfolio_value_usd * self.max_capital_per_trade_pct / 100, self.max_capital_per_trade_usd)

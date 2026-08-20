@@ -36,3 +36,10 @@ class RiskEngine:
         if current_latency_ms > self.limits.max_latency_ms:
             violations.append("max_latency_ms")
         return violations
+
+
+# Continuous Execution spec, section 61 — one shared instance so the
+# FastAPI kill-switch endpoints (app/api/routes.py) and the detection loop
+# (main.py) are looking at the same switch, even though they live in
+# different modules to avoid a circular import between them.
+risk_engine = RiskEngine()
