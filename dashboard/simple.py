@@ -365,21 +365,23 @@ def render_trades_page() -> None:
 
 
 def render_opportunity_funnel() -> None:
-    """Continuous Execution spec, sections 42-43 — how many raw ticks came
-    in, how many were genuinely distinct, how many cleared fees, and why
-    the rest never got attempted."""
+    """Continuous Execution spec, sections 42-43, urgent audit item 6 — how
+    many raw ticks came in, how many were genuinely distinct, how many
+    cleared fees, how many were actually attempted, and how many filled."""
     funnel = data.get_opportunity_funnel_cached(hours=24.0)
-    today = data.get_rotation_report_cached(mode=None, hours=24.0)
-    executed = today.completed_trades if today else 0
-    winning = today.win_count if today else 0
+    breakdown = data.get_trade_status_breakdown_cached(hours=24.0)
+    attempts = (breakdown.closed + breakdown.open + breakdown.failed) if breakdown else 0
+    filled = (breakdown.closed + breakdown.open) if breakdown else 0
+    winning = breakdown.winning if breakdown else 0
 
     st.markdown('<div class="simple-card-label" style="margin-top:6px;">Entonnoir des opportunités (24h)</div>', unsafe_allow_html=True)
     stages = [
-        ("Observées", funnel["observed"]),
-        ("Uniques", funnel["unique"]),
-        ("Valides après frais", funnel["valid"]),
-        ("Exécutées", executed),
-        ("Gagnantes", winning),
+        ("Observations de marché", funnel["observed"]),
+        ("Opportunités uniques", funnel["unique"]),
+        ("Opportunités valides", funnel["valid"]),
+        ("Tentatives d'exécution", attempts),
+        ("Trades exécutés", filled),
+        ("Gagnants", winning),
     ]
     rows = "".join(
         f'<div class="simple-perf-row"><span class="k">{label}</span><span class="v">{value:,}</span></div>'.replace(",", " ")
@@ -401,10 +403,34 @@ def render_opportunity_funnel() -> None:
         st.markdown(f'<div class="simple-card">{"".join(reason_rows)}</div>', unsafe_allow_html=True)
 
 
+def render_trade_status_breakdown() -> None:
+    """Continuous Execution spec, urgent audit item 4 — Closed / Winning /
+    Losing / Open / Failed shown separately, so an implausible win rate (or
+    a suspicious 0-loss streak) is visible as the real number it is,
+    instead of hiding inside one ambiguous "trades" total."""
+    breakdown = data.get_trade_status_breakdown_cached(hours=24.0)
+    if breakdown is None:
+        return
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Trades par statut (24h)</div>', unsafe_allow_html=True)
+    rows = [
+        ("Clôturés", breakdown.closed, INK_PRIMARY),
+        ("Gagnants", breakdown.winning, STATUS_GOOD),
+        ("Perdants", breakdown.losing, STATUS_CRITICAL),
+        ("En cours", breakdown.open, INK_PRIMARY),
+        ("Échoués (jamais exécutés)", breakdown.failed, INK_MUTED),
+    ]
+    html_rows = "".join(
+        f'<div class="simple-perf-row"><span class="k">{label}</span><span class="v" style="color:{color};">{value:,}</span></div>'.replace(",", " ")
+        for label, value, color in rows
+    )
+    st.markdown(f'<div class="simple-card">{html_rows}</div>', unsafe_allow_html=True)
+
+
 def render_performance_page() -> None:
     st.markdown('<div style="font-size:1.4rem;font-weight:700;margin:6px 0 14px 0;">Performance</div>', unsafe_allow_html=True)
     render_performance_summary()
     render_equity_chart(hours=24.0 * 7)
+    render_trade_status_breakdown()
     render_opportunity_funnel()
 
 

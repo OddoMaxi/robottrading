@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import OpportunityRecord, SimulatedTradeRecord
 
-EXECUTED_STATUSES = ("simulated_executed", "partial_fill")
+# "emergency_unwind" (urgent audit, item 5) is a realized, closed trade —
+# see app.reporting.rotation's identical constant for why it belongs here too.
+EXECUTED_STATUSES = ("simulated_executed", "partial_fill", "emergency_unwind")
 
 # Starting thresholds — same caveat as the opportunity classification
 # thresholds (section 16): recalibrate once real observation data exists.

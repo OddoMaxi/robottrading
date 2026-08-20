@@ -9,8 +9,19 @@ from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.market_data.normalizer import NormalizedQuote
 from app.market_data.store import MarketDataStore
 from app.opportunity.detector import OpportunityDetector
-from app.simulation.paper_trader import PaperTrader, TradeStatus
+from app.simulation.paper_trader import EXECUTION_SLIPPAGE_MEAN_PCT, PaperTrader, TradeStatus
 from app.simulation.portfolios import build_default_portfolios
+
+
+class _DeterministicRng:
+    """Never trips a rare-event `< probability` check; `.gauss()` always
+    returns exactly the mean so exact profit assertions still hold."""
+
+    def random(self) -> float:
+        return 1.0
+
+    def gauss(self, mu: float, sigma: float) -> float:
+        return mu
 
 
 def make_quote(exchange: str, symbol: str, bid: float, ask: float, qty: float = 10.0) -> NormalizedQuote:
@@ -38,7 +49,7 @@ async def test_full_pipeline_detect_score_and_paper_trade():
 
     portfolios = build_default_portfolios()
     portfolio = next(p for p in portfolios if p.name == "1K")
-    paper_trader = PaperTrader()
+    paper_trader = PaperTrader(rng=_DeterministicRng())
     outcome = paper_trader.determine_outcome(opp)
     assert outcome == TradeStatus.SIMULATED_EXECUTED  # large, fresh, fully-sized taker/taker spread
     trade = paper_trader.simulate(opp, portfolio, outcome)
@@ -47,5 +58,6 @@ async def test_full_pipeline_detect_score_and_paper_trade():
     # 31) — well under the $1,000 the opportunity itself was priced/liquidity-capped at.
     assert trade.capital_usd == pytest.approx(200.0)
     expected_scale = 200.0 / opp.capital_usd
-    assert trade.net_profit_usd == pytest.approx(opp.expected_profit_usd * expected_scale)
+    expected_profit = opp.expected_profit_usd * expected_scale + 200.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)
+    assert trade.net_profit_usd == pytest.approx(expected_profit)
     assert portfolio.balances["USDT"] == pytest.approx(1_000 + trade.net_profit_usd)

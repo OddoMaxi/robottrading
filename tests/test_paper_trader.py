@@ -5,8 +5,30 @@ import pytest
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, Strategy
 from app.opportunity.models import Opportunity
 from app.risk.limits import RiskLimits
-from app.simulation.paper_trader import PaperTrader, TradeStatus
+from app.simulation.paper_trader import EMERGENCY_UNWIND_COST_PCT, EXECUTION_SLIPPAGE_MEAN_PCT, PaperTrader, TradeStatus
 from app.simulation.portfolios import VirtualPortfolio
+
+
+class _DeterministicRng:
+    """Stub for tests that need exact profit assertions: `.random()` never
+    trips a rare-event `< probability` check, `.gauss()` always returns
+    exactly the mean (zero variance) instead of a real sample."""
+
+    def random(self) -> float:
+        return 1.0
+
+    def gauss(self, mu: float, sigma: float) -> float:
+        return mu
+
+
+class _AlwaysLegFailureRng:
+    """Stub that always triggers the leg-failure/emergency-unwind branch."""
+
+    def random(self) -> float:
+        return 0.0
+
+    def gauss(self, mu: float, sigma: float) -> float:
+        return mu
 
 
 def make_opportunity(**overrides) -> Opportunity:
@@ -43,6 +65,64 @@ def make_basis_opportunity(**overrides) -> Opportunity:
     )
     defaults.update(overrides)
     return Opportunity(**defaults)
+
+
+def test_execution_slippage_makes_net_profit_differ_from_the_priced_edge():
+    """Urgent audit, item 5 — a real fill isn't guaranteed to capture
+    exactly the detection-time priced edge. With a real (unstubbed) RNG,
+    the executed profit should essentially never land on exactly the
+    unadjusted priced value."""
+    trader = PaperTrader(rng=random.Random(7))
+    opp = make_opportunity(legs=[{"exchange": "binance", "side": "buy", "market": "spot"}])  # single leg — no unwind risk
+    portfolio = make_portfolio(1_000.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.net_profit_usd != pytest.approx(3.0)
+
+
+def test_slippage_can_push_a_thin_margin_trade_negative_over_many_samples():
+    """A trade must be able to lose money — not just occasionally break
+    even. Runs enough independent samples that at least one going negative
+    is a near-certainty if the risk modeling actually has bite."""
+    opp = make_opportunity(legs=[], expected_profit_usd=0.5, gross_spread_pct=0.06, net_spread_pct=0.05)
+    saw_a_loss = False
+    for seed in range(200):
+        trader = PaperTrader(rng=random.Random(seed))
+        portfolio = make_portfolio(1_000.0)
+        trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+        if trade.net_profit_usd < 0:
+            saw_a_loss = True
+            break
+    assert saw_a_loss
+
+
+def test_leg_failure_triggers_emergency_unwind_at_a_loss():
+    trader = PaperTrader(rng=_AlwaysLegFailureRng(), risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
+    opp = make_basis_opportunity()  # 1-leg by default; give it 2 to make unwind risk apply
+    opp.legs = [
+        {"exchange": "binance", "side": "buy", "market": "spot"},
+        {"exchange": "binance", "side": "sell", "market": "futures"},
+    ]
+    portfolio = make_portfolio(1_000.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.status == TradeStatus.EMERGENCY_UNWIND
+    assert trade.net_profit_usd == pytest.approx(-trade.capital_usd * (EMERGENCY_UNWIND_COST_PCT / 100))
+    assert trade.net_profit_usd < 0
+
+
+def test_single_leg_opportunity_is_never_at_risk_of_emergency_unwind():
+    """Nothing to unwind with only one (or zero) legs — the risk is
+    specifically about a multi-leg arbitrage's legs filling independently."""
+    trader = PaperTrader(rng=_AlwaysLegFailureRng())
+    opp = make_opportunity(legs=[{"exchange": "binance", "side": "buy", "market": "spot"}])
+    portfolio = make_portfolio(1_000.0)
+
+    trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
+
+    assert trade.status != TradeStatus.EMERGENCY_UNWIND
 
 
 def test_liquidity_capped_trade_never_scales_above_its_priced_capital():
@@ -100,14 +180,15 @@ def test_missed_and_failed_trades_cost_nothing():
 
 
 def test_executed_trade_books_profit_and_updates_balance():
-    trader = PaperTrader()
+    trader = PaperTrader(rng=_DeterministicRng())
     opp = make_opportunity()
     portfolio = make_portfolio(1_000.0)
 
     trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED)
 
-    assert trade.net_profit_usd == pytest.approx(3.0)
-    assert portfolio.balances["USDT"] == pytest.approx(1_003.0)
+    expected_profit = 3.0 + 1_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)
+    assert trade.net_profit_usd == pytest.approx(expected_profit)
+    assert portfolio.balances["USDT"] == pytest.approx(1_000.0 + expected_profit)
 
 
 def test_outcome_is_shared_across_portfolios_for_the_same_opportunity():
@@ -124,14 +205,15 @@ def test_outcome_is_shared_across_portfolios_for_the_same_opportunity():
 
 
 def test_hold_based_trade_scales_up_to_risk_limit_for_a_large_portfolio():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
+    trader = PaperTrader(rng=_DeterministicRng(), risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_basis_opportunity()  # priced at $1,000, 0.3% -> $3
     portfolio = make_portfolio(10_000.0)
 
     trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
 
     assert trade.capital_usd == pytest.approx(5_000.0)  # capped by the risk limit, not the portfolio's full $10k
-    assert trade.net_profit_usd == pytest.approx(15.0)  # 5x the $1,000-priced profit, scaled linearly
+    expected_profit = 15.0 + 5_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)  # 5x the $1,000-priced profit, scaled linearly, minus slippage
+    assert trade.net_profit_usd == pytest.approx(expected_profit)
 
 
 def test_max_capital_per_trade_pct_scales_with_portfolio_size():
@@ -157,14 +239,15 @@ def test_max_capital_per_trade_usd_still_caps_a_very_large_portfolio():
 
 
 def test_hold_based_trade_respects_a_small_portfolio():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
+    trader = PaperTrader(rng=_DeterministicRng(), risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     opp = make_basis_opportunity()
     portfolio = make_portfolio(300.0)
 
     trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
 
     assert trade.capital_usd == pytest.approx(300.0)
-    assert trade.net_profit_usd == pytest.approx(0.9)  # 0.3 * $300
+    expected_profit = 0.9 + 300.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)  # 0.3% of $300, minus slippage
+    assert trade.net_profit_usd == pytest.approx(expected_profit)
 
 
 def test_hold_based_trade_locks_capital_on_the_portfolio():
@@ -221,10 +304,11 @@ def test_max_concurrent_trades_frees_up_once_a_position_closes():
 
 
 def test_locked_capital_frees_up_after_the_holding_period_expires():
-    trader = PaperTrader(risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
+    trader = PaperTrader(rng=_DeterministicRng(), risk_limits=RiskLimits(max_capital_per_trade_usd=5_000, max_capital_per_trade_pct=100.0))
     portfolio = make_portfolio(1_000.0)
     opp = make_basis_opportunity(holding_period_seconds=3600.0)
 
     trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
     assert portfolio.available_usd(now=1_000.0 + 3600.0 - 1) == pytest.approx(0.0)
-    assert portfolio.available_usd(now=1_000.0 + 3600.0 + 1) == pytest.approx(1_003.0)  # principal + its booked profit, both freed
+    expected_balance = 1_000.0 + 3.0 + 1_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)  # principal + its booked profit, both freed
+    assert portfolio.available_usd(now=1_000.0 + 3600.0 + 1) == pytest.approx(expected_balance)

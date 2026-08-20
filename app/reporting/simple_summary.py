@@ -389,3 +389,61 @@ async def list_recent_trades(session: AsyncSession, portfolio_id: int, limit: in
         )
         for trade_id, executed_at, symbol, strategy, capital_usd, gross_profit_usd, fees_usd, net_profit_usd, holding_period_seconds in rows
     ]
+
+
+@dataclass(slots=True)
+class TradeStatusBreakdown:
+    closed: int
+    winning: int
+    losing: int
+    open: int
+    failed: int
+
+
+def _classify_trade_status(
+    status: str, net_profit_usd: float, executed_at: datetime, holding_period_seconds: float | None, now: datetime
+) -> str:
+    """Pure classification step behind build_trade_status_breakdown, split
+    out so the Closed/Winning/Losing/Open/Failed logic (urgent audit item
+    4) is unit-testable without a database."""
+    if status not in EXECUTED_STATUSES:
+        return "failed"  # never became a real position: missed, stale data, no capital, or concurrency-capped
+    if holding_period_seconds is not None and executed_at + timedelta(seconds=float(holding_period_seconds)) > now:
+        return "open"
+    return "winning" if net_profit_usd > 0 else "losing"
+
+
+async def build_trade_status_breakdown(
+    session: AsyncSession, portfolio_id: int, hours: float = 24.0, now: datetime | None = None
+) -> TradeStatusBreakdown:
+    """Continuous Execution spec, urgent audit item 4 — Closed / Winning /
+    Losing / Open / Failed as distinct counts, so an implausible win rate
+    (or a lopsided 0-loss record) is visible as the real number it is,
+    instead of hiding inside one ambiguous "trades" total."""
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(hours=hours)
+
+    rows = (
+        await session.execute(
+            select(
+                SimulatedTradeRecord.status,
+                SimulatedTradeRecord.net_profit_usd,
+                SimulatedTradeRecord.executed_at,
+                OpportunityRecord.holding_period_seconds,
+            )
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(SimulatedTradeRecord.portfolio_id == portfolio_id, SimulatedTradeRecord.executed_at >= cutoff)
+        )
+    ).all()
+
+    counts = {"closed": 0, "winning": 0, "losing": 0, "open": 0, "failed": 0}
+    for status, net_profit_usd, executed_at, holding_period_seconds in rows:
+        bucket = _classify_trade_status(status, float(net_profit_usd), executed_at, holding_period_seconds, now)
+        counts[bucket] += 1
+        if bucket in ("winning", "losing"):
+            counts["closed"] += 1
+
+    return TradeStatusBreakdown(
+        closed=counts["closed"], winning=counts["winning"], losing=counts["losing"], open=counts["open"], failed=counts["failed"]
+    )

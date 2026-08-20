@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.constants import HoldingTimeCategory
 from app.database.models import OpportunityRecord, SimulatedTradeRecord
 
-EXECUTED_STATUSES = ("simulated_executed", "partial_fill")
+# "emergency_unwind" (urgent audit, item 5) is a realized, closed trade —
+# capital was actually engaged and a P&L actually booked (always a loss) —
+# so it belongs in every "did a real trade happen" aggregate, same as a
+# clean fill. Excluding it would make emergency-unwind losses invisible to
+# reporting, which is the opposite of the audit's intent.
+EXECUTED_STATUSES = ("simulated_executed", "partial_fill", "emergency_unwind")
 
 
 @dataclass(slots=True)

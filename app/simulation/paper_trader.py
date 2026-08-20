@@ -25,6 +25,22 @@ from app.simulation.portfolios import VirtualPortfolio
 # a genuine partial fill, not a fully-sized trade.
 PARTIAL_FILL_THRESHOLD = 0.9
 
+# Urgent audit, item 5 — without this, an executed trade always captures
+# exactly its detection-time priced edge, which is unrealistic: found in
+# production, 251 executed trades and 0 losers. The real price can move
+# between detection and fill even within the same scan; this samples that
+# adverse (or occasionally favorable) drift as a % of capital. Mean is
+# slightly negative — a real fill averages worse than the quoted mid, not
+# neutral — so a thin-margin trade can and sometimes will end up negative.
+EXECUTION_SLIPPAGE_MEAN_PCT = -0.015
+EXECUTION_SLIPPAGE_STD_PCT = 0.04
+
+# Multi-leg arbitrage's classic risk: one leg fills, the other doesn't (or
+# fills at a worse price), leaving a naked, unbalanced position that must
+# be unwound immediately at a loss rather than the priced edge.
+LEG_FAILURE_PROBABILITY = 0.015
+EMERGENCY_UNWIND_COST_PCT = 0.25  # cost of the urgent unwind, as % of capital
+
 
 class TradeStatus(StrEnum):
     SIMULATED_EXECUTED = "simulated_executed"
@@ -33,6 +49,7 @@ class TradeStatus(StrEnum):
     SIMULATED_FAILED = "simulated_failed"  # market data was already stale when priced
     NO_CAPITAL_AVAILABLE = "no_capital_available"  # portfolio's capital is already locked in other open positions
     MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"  # portfolio already holds max_concurrent_trades open positions
+    EMERGENCY_UNWIND = "emergency_unwind"  # one leg filled, the other failed — exited at a loss, not the priced edge
 
 
 @dataclass(slots=True)
@@ -127,6 +144,25 @@ class PaperTrader:
         net_profit = opportunity.expected_profit_usd * scale
         gross_profit = capital * (opportunity.gross_spread_pct / 100)
         fees = gross_profit - net_profit
+
+        # Leg failure / emergency unwind (urgent audit, item 5) — only
+        # meaningful risk for a genuine multi-leg arbitrage; a single-leg
+        # opportunity (used in some tests, and any future single-market
+        # strategy) has nothing to unwind.
+        if len(opportunity.legs) >= 2 and self._rng.random() < LEG_FAILURE_PROBABILITY:
+            status = TradeStatus.EMERGENCY_UNWIND
+            net_profit = -capital * (EMERGENCY_UNWIND_COST_PCT / 100)
+            gross_profit = 0.0
+            fees = -net_profit
+        else:
+            # Execution slippage — the price can drift between detection
+            # and fill; without this every executed trade captures exactly
+            # its detection-time priced edge, which the real market never
+            # guarantees.
+            slippage_pct = self._rng.gauss(EXECUTION_SLIPPAGE_MEAN_PCT, EXECUTION_SLIPPAGE_STD_PCT)
+            slippage_usd = capital * (slippage_pct / 100)
+            net_profit += slippage_usd
+            fees = gross_profit - net_profit
 
         # Profit is credited immediately (V1 simplification — full deferred
         # settlement at close isn't built yet), so both the principal *and*

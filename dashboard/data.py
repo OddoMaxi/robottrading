@@ -25,10 +25,12 @@ from app.reporting.simple_summary import (
     OpenPosition,
     RobotStatus,
     TradeRow,
+    TradeStatusBreakdown,
     build_capital_utilization,
     build_equity_curve,
     build_portfolio_capital,
     build_robot_status,
+    build_trade_status_breakdown,
     list_open_positions,
     list_recent_trades,
 )
@@ -439,3 +441,21 @@ async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
 @st.cache_data(ttl=30)
 def get_opportunity_funnel_cached(hours: float = 24.0) -> dict:
     return asyncio.run(fetch_opportunity_funnel(hours))
+
+
+async def fetch_trade_status_breakdown(hours: float = 24.0) -> TradeStatusBreakdown | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            return await build_trade_status_breakdown(session, portfolio.id, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15)
+def get_trade_status_breakdown_cached(hours: float = 24.0) -> TradeStatusBreakdown | None:
+    return asyncio.run(fetch_trade_status_breakdown(hours))

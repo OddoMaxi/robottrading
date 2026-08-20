@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from app.reporting.simple_summary import (
     RobotHealth,
     RobotStatus,
+    _classify_trade_status,
     _reconstruct_open_positions,
     build_explainer_narrative,
     classify_robot_health,
@@ -146,3 +147,28 @@ def test_reconstruct_excludes_already_closed_positions():
     rows = [_row(1000.0, 3.0, hours_ago=1000, holding_days=1)]  # opened ~41 days ago, 1-day hold — long closed
     kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
     assert kept == []
+
+
+# --- Urgent audit item 4: Closed / Winning / Losing / Open / Failed ---
+
+
+def test_classify_non_executed_status_is_failed():
+    assert _classify_trade_status("missed", 0.0, NOW - timedelta(hours=1), 8.0, NOW) == "failed"
+    assert _classify_trade_status("no_capital_available", 0.0, NOW - timedelta(hours=1), 8.0, NOW) == "failed"
+    assert _classify_trade_status("max_concurrent_positions", 0.0, NOW - timedelta(hours=1), 8.0, NOW) == "failed"
+
+
+def test_classify_still_within_holding_period_is_open():
+    assert _classify_trade_status("simulated_executed", 3.0, NOW - timedelta(seconds=4), 8.0, NOW) == "open"
+
+
+def test_classify_past_holding_period_with_profit_is_winning():
+    assert _classify_trade_status("simulated_executed", 3.0, NOW - timedelta(seconds=10), 8.0, NOW) == "winning"
+
+
+def test_classify_past_holding_period_with_loss_is_losing():
+    assert _classify_trade_status("simulated_executed", -2.5, NOW - timedelta(seconds=10), 8.0, NOW) == "losing"
+
+
+def test_classify_emergency_unwind_counts_as_a_realized_loss():
+    assert _classify_trade_status("emergency_unwind", -2.5, NOW - timedelta(seconds=10), 8.0, NOW) == "losing"
