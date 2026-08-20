@@ -200,5 +200,23 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(router)
 
 
+@app.get("/capital/pool")
+async def capital_pool() -> list[dict]:
+    """Continuous Execution spec, sections 16-17 — the engine's live,
+    authoritative capital state per portfolio (not the DB-reconstructed
+    approximation the dashboard uses, which lags slightly behind)."""
+    now = time.time()
+    return [
+        {
+            "portfolio": portfolio.name,
+            "total_capital_usd": portfolio.current_value_usd,
+            "available_usd": portfolio.available_usd(now),
+            "engaged_usd": portfolio.current_value_usd - portfolio.available_usd(now),
+            "open_position_count": portfolio.open_position_count(now),
+        }
+        for portfolio in portfolios
+    ]
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
