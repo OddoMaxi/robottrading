@@ -24,6 +24,13 @@ best %), and the size where profit crosses back to zero. Kept as its own,
 separate implementation rather than sharing code with the CEX version —
 different underlying math (AMM curve vs. order-book VWAP) and deliberate
 isolation from the CEX engine (spec section 1).
+
+Also applies, per opportunity: Block Latency (spec section 14) — rejects
+outright if the chain's own expected transaction-inclusion time exceeds
+that chain's documented expected opportunity lifetime (app.onchain.execution_model) —
+and MEV Risk (spec section 13) — scales the flat MEV buffer up for
+trades that are large relative to the pool they trade against
+(app.onchain.mev_risk), rather than one flat assumption for every size.
 """
 
 import time
@@ -34,11 +41,12 @@ from app.config.constants import Strategy
 from app.onchain.constants import (
     DEX_CAPITAL_TEST_TIERS_USD,
     DEX_EXECUTION_FILL_PROBABILITY,
-    MEV_BUFFER_PCT,
     MIN_NET_EDGE_PCT,
     NOMINAL_DEX_HOLDING_SECONDS,
     SLIPPAGE_BUFFER_PCT,
 )
+from app.onchain.execution_model import build_execution_model
+from app.onchain.mev_risk import compute_mev_risk_score, mev_buffer_pct_for_risk
 from app.onchain.models import DexPool
 from app.opportunity.models import Opportunity
 
@@ -95,7 +103,11 @@ def evaluate_dex_capital_tier(
     final_usd = filled_usd_leg2 - sell_fee
 
     slippage_cost = capital_usd * (SLIPPAGE_BUFFER_PCT / 100)
-    mev_cost = capital_usd * (MEV_BUFFER_PCT / 100)
+    # MEV Risk (spec section 13) — scaled by how large this trade is
+    # relative to the THINNER of the two pools (the more conservative,
+    # higher-risk choice), not a flat assumption regardless of size.
+    mev_risk_score = compute_mev_risk_score(buy_pool.chain, capital_usd, min(buy_pool.tvl_usd, sell_pool.tvl_usd))
+    mev_cost = capital_usd * (mev_buffer_pct_for_risk(mev_risk_score) / 100)
     net_profit = final_usd - capital_usd - gas_cost_usd - slippage_cost - mev_cost
     net_pct = (net_profit / capital_usd * 100) if capital_usd else 0.0
     return DexTierResult(capital_usd=capital_usd, net_profit_usd=net_profit, net_pct=net_pct)
@@ -193,6 +205,14 @@ def detect_cross_dex_opportunity(
         return None
 
     if theoretical_edge_pct <= 0:
+        return None
+
+    # Block Latency (spec section 14) — "A DEX opportunity that exists for
+    # 100ms may be impossible to capture on-chain." Rejected here, before
+    # any cost math, since a non-capturable opportunity isn't worth pricing
+    # at all: no execution model can promise the price gap survives long
+    # enough for the transaction to land.
+    if not build_execution_model(pool_a.chain).is_capturable():
         return None
 
     total_gas_usd = buy_gas + sell_gas

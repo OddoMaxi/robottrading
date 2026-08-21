@@ -7,6 +7,7 @@ from app.onchain.cross_dex_arbitrage import (
     estimate_amm_output_usd,
     evaluate_dex_capital_tier,
 )
+from app.onchain.mev_risk import compute_mev_risk_score, mev_buffer_pct_for_risk
 from app.onchain.models import DexPool
 
 NOW = 1_800_000_000.0
@@ -36,17 +37,23 @@ def test_evaluate_capital_tier_requires_the_cross_pool_price_to_capture_any_prof
     pool_a = _pool("raydium", "SOL", "USDC", price=100.0)
     pool_b = _pool("orca", "SOL", "USDC", price=100.0)  # identical price — no real edge
     result = evaluate_dex_capital_tier(pool_a, pool_b, buy_price=100.0, sell_price=100.0, capital_usd=100.0, gas_cost_usd=0.0)
-    # Same price on both sides: gross profit before fees/buffers must be ~0.
-    gross_before_fees_and_buffers = result.net_profit_usd + (0.25 / 100 * 100 * 2) + (0.05 / 100 * 100) + (0.05 / 100 * 100)
-    assert gross_before_fees_and_buffers == pytest.approx(0.0, abs=0.01)
+    # Same price on both sides: net_profit_usd must be exactly -(fees + slippage buffer + MEV buffer), nothing more —
+    # any leftover beyond that would mean the price difference leaked into the result despite there being none.
+    mev_risk = compute_mev_risk_score(pool_a.chain, 100.0, min(pool_a.tvl_usd, pool_b.tvl_usd))
+    expected_costs = 100.0 * (pool_a.fee_pct / 100) + 100.0 * (pool_b.fee_pct / 100) + 100.0 * (0.05 / 100) + 100.0 * (mev_buffer_pct_for_risk(mev_risk) / 100)
+    # abs=0.01: fees are computed on the post-AMM-impact filled amount, not
+    # raw capital_usd, so this hand-derived figure is a close approximation
+    # rather than bit-exact — still tight enough to prove no leftover
+    # "profit" from a price difference that doesn't exist here.
+    assert result.net_profit_usd == pytest.approx(-expected_costs, abs=0.01)
 
 
 def test_a_real_price_gap_produces_real_profit_at_a_reasonable_size():
     pool_a = _pool("raydium", "SOL", "USDC", price=100.0, fee_pct=0.25)
     pool_b = _pool("orca", "SOL", "USDC", price=101.0, fee_pct=0.30)  # 1% richer
     result = evaluate_dex_capital_tier(pool_a, pool_b, buy_price=100.0, sell_price=101.0, capital_usd=1_000.0, gas_cost_usd=0.004)
-    assert result.net_profit_usd == pytest.approx(2.6426567710792788, rel=1e-6)
-    assert result.net_pct == pytest.approx(0.26426567710792787, rel=1e-6)
+    assert result.net_profit_usd == pytest.approx(2.440656771079279, rel=1e-6)
+    assert result.net_pct == pytest.approx(0.24406567710792787, rel=1e-6)
 
 
 def test_optimal_size_maximizes_absolute_profit_and_is_interior_not_the_largest_tier():
@@ -54,7 +61,7 @@ def test_optimal_size_maximizes_absolute_profit_and_is_interior_not_the_largest_
     pool_b = _pool("orca", "SOL", "USDC", price=101.0, fee_pct=0.30)
     edge = compute_dex_depth_adjusted_edge(pool_a, pool_b, buy_price=100.0, sell_price=101.0, gas_cost_usd=0.004, theoretical_edge_pct=1.0)
     assert edge.optimal_capital_usd == 1_000
-    assert edge.optimal_net_profit_usd == pytest.approx(2.6426567710792788, rel=1e-6)
+    assert edge.optimal_net_profit_usd == pytest.approx(2.440656771079279, rel=1e-6)
     assert edge.max_profitable_capital_usd is not None
     assert edge.optimal_capital_usd < edge.max_profitable_capital_usd < 5_000  # 5000 is already a tested loss
 
@@ -103,6 +110,23 @@ def test_a_thin_edge_that_never_clears_real_costs_is_not_an_opportunity():
     reported as a smaller-but-still-executable opportunity."""
     pool_a = _pool("raydium", "SOL", "USDC", price=100.0, fee_pct=0.25)
     pool_b = _pool("orca", "SOL", "USDC", price=100.05, fee_pct=0.30)  # only 0.05% raw gap
+    assert detect_cross_dex_opportunity(pool_a, pool_b, gas_cost_usd_a=0.002, gas_cost_usd_b=0.002) is None
+
+
+def test_a_non_capturable_chain_rejects_even_a_genuinely_profitable_gap(monkeypatch):
+    """Spec section 14: a real price gap that can't realistically be
+    captured on-chain (expected inclusion time exceeds the chain's own
+    expected opportunity lifetime) must be rejected outright, regardless
+    of how profitable it looks on paper."""
+    import app.onchain.cross_dex_arbitrage as module
+
+    class _NeverCapturable:
+        def is_capturable(self):
+            return False
+
+    monkeypatch.setattr(module, "build_execution_model", lambda chain: _NeverCapturable())
+    pool_a = _pool("raydium", "SOL", "USDC", price=100.0, fee_pct=0.25)
+    pool_b = _pool("orca", "SOL", "USDC", price=101.0, fee_pct=0.30)
     assert detect_cross_dex_opportunity(pool_a, pool_b, gas_cost_usd_a=0.002, gas_cost_usd_b=0.002) is None
 
 
