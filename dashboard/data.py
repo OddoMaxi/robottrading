@@ -109,7 +109,7 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
     return result_df
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_opportunities_cached(limit: int = 300) -> pd.DataFrame:
     return asyncio.run(fetch_opportunities(limit))
 
@@ -152,7 +152,7 @@ async def fetch_last_profitable_spike() -> dict | None:
     }
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_last_profitable_spike_cached() -> dict | None:
     return asyncio.run(fetch_last_profitable_spike())
 
@@ -212,7 +212,7 @@ async def fetch_bid_ask_history(symbols: list[str], hours: float = 2.0) -> pd.Da
     return bid_ask_df.sort_values("recorded_at") if not bid_ask_df.empty else bid_ask_df
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_bid_ask_history_cached(symbols: tuple[str, ...], hours: float) -> pd.DataFrame:
     return asyncio.run(fetch_bid_ask_history(list(symbols), hours))
 
@@ -237,12 +237,12 @@ async def fetch_weekly_analytics() -> WeeklyAnalytics:
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=10, show_spinner=False)
 def get_daily_summary_cached() -> DailySummary:
     return asyncio.run(fetch_daily_summary())
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_weekly_analytics_cached() -> WeeklyAnalytics:
     return asyncio.run(fetch_weekly_analytics())
 
@@ -265,7 +265,7 @@ async def fetch_rotation_report(mode: str | None, hours: float = 24.0) -> Rotati
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=10, show_spinner=False)
 def get_rotation_report_cached(mode: str | None, hours: float = 24.0) -> RotationReport | None:
     return asyncio.run(fetch_rotation_report(mode, hours))
 
@@ -286,7 +286,7 @@ async def fetch_holding_time_performance(hours: float = 24.0) -> list[HoldingTim
         await engine.dispose()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_holding_time_performance_cached(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
     return asyncio.run(fetch_holding_time_performance(hours))
 
@@ -309,7 +309,7 @@ async def fetch_robot_status() -> RobotStatus:
         await engine.dispose()
 
 
-@st.cache_data(ttl=3)
+@st.cache_data(ttl=3, show_spinner=False)
 def get_robot_status_cached() -> RobotStatus:
     return asyncio.run(fetch_robot_status())
 
@@ -327,7 +327,7 @@ async def fetch_simple_capital() -> float | None:
         await engine.dispose()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_simple_capital_cached() -> float | None:
     return asyncio.run(fetch_simple_capital())
 
@@ -345,7 +345,7 @@ async def fetch_equity_curve(hours: float = 24.0) -> list[EquityPoint]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=10, show_spinner=False)
 def get_equity_curve_cached(hours: float = 24.0) -> list[EquityPoint]:
     return asyncio.run(fetch_equity_curve(hours))
 
@@ -363,7 +363,7 @@ async def fetch_recent_trades(limit: int = 50) -> list[TradeRow]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_recent_trades_cached(limit: int = 50) -> list[TradeRow]:
     return asyncio.run(fetch_recent_trades(limit))
 
@@ -382,7 +382,7 @@ async def fetch_capital_utilization() -> CapitalUtilization | None:
         await engine.dispose()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_capital_utilization_cached() -> CapitalUtilization | None:
     return asyncio.run(fetch_capital_utilization())
 
@@ -401,7 +401,7 @@ async def fetch_open_positions() -> list[OpenPosition]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=5, show_spinner=False)
 def get_open_positions_cached() -> list[OpenPosition]:
     return asyncio.run(fetch_open_positions())
 
@@ -444,7 +444,7 @@ async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
     }
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_opportunity_funnel_cached(hours: float = 24.0) -> dict:
     return asyncio.run(fetch_opportunity_funnel(hours))
 
@@ -462,7 +462,7 @@ async def fetch_trade_status_breakdown(hours: float = 24.0) -> TradeStatusBreakd
         await engine.dispose()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_trade_status_breakdown_cached(hours: float = 24.0) -> TradeStatusBreakdown | None:
     return asyncio.run(fetch_trade_status_breakdown(hours))
 
@@ -480,7 +480,7 @@ async def fetch_reality_capture(hours: float = 24.0) -> RealityCaptureReport | N
         await engine.dispose()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=15, show_spinner=False)
 def get_reality_capture_cached(hours: float = 24.0) -> RealityCaptureReport | None:
     return asyncio.run(fetch_reality_capture(hours))
 
@@ -498,7 +498,7 @@ async def fetch_performance_metrics(hours: float = 24.0) -> PerformanceMetrics |
         await engine.dispose()
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_performance_metrics_cached(hours: float = 24.0) -> PerformanceMetrics | None:
     return asyncio.run(fetch_performance_metrics(hours))
 
@@ -529,6 +529,6 @@ async def fetch_micro_live_readiness() -> ReadinessSummary:
         return ReadinessSummary(verdict=None, checks=[])
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def get_micro_live_readiness_cached() -> ReadinessSummary:
     return asyncio.run(fetch_micro_live_readiness())
