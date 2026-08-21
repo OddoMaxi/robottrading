@@ -47,6 +47,19 @@ class TradeStatus(StrEnum):
     SIMULATED_EXECUTED = "simulated_executed"
     PARTIAL_FILL = "partial_fill"
     MISSED = "missed"  # a maker leg didn't fill in time — costs nothing, see app.execution.maker_taker
+    # Opportunity Expansion spec, Step 5 (user directive, 2026-08-21) — split
+    # out of MISSED, which used to also cover this. Found live investigating
+    # a run of "missed" outcomes: 55 of 265 were TAKER_TAKER trades, which
+    # are supposed to be a GUARANTEED fill (execution_fill_probability=1.0
+    # by construction, see app.execution.maker_taker) — they were never a
+    # maker-fill failure at all. The real cause is
+    # app.execution.latency_engine.revalidate_after_latency: the priced
+    # edge itself moved/closed between detection and the simulated
+    # execution moment, which can happen regardless of execution mode.
+    # These are economically different failures (a probabilistic fill risk
+    # you chose to take vs. the market moving out from under you) and the
+    # user explicitly asked to measure them separately.
+    EDGE_DISAPPEARED = "edge_disappeared"  # the spread itself closed/moved before the simulated execution moment
     SIMULATED_FAILED = "simulated_failed"  # market data was already stale when priced
     NO_CAPITAL_AVAILABLE = "no_capital_available"  # portfolio's capital is already locked in other open positions
     MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"  # portfolio already holds max_concurrent_trades open positions
@@ -98,7 +111,7 @@ class PaperTrader:
                 opportunity.net_spread_pct, opportunity.break_even_pct, self._latency_profile, self._rng
             )
             if not revalidation.still_valid:
-                return TradeStatus.MISSED
+                return TradeStatus.EDGE_DISAPPEARED
 
         if (
             opportunity.execution_mode
@@ -119,7 +132,7 @@ class PaperTrader:
         if not opportunity.capital_usd or opportunity.expected_profit_usd is None:
             raise ValueError("Opportunity must be fully priced before paper trading")
 
-        if status in (TradeStatus.MISSED, TradeStatus.SIMULATED_FAILED):
+        if status in (TradeStatus.MISSED, TradeStatus.EDGE_DISAPPEARED, TradeStatus.SIMULATED_FAILED):
             return SimulatedTrade(str(opportunity.id), portfolio.name, status, 0.0, 0.0, 0.0, 0.0)
 
         now = now if now is not None else time.time()

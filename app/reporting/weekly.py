@@ -95,7 +95,16 @@ async def build_weekly_analytics(session: AsyncSession, now: datetime | None = N
     ).scalar() or 0
     missed_opportunities = (
         await session.execute(
-            select(func.count()).where(SimulatedTradeRecord.executed_at >= period_start, SimulatedTradeRecord.status == "missed")
+            select(func.count()).where(
+                SimulatedTradeRecord.executed_at >= period_start,
+                # "edge_disappeared" split out of "missed" (Opportunity
+                # Expansion spec, Step 5, 2026-08-21) — both are "we tried
+                # and didn't get it", just for different reasons (maker leg
+                # didn't fill vs. the spread itself closed first); this
+                # metric's own name/intent stays "missed opportunities"
+                # overall, so it counts both rather than silently shrinking.
+                SimulatedTradeRecord.status.in_(["missed", "edge_disappeared"]),
+            )
         )
     ).scalar() or 0
     net_simulated_pnl = (

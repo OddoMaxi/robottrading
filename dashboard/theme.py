@@ -80,6 +80,7 @@ ATTEMPT_OUTCOME_LABELS = {
     "simulated_executed": "Exécuté",
     "partial_fill": "Exécuté (remplissage partiel)",
     "missed": "Manqué — jambe maker non remplie à temps",
+    "edge_disappeared": "Écart disparu avant exécution (latence)",
     "simulated_failed": "Échoué — données déjà obsolètes au moment du pricing",
     "no_capital_available": "Capital indisponible sur ce portefeuille",
     "max_concurrent_positions": "Limite de positions simultanées atteinte",

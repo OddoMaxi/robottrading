@@ -172,15 +172,20 @@ def test_comfortable_edge_survives_latency_revalidation():
 
 def test_razor_thin_edge_can_be_missed_by_latency_revalidation():
     """A spread priced right at its break-even floor must sometimes fail
-    revalidation over many samples — otherwise latency has no teeth."""
-    saw_missed = False
+    revalidation over many samples — otherwise latency has no teeth.
+
+    EDGE_DISAPPEARED, not MISSED (Opportunity Expansion spec, Step 5,
+    2026-08-21) — this is the market moving/closing before the simulated
+    execution moment, an economically different failure from a maker leg
+    not filling, which is what MISSED is reserved for now."""
+    saw_edge_disappeared = False
     for seed in range(500):
         trader = PaperTrader(rng=random.Random(seed))
         opp = make_opportunity(net_spread_pct=0.051, break_even_pct=0.05)
-        if trader.determine_outcome(opp) == TradeStatus.MISSED:
-            saw_missed = True
+        if trader.determine_outcome(opp) == TradeStatus.EDGE_DISAPPEARED:
+            saw_edge_disappeared = True
             break
-    assert saw_missed
+    assert saw_edge_disappeared
 
 
 def test_opportunity_without_break_even_pct_skips_latency_revalidation():
@@ -198,6 +203,26 @@ def test_taker_taker_never_misses_regardless_of_probability():
     assert trader.determine_outcome(opp) == TradeStatus.SIMULATED_EXECUTED
 
 
+def test_taker_taker_can_still_fail_latency_revalidation_but_never_as_missed():
+    """Bug found live, 2026-08-21: 55 of 265 "missed" trades in a 24h window
+    were TAKER_TAKER — supposed to be a guaranteed fill by construction
+    (execution_fill_probability=1.0, the maker-fill check above explicitly
+    skips taker_taker). The real cause was latency revalidation, mislabeled
+    under the same MISSED status as a genuine maker-fill failure. A
+    taker/taker order can still fail latency revalidation (the edge itself
+    can close regardless of execution mode) — it must come back as
+    EDGE_DISAPPEARED, never MISSED, so the two causes stay distinguishable."""
+    saw_edge_disappeared = False
+    for seed in range(500):
+        trader = PaperTrader(rng=random.Random(seed))
+        opp = make_opportunity(execution_mode="taker_taker", execution_fill_probability=1.0, net_spread_pct=0.051, break_even_pct=0.05)
+        outcome = trader.determine_outcome(opp)
+        assert outcome != TradeStatus.MISSED
+        if outcome == TradeStatus.EDGE_DISAPPEARED:
+            saw_edge_disappeared = True
+    assert saw_edge_disappeared
+
+
 def test_maker_mode_can_miss_when_roll_fails():
     # rng seeded so the first random() call is deterministic and known to be > 0.01
     trader = PaperTrader(rng=random.Random(1))
@@ -205,12 +230,13 @@ def test_maker_mode_can_miss_when_roll_fails():
     assert trader.determine_outcome(opp) == TradeStatus.MISSED
 
 
-def test_missed_and_failed_trades_cost_nothing():
+@pytest.mark.parametrize("status", [TradeStatus.MISSED, TradeStatus.EDGE_DISAPPEARED, TradeStatus.SIMULATED_FAILED])
+def test_missed_and_failed_trades_cost_nothing(status):
     trader = PaperTrader()
     opp = make_opportunity()
     portfolio = make_portfolio(1_000.0)
 
-    trade = trader.simulate(opp, portfolio, TradeStatus.MISSED)
+    trade = trader.simulate(opp, portfolio, status)
 
     assert trade.net_profit_usd == 0.0
     assert trade.capital_usd == 0.0
