@@ -45,6 +45,7 @@ from app.engines.stablecoin import StablecoinArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
 from app.execution.validator import validate
 from app.market_data.store import market_data_store
+from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
@@ -62,8 +63,71 @@ settings = get_settings()
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
+# Opportunity Expansion spec, Step 1 (user directive, 2026-08-21) — these two
+# are now the STATIC FALLBACK only, used if live discovery (below) fails or
+# comes back implausibly small. The values collectors/engines actually run
+# with are computed at startup by _resolve_symbol_universe().
 SPOT_SYMBOLS = sorted({f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS} | set(STABLECOIN_PAIRS) | set(TRIANGULAR_CROSS_PAIRS))
 CHART_SYMBOLS = [f"{a}/USDT" for a in CROSS_EXCHANGE_ASSETS]
+
+# Confirmed live, 2026-08-21 (repeated, consistent WS subscribe rejections
+# across 5 separate process restarts): these TRIANGULAR_CROSS_PAIRS symbols
+# are not listed on Bybit at all. Every static SPOT_SYMBOLS entry used to be
+# pushed identically to all 3 exchanges regardless of whether it's real
+# there — this wasted ~19% of Bybit's subscription slots on symbols it will
+# never return a quote for. Hand-verified exclusion rather than a 4th
+# discovery call (discover_symbol_universe only covers X/USDT pairs, not
+# these BTC/FDUSD-quoted triangular-only ones) — a fuller "discover every
+# quote asset, not just USDT" system is a legitimate future step, not done
+# tonight.
+BYBIT_UNLISTED_SYMBOLS = {"BNB/BTC", "BNB/FDUSD", "BTC/FDUSD", "ETH/FDUSD", "FDUSD/USDC", "FDUSD/USDT", "SOL/FDUSD", "XRP/FDUSD"}
+# Below this many assets confirmed live on 2+ exchanges, a discovery result
+# is more likely a partial outage/bug than a genuine "the market shrank"
+# signal — distrust it and fall back to the static list rather than run
+# the engine on a suspiciously tiny universe.
+MIN_DISCOVERED_ASSETS = 5
+_last_discovered_universe: DiscoveredUniverse | None = None  # set by _resolve_symbol_universe(), read by /market/symbol-universe
+
+
+async def _resolve_symbol_universe() -> tuple[list[str], list[str], dict[str, list[str]]]:
+    """Live REST discovery (app.market_data.symbol_discovery) replaces the
+    hand-verified-once CROSS_EXCHANGE_ASSETS with what each exchange
+    actually lists, live, right now — self-correcting on every restart
+    instead of silently drifting stale between manual re-checks. Returns
+    (effective_assets, effective_chart_symbols, per_exchange_spot_symbols).
+    """
+    global _last_discovered_universe
+    universe = await discover_symbol_universe()
+    _last_discovered_universe = universe
+
+    if universe.degraded or len(universe.assets_on_2_or_more_exchanges) < MIN_DISCOVERED_ASSETS:
+        logger.warning(
+            "symbol discovery degraded or implausibly small (%d assets, degraded=%s) — falling back to the static %d-asset list",
+            len(universe.assets_on_2_or_more_exchanges),
+            universe.degraded,
+            len(CROSS_EXCHANGE_ASSETS),
+        )
+        effective_assets = CROSS_EXCHANGE_ASSETS
+    else:
+        added = sorted(set(universe.assets_on_2_or_more_exchanges) - set(CROSS_EXCHANGE_ASSETS))
+        removed = sorted(set(CROSS_EXCHANGE_ASSETS) - set(universe.assets_on_2_or_more_exchanges))
+        logger.warning(
+            "symbol discovery: %d assets confirmed live on 2+ exchanges (static list had %d) — added=%s removed=%s",
+            len(universe.assets_on_2_or_more_exchanges),
+            len(CROSS_EXCHANGE_ASSETS),
+            added,
+            removed,
+        )
+        effective_assets = universe.assets_on_2_or_more_exchanges
+
+    effective_chart_symbols = [f"{a}/USDT" for a in effective_assets]
+    base_spot = sorted(set(effective_chart_symbols) | set(STABLECOIN_PAIRS) | set(TRIANGULAR_CROSS_PAIRS))
+    per_exchange_spot_symbols = {
+        "binance": base_spot,
+        "okx": base_spot,
+        "bybit": [s for s in base_spot if s not in BYBIT_UNLISTED_SYMBOLS],
+    }
+    return effective_assets, effective_chart_symbols, per_exchange_spot_symbols
 # Event-driven detection: react to a new tick almost immediately instead of
 # polling every few seconds — a real spread observed on 2026-08-19 opened
 # and closed within ~15 seconds, which a fixed 3s poll would mostly miss.
@@ -225,10 +289,20 @@ async def lifespan(app: FastAPI):
         if orphaned_count:
             logger.warning("closed %d orphaned opportunity-tracking rows left open by a previous process", orphaned_count)
 
+    # Opportunity Expansion spec, Step 1 (user directive, 2026-08-21) — live
+    # discovery replaces the static, hand-verified-once symbol lists with
+    # what each exchange actually lists right now. Reassigning the module
+    # globals (rather than only using locals here) means detection_loop's
+    # own CHART_SYMBOLS reference — read fresh from the module namespace on
+    # every scan — picks up the discovered set too, with no other code
+    # changed there.
+    global CHART_SYMBOLS
+    effective_assets, CHART_SYMBOLS, per_exchange_spot_symbols = await _resolve_symbol_universe()
+
     collectors = [
-        BinanceCollector(SPOT_SYMBOLS),
-        OkxCollector(SPOT_SYMBOLS),
-        BybitCollector(SPOT_SYMBOLS),
+        BinanceCollector(per_exchange_spot_symbols["binance"]),
+        OkxCollector(per_exchange_spot_symbols["okx"]),
+        BybitCollector(per_exchange_spot_symbols["bybit"]),
         # Reality Engine spec, sections 7-8, 53 — real multi-level depth for
         # VWAP, Binance first ("Core Exchange"). Purely additive: the
         # top-of-book BinanceCollector above is untouched, so a bug here
@@ -257,7 +331,9 @@ async def lifespan(app: FastAPI):
     # decision later — this is a strategy-set change, not a data-loss one.
     engines = [
         StablecoinArbitrageEngine(),
-        CrossExchangeArbitrageEngine(),
+        # Opportunity Expansion spec, Step 1 — the live-discovered universe,
+        # not the static CROSS_EXCHANGE_ASSETS (see _resolve_symbol_universe).
+        CrossExchangeArbitrageEngine(assets=effective_assets),
         *(TriangularArbitrageEngine(exchange=exchange) for exchange in PRIORITY_EXCHANGES),
     ]
     detector = OpportunityDetector(engines)
@@ -336,6 +412,29 @@ async def shadow_live_status() -> dict:
         "signals_on_radar": status.signals_on_radar,
         "approved_on_radar": status.approved_on_radar,
         "rejection_breakdown": status.rejection_breakdown,
+    }
+
+
+@app.get("/market/symbol-universe")
+async def symbol_universe() -> dict:
+    """Opportunity Expansion spec, Step 1 — the result of the live symbol
+    discovery run at this process's startup (app.market_data.symbol_discovery),
+    for the same reason /shadow-live/status exists: an auditable place to
+    see exactly what the engine decided rather than trust it happened."""
+    if _last_discovered_universe is None:
+        return {"available": False, "detail": "discovery has not run yet (still starting up)"}
+    universe = _last_discovered_universe
+    return {
+        "available": True,
+        "degraded": universe.degraded,
+        "assets_on_2_or_more_exchanges": universe.assets_on_2_or_more_exchanges,
+        "asset_count": len(universe.assets_on_2_or_more_exchanges),
+        "per_exchange": {
+            exchange: {"reachable": result.reachable, "symbols_above_liquidity_floor": len(result.quote_volume_by_symbol)}
+            for exchange, result in universe.per_exchange.items()
+        },
+        "static_fallback_asset_count": len(CROSS_EXCHANGE_ASSETS),
+        "bybit_confirmed_unlisted_symbols": sorted(BYBIT_UNLISTED_SYMBOLS),
     }
 
 
