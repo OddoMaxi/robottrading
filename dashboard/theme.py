@@ -317,16 +317,20 @@ def inject_css() -> None:
         .simple-connection-reconnecting {{ background: rgba(250,178,25,0.16); color: #fbbf24; }}
         .simple-connection-down {{ background: rgba(208,59,59,0.16); color: #f87171; }}
 
+        /* A soft, slow wash — not a ring that pops in instantly — so a
+        value update reads as "this just settled" rather than a flash. */
         @keyframes pulseGood {{
-            0% {{ box-shadow: 0 0 0 0 rgba(12,163,12,0.45); }}
-            100% {{ box-shadow: 0 0 0 10px rgba(12,163,12,0); }}
+            0% {{ background: rgba(12,163,12,0.16); border-color: rgba(12,163,12,0.32); }}
+            100% {{ background: {SURFACE}; border-color: {BORDER}; }}
         }}
         @keyframes pulseBad {{
-            0% {{ box-shadow: 0 0 0 0 rgba(208,59,59,0.45); }}
-            100% {{ box-shadow: 0 0 0 10px rgba(208,59,59,0); }}
+            0% {{ background: rgba(208,59,59,0.14); border-color: rgba(208,59,59,0.30); }}
+            100% {{ background: {SURFACE}; border-color: {BORDER}; }}
         }}
-        .simple-card.pulse-good {{ animation: pulseGood 1.1s ease-out 1; }}
-        .simple-card.pulse-bad {{ animation: pulseBad 1.1s ease-out 1; }}
+        .simple-card {{ transition: background 1.8s ease, border-color 1.8s ease; }}
+        .simple-card.pulse-good {{ animation: pulseGood 2.2s ease-out 1; }}
+        .simple-card.pulse-bad {{ animation: pulseBad 2.2s ease-out 1; }}
+        .simple-card-figure, .simple-card-sub {{ transition: color 0.5s ease; }}
 
         .simple-pnl-split-row {{ display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.92rem; }}
         .simple-pnl-split-row .k {{ color: {INK_MUTED}; }}

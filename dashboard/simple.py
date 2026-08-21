@@ -93,10 +93,10 @@ CONNECTION_BADGE = {
 }
 
 
-@st.fragment(run_every="2s")
+@st.fragment(run_every="3s")
 def render_live_status_row() -> None:
     """Live Dashboard addendum, sections 10-11 — the robot status pill and
-    connection indicator update on their own every 2s, independent of the
+    connection indicator update on their own every 3s, independent of the
     nav bar below (which only changes on an explicit click). No manual
     reconnect is needed: a fragment that keeps auto-rerunning *is* the
     reconnect loop — the moment fresh data is available again, the next
@@ -234,20 +234,28 @@ def render_trades_rotation_grid(today: RotationReport | None, utilization: Capit
 
 def render_positions_card(positions: list[OpenPosition]) -> None:
     """Continuous Execution spec, section 47 — no more than symbol / capital
-    / booked P&L per position; full detail stays in Mode Expert."""
+    / booked P&L per position; full detail stays in Mode Expert.
+
+    Always renders the card shell, even with zero positions (Live
+    Dashboard addendum) — a card that appears/disappears entirely between
+    live-fragment ticks shifts every card below it up or down, which reads
+    as a hard reload rather than a smooth update. A stable placeholder
+    keeps the page layout still while only the content inside changes."""
     if not positions:
-        return
-    rows = []
-    for p in positions:
-        asset = p.symbol.split("->")[0].split("/")[0]
-        tone_color = STATUS_GOOD if p.net_profit_usd >= 0 else STATUS_CRITICAL
-        rows.append(
-            f'<div class="simple-opp-row"><span class="k">{asset}</span>'
-            f'<span class="v">{_money(p.capital_usd)}</span>'
-            f'<span class="v" style="color:{tone_color};margin-left:10px;">{p.net_profit_usd:+.2f} $</span></div>'
-        )
+        body = '<div class="simple-card-sub">Aucune position en cours actuellement.</div>'
+    else:
+        rows = []
+        for p in positions:
+            asset = p.symbol.split("->")[0].split("/")[0]
+            tone_color = STATUS_GOOD if p.net_profit_usd >= 0 else STATUS_CRITICAL
+            rows.append(
+                f'<div class="simple-opp-row"><span class="k">{asset}</span>'
+                f'<span class="v">{_money(p.capital_usd)}</span>'
+                f'<span class="v" style="color:{tone_color};margin-left:10px;">{p.net_profit_usd:+.2f} $</span></div>'
+            )
+        body = "".join(rows)
     st.markdown(
-        '<div class="simple-card"><div class="simple-card-label">Positions en cours</div>' + "".join(rows) + "</div>",
+        '<div class="simple-card"><div class="simple-card-label">Positions en cours</div>' + body + "</div>",
         unsafe_allow_html=True,
     )
 
@@ -258,8 +266,16 @@ def render_event_feed(trades: list[TradeRow], now: datetime | None = None) -> No
     fetched recent trades (no new backend query): a row is either "position
     ouverte" (still inside its holding period) or "trade clôturé" with its
     booked result — the same open/closed distinction TradeStatusBreakdown
-    already uses (app.reporting.simple_summary._classify_trade_status)."""
+    already uses (app.reporting.simple_summary._classify_trade_status).
+    Always renders the card shell (Live Dashboard addendum) — see
+    render_positions_card's docstring for why an appearing/disappearing
+    card is worse than an empty-state placeholder."""
     if not trades:
+        st.markdown(
+            '<div class="simple-card"><div class="simple-card-label">Activité récente</div>'
+            '<div class="simple-card-sub">Aucune activité pour l\'instant.</div></div>',
+            unsafe_allow_html=True,
+        )
         return
     now = now or datetime.now(UTC)
     rows = []
@@ -456,14 +472,14 @@ def render_equity_chart(hours: float = 24.0) -> None:
     st.plotly_chart(style_fig(fig, height=260), use_container_width=True)
 
 
-@st.fragment(run_every="2s")
+@st.fragment(run_every="3s")
 def render_live_accueil_body() -> None:
     """Live Dashboard addendum — everything on the Accueil page that should
     change without a manual refresh lives in this one fragment, so a single
-    2s tick keeps capital, gain, positions, the current opportunity, and
+    3s tick keeps capital, gain, positions, the current opportunity, and
     the event feed all in sync with each other (no risk of one card
     updating a beat ahead of another). The equity chart gets its own,
-    slower-cadence fragment below — redrawing a Plotly chart every 2s would
+    slower-cadence fragment below — redrawing a Plotly chart every 3s would
     be visually noisy for something that doesn't need sub-10s freshness."""
     df = data.get_opportunities_cached()
     capital = data.get_simple_capital_cached()
