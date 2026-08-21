@@ -48,6 +48,11 @@ class FunnelStage:
 class ExecutionFunnelReport:
     stages: list[FunnelStage]
     rejection_reasons: list[tuple[str, int, float]] = field(default_factory=list)  # (reason, count, pct_of_rejected)
+    # Raw scan-tick volume (sum of updates_count across every row) — always
+    # >= "detected" (each row is observed >= 1 time), so it's reported
+    # separately rather than folded into the stages list's own "% of
+    # detected" convention, which would read oddly above 100%.
+    observed: int = 0
 
     def stage(self, name: str) -> FunnelStage | None:
         return next((s for s in self.stages if s.name == name), None)
@@ -66,6 +71,7 @@ def build_execution_funnel_report(
     executed: int,
     closed: int,
     rejection_counts: list[tuple[str, int]],
+    observed: int = 0,
 ) -> ExecutionFunnelReport:
     """Pure aggregation step — every input is an already-fetched count, so
     this is unit-testable without a database."""
@@ -79,16 +85,22 @@ def build_execution_funnel_report(
     ]
     total_rejected = sum(count for _, count in rejection_counts)
     rejection_reasons = [(reason, count, _pct(count, total_rejected)) for reason, count in rejection_counts]
-    return ExecutionFunnelReport(stages=stages, rejection_reasons=rejection_reasons)
+    return ExecutionFunnelReport(stages=stages, rejection_reasons=rejection_reasons, observed=observed)
 
 
 async def build_execution_funnel(session: AsyncSession, hours: float = 24.0, now: datetime | None = None) -> ExecutionFunnelReport:
     now = now or datetime.now(UTC).replace(tzinfo=None)
     cutoff = now - timedelta(hours=hours)
 
-    detected = (
-        await session.execute(select(func.count()).where(OpportunityRecord.detected_at >= cutoff))
-    ).scalar() or 0
+    detected, observed = (
+        await session.execute(
+            select(func.count(), func.coalesce(func.sum(OpportunityRecord.updates_count), 0)).where(
+                OpportunityRecord.detected_at >= cutoff
+            )
+        )
+    ).first()
+    detected = detected or 0
+    observed = observed or 0
 
     profitable_after_fees = (
         await session.execute(
@@ -149,4 +161,5 @@ async def build_execution_funnel(session: AsyncSession, hours: float = 24.0, now
         executed=int(executed),
         closed=int(closed),
         rejection_counts=[(reason, int(count)) for reason, count in rejection_rows],
+        observed=int(observed),
     )

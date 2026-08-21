@@ -477,8 +477,8 @@ def render_explainer(today: RotationReport | None) -> None:
     executed = today.completed_trades if today else 0
     winning = today.win_count if today else 0
     net_pnl = today.net_pnl_usd if today else 0.0
-    funnel = data.get_opportunity_funnel_cached(hours=24.0)
-    narrative = build_explainer_narrative(funnel["observed"], funnel["valid"], executed, winning, net_pnl)
+    funnel = data.get_execution_funnel_cached(hours=24.0)
+    narrative = build_explainer_narrative(funnel.observed, funnel.stage("profitable_after_fees").count, executed, winning, net_pnl)
     st.markdown(
         '<div class="simple-card"><div class="simple-card-label">🤖 Robot explique</div>'
         f'<div class="simple-card-sub" style="color:{INK_SECONDARY};">{narrative}</div></div>',
@@ -639,8 +639,19 @@ def render_trades_page() -> None:
 def render_opportunity_funnel() -> None:
     """Continuous Execution spec, sections 42-43, urgent audit item 6 — how
     many raw ticks came in, how many were genuinely distinct, how many
-    cleared fees, how many were actually attempted, and how many filled."""
-    funnel = data.get_opportunity_funnel_cached(hours=24.0)
+    cleared fees, how many were actually validated for execution, how many
+    were actually attempted, and how many filled.
+
+    Sources from the same app.reporting.execution_funnel used by the
+    Expert Mode audit — one funnel computation, not two that can drift out
+    of sync. "Écart positif détecté" (previously "Opportunités valides", a
+    label users read as "ready to trade" when it only ever meant "the raw
+    edge was above zero") is deliberately distinct from the new
+    "Exécutables" stage below it, which is the one that actually reflects
+    validate()'s full bar (classification, freshness, no duplicate
+    position) — the gap between the two is usually the real answer to
+    "why so few trades for so many opportunities"."""
+    funnel = data.get_execution_funnel_cached(hours=24.0)
     breakdown = data.get_trade_status_breakdown_cached(hours=24.0)
     attempts = (breakdown.closed + breakdown.open + breakdown.failed) if breakdown else 0
     filled = (breakdown.closed + breakdown.open) if breakdown else 0
@@ -648,9 +659,10 @@ def render_opportunity_funnel() -> None:
 
     st.markdown('<div class="simple-card-label" style="margin-top:6px;">Entonnoir des opportunités (24h)</div>', unsafe_allow_html=True)
     stages = [
-        ("Observations de marché", funnel["observed"]),
-        ("Opportunités uniques", funnel["unique"]),
-        ("Opportunités valides", funnel["valid"]),
+        ("Observations de marché", funnel.observed),
+        ("Opportunités uniques", funnel.stage("detected").count),
+        ("Écart positif détecté", funnel.stage("profitable_after_fees").count),
+        ("Exécutables", funnel.stage("executable").count),
         ("Tentatives d'exécution", attempts),
         ("Trades exécutés", filled),
         ("Gagnants", winning),
@@ -661,13 +673,11 @@ def render_opportunity_funnel() -> None:
     )
     st.markdown(f'<div class="simple-card">{rows}</div>', unsafe_allow_html=True)
 
-    if funnel["rejections"]:
+    if funnel.rejection_reasons:
         st.markdown('<div class="simple-card-label" style="margin-top:14px;">Pourquoi les opportunités sont rejetées ?</div>', unsafe_allow_html=True)
-        total_rejections = sum(count for _, count in funnel["rejections"])
         reason_rows = []
-        for reason, count in funnel["rejections"]:
+        for reason, count, share in funnel.rejection_reasons:
             label = REJECTION_REASON_LABELS.get(reason, reason)
-            share = count / total_rejections * 100 if total_rejections else 0.0
             reason_rows.append(
                 f'<div class="simple-perf-row"><span class="k">{label}</span>'
                 f'<span class="v" style="color:{INK_PRIMARY};">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({share:.0f} %)</span></span></div>'.replace(",", " ")

@@ -407,47 +407,8 @@ def get_open_positions_cached() -> list[OpenPosition]:
     return asyncio.run(fetch_open_positions())
 
 
-async def fetch_opportunity_funnel(hours: float = 24.0) -> dict:
-    """Continuous Execution spec, sections 41-43 — observed vs unique
-    opportunities, the validated funnel, and why the rest were rejected."""
-    engine = create_async_engine(get_settings().database_url)
-    try:
-        session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        cutoff = (datetime.now(UTC) - timedelta(hours=hours)).replace(tzinfo=None)
-        async with session_factory() as session:
-            unique_count, observed_count = (
-                await session.execute(
-                    select(func.count(), func.coalesce(func.sum(OpportunityRecord.updates_count), 0)).where(
-                        OpportunityRecord.detected_at >= cutoff
-                    )
-                )
-            ).first()
-            valid_count = (
-                await session.execute(
-                    select(func.count()).where(OpportunityRecord.detected_at >= cutoff, OpportunityRecord.net_spread_pct > 0)
-                )
-            ).scalar() or 0
-            rejection_rows = (
-                await session.execute(
-                    select(OpportunityRecord.rejection_reason, func.count())
-                    .where(OpportunityRecord.detected_at >= cutoff, OpportunityRecord.rejection_reason.is_not(None))
-                    .group_by(OpportunityRecord.rejection_reason)
-                    .order_by(func.count().desc())
-                )
-            ).all()
-    finally:
-        await engine.dispose()
-    return {
-        "observed": int(observed_count or 0),
-        "unique": int(unique_count or 0),
-        "valid": int(valid_count),
-        "rejections": [(reason, int(count)) for reason, count in rejection_rows],
-    }
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def get_opportunity_funnel_cached(hours: float = 24.0) -> dict:
-    return asyncio.run(fetch_opportunity_funnel(hours))
 
 
 async def fetch_trade_status_breakdown(hours: float = 24.0) -> TradeStatusBreakdown | None:
