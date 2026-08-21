@@ -22,6 +22,31 @@ HOLDING_PERIOD_FUNDING_EVENTS = 9
 FUNDING_INTERVAL_SECONDS = 8 * 3600
 
 
+def funding_events_crossed(next_funding_time: float, now: float, target_hold_seconds: float) -> int:
+    """Reality Engine spec, section 21 — how many funding payments a
+    position opened `now` and held for `target_hold_seconds` actually
+    crosses, given the *next* one is due at `next_funding_time`.
+
+    Not simply target_hold_seconds // FUNDING_INTERVAL_SECONDS: a position
+    can open at any point within the current 8h funding cycle, and that
+    phase offset changes whether it captures 8 or 9 payments over a
+    ~72h hold. `next_funding_time` was already collected by every funding
+    poller but never read anywhere until this — the fixed constant below
+    was a reasonable approximation, this makes it exact.
+    """
+    time_to_first_funding = max(0.0, next_funding_time - now)
+    remaining_after_first = target_hold_seconds - time_to_first_funding
+    if remaining_after_first <= 0:
+        return 0  # position closes before even the next funding event
+    # Events land at time_to_first, +interval, +2*interval, ... — count how
+    # many fall strictly before target_hold_seconds (a position that closes
+    # the exact instant a payment posts doesn't capture it). The epsilon
+    # avoids a floating-point exact multiple of the interval rounding up
+    # into counting that excluded boundary event.
+    epsilon = 1e-6
+    return 1 + int((remaining_after_first - epsilon) // FUNDING_INTERVAL_SECONDS)
+
+
 class FundingArbitrageEngine(ArbitrageEngine):
     strategy_name = Strategy.FUNDING
 
@@ -87,10 +112,19 @@ class FundingArbitrageEngine(ArbitrageEngine):
                     exchange, MarketType.PERPETUAL, perp_notional, is_maker=False
                 )
 
-                # Funding income compounds over the holding period; basis is
-                # deliberately not counted here (no honest way to assume it
-                # converges in our favor from a single reading) — conservative.
-                total_funding_income = perp_notional * funding.funding_rate * self.holding_period_funding_events
+                # Reality Engine spec, section 21 — how many payments this
+                # position actually crosses depends on where "now" falls in
+                # the current funding cycle relative to next_funding_time,
+                # not just the target hold duration divided evenly.
+                target_hold_seconds = self.holding_period_funding_events * FUNDING_INTERVAL_SECONDS
+                events_crossed = funding_events_crossed(funding.next_funding_time, time.time(), target_hold_seconds)
+                if events_crossed <= 0:
+                    continue  # closes before the next funding event even pays out
+
+                # Basis is deliberately not counted here (no honest way to
+                # assume it converges in our favor from a single reading) —
+                # conservative; only the funding income itself compounds.
+                total_funding_income = perp_notional * funding.funding_rate * events_crossed
                 net_profit = total_funding_income - spot_fee_round_trip - perp_fee_round_trip
                 net_spread_pct = net_profit / self.capital_usd * 100
 
@@ -107,7 +141,7 @@ class FundingArbitrageEngine(ArbitrageEngine):
                         capital_usd=self.capital_usd,
                         expected_profit_usd=net_profit,
                         market_data_age_seconds=spot_freshness.market_data_age_seconds,
-                        holding_period_seconds=self.holding_period_funding_events * FUNDING_INTERVAL_SECONDS,
+                        holding_period_seconds=target_hold_seconds,
                         capital_is_liquidity_capped=False,  # no depth data for the perpetual leg
                     )
                 )
