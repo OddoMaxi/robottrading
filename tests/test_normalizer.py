@@ -1,4 +1,9 @@
-from app.market_data.normalizer import normalize_binance_book_ticker, normalize_bybit_orderbook, normalize_okx_ticker
+from app.market_data.normalizer import (
+    normalize_binance_book_ticker,
+    normalize_binance_partial_depth,
+    normalize_bybit_orderbook,
+    normalize_okx_ticker,
+)
 
 
 def test_normalize_binance_book_ticker():
@@ -36,3 +41,25 @@ def test_normalize_bybit_orderbook():
 
 def test_normalize_bybit_orderbook_missing_side_returns_none():
     assert normalize_bybit_orderbook({"s": "BTCUSDT", "b": [], "a": [["100000.2", "0.8"]]}, ts_ms=1700000000000) is None
+
+
+def test_normalize_binance_partial_depth():
+    book = normalize_binance_partial_depth(
+        "BTC/USDT",
+        {
+            "lastUpdateId": 160,
+            "bids": [["99990.1", "1.2"], ["99989.0", "3.0"]],
+            "asks": [["100000.2", "0.8"], ["100001.0", "2.5"]],
+        },
+    )
+    assert book.exchange == "binance"
+    assert book.symbol == "BTC/USDT"
+    assert len(book.bids) == 2
+    assert len(book.asks) == 2
+    assert book.bids[0].price == 99990.1
+    assert book.bids[0].quantity == 1.2
+    assert book.asks[1].price == 100001.0
+
+
+def test_normalize_binance_partial_depth_missing_side_returns_none():
+    assert normalize_binance_partial_depth("BTC/USDT", {"lastUpdateId": 1, "bids": [], "asks": [["1", "1"]]}) is None

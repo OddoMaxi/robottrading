@@ -6,6 +6,7 @@ from app.config.constants import MarketType
 from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
 from app.market_data.normalizer import NormalizedQuote
+from app.market_data.orderbook import OrderBook, OrderBookLevel
 from app.market_data.store import MarketDataStore
 
 
@@ -39,6 +40,51 @@ async def test_cross_exchange_detects_spread():
     assert opp.legs[1]["exchange"] == "okx"
     assert opp.gross_spread_pct > 0
     assert opp.net_spread_pct < opp.gross_spread_pct  # fees reduce it
+
+
+@pytest.mark.asyncio
+async def test_cross_exchange_uses_real_order_book_depth_when_available():
+    """Reality Engine spec, sections 7-8 — with only $100 available at the
+    literal top-of-book price, a $1,000 trade should VWAP through deeper
+    real levels (when present) instead of being capped at the thin
+    top-of-book quantity the way the single-level fallback would cap it."""
+    store = MarketDataStore()
+    thin_top_of_book = make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000, qty=0.001)  # only $100 at best price
+    store.update_quote(thin_top_of_book)
+    store.update_quote(make_quote("okx", "BTC/USDT", bid=100_300, ask=100_310))
+    store.update_order_book(
+        OrderBook(
+            exchange="binance",
+            symbol="BTC/USDT",
+            bids=[OrderBookLevel(99_990, 0.001)],
+            asks=[OrderBookLevel(100_000, 0.001), OrderBookLevel(100_010, 0.01)],  # deeper levels absorb the rest
+            timestamp=time.time(),
+        )
+    )
+
+    engine = CrossExchangeArbitrageEngine(assets=["BTC"], store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    assert len(opportunities) == 1
+    # Filled close to the full $1,000 via the deeper book, not capped at
+    # the ~$100 the top-of-book quote's own ask_quantity would allow.
+    assert opportunities[0].capital_usd > 500
+
+
+@pytest.mark.asyncio
+async def test_cross_exchange_falls_back_to_top_of_book_without_a_local_order_book():
+    """Same thin top-of-book, but no order book populated for it — must
+    cap the fill at what the quote itself says is available, same as
+    before real depth data existed."""
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000, qty=0.001))
+    store.update_quote(make_quote("okx", "BTC/USDT", bid=100_300, ask=100_310))
+
+    engine = CrossExchangeArbitrageEngine(assets=["BTC"], store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    assert len(opportunities) == 1
+    assert opportunities[0].capital_usd == pytest.approx(100.0, abs=1.0)
 
 
 @pytest.mark.asyncio

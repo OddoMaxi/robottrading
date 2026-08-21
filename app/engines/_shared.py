@@ -9,10 +9,35 @@ from app.analytics.break_even import compute_break_even
 from app.analytics.fees import FeeEngine
 from app.config.constants import NOMINAL_FAST_HOLDING_SECONDS, MarketType, Strategy
 from app.execution.execution_simulator import simulate_best_execution
+from app.market_data.normalizer import NormalizedQuote
 from app.market_data.orderbook import OrderBookLevel, simulate_vwap
 from app.market_data.store import MarketDataStore
 from app.opportunity.false_opportunity_filter import check_leg_pair_sync
 from app.opportunity.models import Opportunity
+
+# Reality Engine spec, sections 7-8 — a real order book snapshot older than
+# this is treated the same as not having one (falls back to the top-of-book
+# approximation), rather than VWAP-pricing a trade against depth that's
+# stopped reflecting the live book. depth20@100ms updates every 100ms, so
+# anything past a couple of seconds means that feed has stalled.
+MAX_ORDER_BOOK_AGE_SECONDS = 2.0
+
+
+def _resolve_ask_levels(store: MarketDataStore, exchange: str, symbol: str, quote: NormalizedQuote, now: float) -> list[OrderBookLevel]:
+    """Real multi-level depth where a fresh local order book exists for
+    this (exchange, symbol) — Binance spot only, for now (section 53) —
+    else the same single top-of-book level engines have always used."""
+    book = store.get_order_book(exchange, symbol)
+    if book is not None and book.asks and (now - book.timestamp) <= MAX_ORDER_BOOK_AGE_SECONDS:
+        return book.asks
+    return [OrderBookLevel(quote.ask, quote.ask_quantity)]
+
+
+def _resolve_bid_levels(store: MarketDataStore, exchange: str, symbol: str, quote: NormalizedQuote, now: float) -> list[OrderBookLevel]:
+    book = store.get_order_book(exchange, symbol)
+    if book is not None and book.bids and (now - book.timestamp) <= MAX_ORDER_BOOK_AGE_SECONDS:
+        return book.bids
+    return [OrderBookLevel(quote.bid, quote.bid_quantity)]
 
 
 class QuoteSpreadScanner:
@@ -83,10 +108,13 @@ class QuoteSpreadScanner:
     def _price(
         self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even_pct, market_data_age_seconds
     ) -> Opportunity | None:
-        # V1 collectors only carry top-of-book (bookTicker/tickers streams), so
-        # the "order book" fed to the Liquidity/Slippage engines has one level.
-        buy_fill = simulate_vwap([OrderBookLevel(buy_quote.ask, buy_quote.ask_quantity)], self.capital_usd)
-        sell_fill = simulate_vwap([OrderBookLevel(sell_quote.bid, sell_quote.bid_quantity)], self.capital_usd)
+        # Real multi-level depth where a local order book is available and
+        # fresh (Binance spot, section 53's "Core Exchange" priority) —
+        # everywhere else, still the single top-of-book level collectors
+        # have always carried (bookTicker/tickers streams).
+        now = time.time()
+        buy_fill = simulate_vwap(_resolve_ask_levels(self.store, buy_exchange, symbol, buy_quote, now), self.capital_usd)
+        sell_fill = simulate_vwap(_resolve_bid_levels(self.store, sell_exchange, symbol, sell_quote, now), self.capital_usd)
         if buy_fill.filled_usd <= 0 or sell_fill.filled_usd <= 0:
             return None
 

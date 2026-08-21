@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.collectors.binance.basis_futures import poll_binance_delivery_futures
 from app.collectors.binance.collector import BinanceCollector
+from app.collectors.binance.depth_collector import BinanceDepthCollector
 from app.collectors.binance.funding import poll_binance_funding
 from app.collectors.bybit.collector import BybitCollector
 from app.collectors.bybit.funding import poll_bybit_funding
@@ -175,9 +176,15 @@ async def lifespan(app: FastAPI):
         BinanceCollector(SPOT_SYMBOLS),
         OkxCollector(SPOT_SYMBOLS),
         BybitCollector(SPOT_SYMBOLS),
+        # Reality Engine spec, sections 7-8, 53 — real multi-level depth for
+        # VWAP, Binance first ("Core Exchange"). Purely additive: the
+        # top-of-book BinanceCollector above is untouched, so a bug here
+        # can't take down the quotes every engine already depends on.
+        BinanceDepthCollector(CHART_SYMBOLS),
     ]
     for collector in collectors:
-        background_tasks.append(asyncio.create_task(collector.run(market_data_store), name=f"collector:{collector.exchange}"))
+        task_name = f"collector:{collector.exchange}:{type(collector).__name__}"
+        background_tasks.append(asyncio.create_task(collector.run(market_data_store), name=task_name))
 
     background_tasks.append(asyncio.create_task(poll_binance_funding(market_data_store, CROSS_EXCHANGE_ASSETS), name="funding:binance"))
     background_tasks.append(asyncio.create_task(poll_okx_funding(market_data_store, CROSS_EXCHANGE_ASSETS), name="funding:okx"))

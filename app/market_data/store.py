@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from app.config.constants import MarketType
 from app.market_data.normalizer import NormalizedQuote
+from app.market_data.orderbook import OrderBook
 
 # Samples kept per (exchange, symbol) for a lightweight, no-DB-roundtrip
 # volatility estimate — feeds the Maker Fill Probability heuristic
@@ -52,6 +53,20 @@ class MarketDataStore:
         self._update_event = asyncio.Event()
         self._mid_price_history: dict[tuple[str, str], deque[float]] = {}
         self._delivery_futures: dict[tuple[str, str], DeliveryFuturesSnapshot] = {}
+        # Reality Engine spec, sections 7-8 — real multi-level depth,
+        # separate from the top-of-book NormalizedQuote store above. Keyed
+        # (exchange, symbol); populated only where a depth collector is
+        # actually wired up (Binance spot first — section 53's "Binance =
+        # Core Exchange"), so engines must treat this as optional and fall
+        # back to the top-of-book approximation where it's absent.
+        self._order_books: dict[tuple[str, str], OrderBook] = {}
+
+    def update_order_book(self, book: OrderBook) -> None:
+        self._order_books[(book.exchange, book.symbol)] = book
+        self._update_event.set()
+
+    def get_order_book(self, exchange: str, symbol: str) -> OrderBook | None:
+        return self._order_books.get((exchange, symbol))
 
     def update_quote(self, quote: NormalizedQuote) -> None:
         self._quotes[(quote.exchange, quote.market, quote.symbol)] = quote

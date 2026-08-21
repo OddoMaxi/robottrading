@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 
 from app.config.constants import MarketType
+from app.market_data.orderbook import OrderBook, OrderBookLevel
 from app.market_data.symbols import to_common_symbol
 
 
@@ -50,6 +51,24 @@ def normalize_okx_ticker(item: dict) -> NormalizedQuote | None:
         ask_quantity=float(item.get("askSz") or 0),
         exchange_timestamp=float(item["ts"]) / 1000,
         received_at=time.time(),
+    )
+
+
+def normalize_binance_partial_depth(symbol_common: str, data: dict) -> OrderBook | None:
+    """Binance's <symbol>@depth20@100ms stream — a full top-20-levels
+    snapshot on every update (no incremental reconciliation needed, unlike
+    the diff-depth stream). Reality Engine spec, sections 7-8: real
+    multi-level depth for VWAP instead of a single top-of-book level.
+    Levels arrive already sorted (bids highest-first, asks lowest-first)."""
+    bids, asks = data.get("bids"), data.get("asks")
+    if not bids or not asks:
+        return None
+    return OrderBook(
+        exchange="binance",
+        symbol=symbol_common,
+        bids=[OrderBookLevel(price=float(p), quantity=float(q)) for p, q in bids],
+        asks=[OrderBookLevel(price=float(p), quantity=float(q)) for p, q in asks],
+        timestamp=time.time(),
     )
 
 
