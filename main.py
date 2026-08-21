@@ -48,6 +48,7 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
+from app.reporting.shadow_live import build_shadow_live_status
 from app.risk.risk_engine import risk_engine
 from app.simulation.ledger_integrity import check_ledger_integrity
 from app.simulation.paper_trader import PaperTrader
@@ -285,6 +286,28 @@ async def ledger_integrity() -> list[dict]:
                 }
             )
     return results
+
+
+@app.get("/shadow-live/status")
+async def shadow_live_status() -> dict:
+    """Reality Engine spec, sections 55-56 — confirms in one auditable
+    place that this is a genuine shadow of live trading: real market data,
+    zero real orders placed, and a breakdown of what the engine is
+    currently deciding for every signal on its radar right now."""
+    async with async_session_factory() as session:
+        status = await build_shadow_live_status(session, risk_engine)
+    return {
+        "mode": status.mode,
+        "real_orders_placed": status.real_orders_placed,
+        "robot_health": status.robot_status.health.value,
+        "exchanges_connected": status.robot_status.exchanges_connected,
+        "last_opportunity_age_seconds": status.robot_status.last_opportunity_age_seconds,
+        "kill_switch_engaged": status.kill_switch_engaged,
+        "kill_switch_reason": status.kill_switch_reason,
+        "signals_on_radar": status.signals_on_radar,
+        "approved_on_radar": status.approved_on_radar,
+        "rejection_breakdown": status.rejection_breakdown,
+    }
 
 
 if __name__ == "__main__":
