@@ -30,6 +30,7 @@ from dashboard.theme import (
     STATUS_GOOD,
     STATUS_WARNING,
     STRATEGY_LABELS_SIMPLE,
+    humanize_delta,
     render_live_number_card,
     style_fig,
 )
@@ -138,11 +139,19 @@ def render_header(active_page: str) -> None:
 # --- Home cards (spec sections 4-14) ---
 
 
-def render_capital_card(capital: float | None, utilization: CapitalUtilization | None = None) -> None:
+def render_capital_card(
+    capital: float | None, utilization: CapitalUtilization | None = None, last_trade_at: datetime | None = None
+) -> None:
     """Live Dashboard addendum — user feedback: the card must stay
     intact, only the number counts smoothly (render_live_number_card),
     never the whole card re-rendering. The "no data yet" state has nothing
-    to animate, so it stays a plain static card."""
+    to animate, so it stays a plain static card.
+
+    `last_trade_at`, when known, is shown as a small footer — user
+    feedback: the capital figure only ever moves when a trade actually
+    closes, and at a rhythm of a few trades per hour, it can sit still for
+    several minutes at a stretch. Without this note, that reads as "stuck"
+    rather than "correctly waiting for the next real event"."""
     if capital is None:
         st.markdown(
             '<div class="simple-card"><div class="simple-card-label">Capital virtuel</div>'
@@ -150,10 +159,20 @@ def render_capital_card(capital: float | None, utilization: CapitalUtilization |
             unsafe_allow_html=True,
         )
         return
-    rows = [{"value": capital, "decimals": 2, "big": True, "suffix": " $"}]
+    last_trade_text = f"Dernier trade : {humanize_delta(last_trade_at)}" if last_trade_at is not None else None
+    rows = [{"value": capital, "decimals": 2, "big": True, "suffix": " $", "sub_text": last_trade_text if utilization is None else None}]
     if utilization is not None:
         available = utilization.total_capital_usd - utilization.engaged_usd
-        rows.append({"value": available, "decimals": 2, "suffix": " $", "color": INK_SECONDARY, "label": "Disponible maintenant :"})
+        rows.append(
+            {
+                "value": available,
+                "decimals": 2,
+                "suffix": " $",
+                "color": INK_SECONDARY,
+                "label": "Disponible maintenant :",
+                "sub_text": last_trade_text,
+            }
+        )
     render_live_number_card("Capital virtuel", rows, key="capital")
 
 
@@ -538,7 +557,8 @@ def render_live_accueil_body() -> None:
 
     _maybe_toast_new_trade(trades)
 
-    render_capital_card(capital, utilization)
+    last_trade_at = trades[0].executed_at if trades else None
+    render_capital_card(capital, utilization, last_trade_at)
     render_gain_card(capital, today_report)
     render_pnl_split_card(today_report, positions)
     render_trades_rotation_grid(today_report, utilization)
