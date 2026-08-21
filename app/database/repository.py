@@ -66,14 +66,24 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
 
 
 async def update_opportunity_tracking(
-    session: AsyncSession, tracked: TrackedOpportunity, rejection_reason: str | None = None
+    session: AsyncSession, tracked: TrackedOpportunity, opportunity: Opportunity, rejection_reason: str | None = None
 ) -> None:
     """A continuation of an already-tracked opportunity (Continuous
     Execution spec, sections 5-11) — updates the one existing row's running
     stats instead of inserting a duplicate for the same economic event.
     `rejection_reason` reflects this latest observation's validation
     outcome (sections 12-15), since a signal can drift in or out of being
-    worth attempting as the market moves."""
+    worth attempting as the market moves.
+
+    Execution-engine audit finding (pre-live-trading audit): this used to
+    only refresh the min/max/avg tracking fields and rejection_reason,
+    leaving net_spread_pct/classification/expected_profit_usd frozen at
+    whatever the FIRST observation computed — found live, 803K rows with
+    classification='not_profitable' but rejection_reason=NULL (the
+    opportunity had since improved and was approved, but its stored
+    classification never caught up), making the row's own columns
+    self-contradictory. Now refreshes every "current snapshot" field from
+    the latest Opportunity object, not just the aggregate stats."""
     await session.execute(
         update(OpportunityRecord)
         .where(OpportunityRecord.id == tracked.opportunity_id)
@@ -84,6 +94,16 @@ async def update_opportunity_tracking(
             avg_spread_pct=tracked.avg_edge_pct,
             updates_count=tracked.updates_count,
             rejection_reason=rejection_reason,
+            gross_spread_pct=opportunity.gross_spread_pct,
+            net_spread_pct=opportunity.net_spread_pct,
+            break_even_pct=opportunity.break_even_pct,
+            capital_usd=opportunity.capital_usd,
+            expected_profit_usd=opportunity.expected_profit_usd,
+            classification=opportunity.classification,
+            score=opportunity.score,
+            execution_mode=opportunity.execution_mode,
+            execution_fill_probability=opportunity.execution_fill_probability,
+            market_data_age_seconds=opportunity.market_data_age_seconds,
         )
     )
 

@@ -128,7 +128,7 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                     if observation.is_new:
                         await save_opportunity(session, opp)
                     else:
-                        await update_opportunity_tracking(session, observation.tracked, rejection_reason=opp.rejection_reason)
+                        await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=opp.rejection_reason)
 
                     # Kill switch (spec section 61) — stops new executions
                     # immediately, in simulation too. Detection, tracking,
