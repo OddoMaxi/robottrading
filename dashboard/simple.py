@@ -225,7 +225,10 @@ def render_trades_rotation_grid(today: RotationReport | None, utilization: Capit
         else:
             render_live_number_card(
                 "Trades",
-                [{"value": float(today.completed_trades), "decimals": 0, "big": True, "sub_text": f"{today.win_count} gagnants · {today.loss_count} perdants"}],
+                [
+                    {"value": float(today.completed_trades), "decimals": 0, "big": True, "sub_text": f"{today.win_count} gagnants · {today.loss_count} perdants"},
+                    {"value": today.trades_per_hour, "decimals": 1, "suffix": " /h", "color": INK_SECONDARY, "label": "Rythme (dernières 24h) :"},
+                ],
                 key="trades_count",
             )
 
