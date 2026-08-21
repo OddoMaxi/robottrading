@@ -491,6 +491,38 @@ def render_expert_mode() -> None:
 
     st.divider()
 
+    # --- Micro Live Readiness (Reality Engine spec, sections 59-60) ---
+    st.subheader("🚦 Micro Live Readiness — prêt pour un test contrôlé ?")
+    st.caption(
+        "Compose tous les indicateurs de santé déjà calculés (registre comptable, capital, résilience au stress, "
+        "connectivité testnet) en un seul verdict. Une donnée manquante compte comme un échec, jamais comme un succès par défaut."
+    )
+    readiness = data.get_micro_live_readiness_cached()
+    _READINESS_CHECK_LABELS = {
+        "ledger_healthy": "Registre comptable cohérent",
+        "no_negative_capital": "Capital jamais négatif",
+        "no_over_allocation": "Jamais plus de 100% engagé",
+        "kill_switch_disengaged": "Coupe-circuit désengagé",
+        "reality_capture_stable": "Fiabilité de la simulation stable",
+        "positive_net_pnl": "P&L net positif",
+        "acceptable_drawdown": "Baisse maximale acceptable",
+        "stress_test_positive": "Résiste au test de stress",
+        "testnet_reachable": "Testnet Binance joignable",
+    }
+    if readiness.verdict is None:
+        st.info("API du moteur injoignable — impossible de calculer le verdict pour le moment.")
+    else:
+        if readiness.verdict == "ready_for_controlled_test":
+            st.success("✅ PRÊT POUR UN TEST CONTRÔLÉ")
+        else:
+            st.warning("⛔ PAS ENCORE PRÊT")
+        for check in readiness.checks:
+            icon = "✅" if check["passed"] else "❌"
+            label = _READINESS_CHECK_LABELS.get(check["name"], check["name"])
+            st.markdown(f"{icon} **{label}** — {check['detail']}")
+
+    st.divider()
+
     # --- Rapport hebdomadaire + verdict GO/MODIFY/NO-GO ---
     st.subheader("📊 Bilan sur 7 jours — quelle stratégie garder ?")
     weekly = data.get_weekly_analytics_cached()

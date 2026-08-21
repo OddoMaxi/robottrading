@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # Dashboard-only — where to reach the engine's own FastAPI app for
+    # endpoints backed by live in-process state (kill switch, live capital
+    # pool, Micro Live Readiness) that the dashboard's DB-only reporting
+    # layer has no other way to read. Same host in every deployed
+    # environment so far (engine and dashboard are two systemd services on
+    # one VPS) — overridable via env if that ever changes.
+    engine_api_base_url: str = "http://localhost:8000"
+
     # Exchanges enabled in V1 (priority order per cahier des charges section 3)
     enabled_exchanges: list[str] = ["binance", "okx", "bybit"]
 

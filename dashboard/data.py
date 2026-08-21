@@ -7,8 +7,10 @@ the FastAPI app's long-lived engine).
 """
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import pandas as pd
 import streamlit as st
 from sqlalchemy import func, select
@@ -499,3 +501,34 @@ async def fetch_performance_metrics(hours: float = 24.0) -> PerformanceMetrics |
 @st.cache_data(ttl=30)
 def get_performance_metrics_cached(hours: float = 24.0) -> PerformanceMetrics | None:
     return asyncio.run(fetch_performance_metrics(hours))
+
+
+@dataclass(slots=True)
+class ReadinessSummary:
+    verdict: str | None  # None = engine API unreachable, not "not ready"
+    checks: list[dict] = field(default_factory=list)
+
+
+async def fetch_micro_live_readiness() -> ReadinessSummary:
+    """Reality Engine spec, sections 59-60 — HTTP GET to the engine's own
+    FastAPI app rather than the database directly: the readiness verdict
+    depends on live in-process state (kill switch, live capital pool) and a
+    network check (Binance Testnet ping) that only the engine process has
+    access to, unlike every other fetch_* in this module. Never raises —
+    an unreachable engine API reports verdict=None rather than crashing the
+    dashboard, matching the read-only, must-never-crash rule every other
+    fetch here already follows for a missing/stale database."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/micro-live/readiness", timeout=aiohttp.ClientTimeout(total=10)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        return ReadinessSummary(verdict=payload["verdict"], checks=payload["checks"])
+    except Exception:
+        return ReadinessSummary(verdict=None, checks=[])
+
+
+@st.cache_data(ttl=30)
+def get_micro_live_readiness_cached() -> ReadinessSummary:
+    return asyncio.run(fetch_micro_live_readiness())
