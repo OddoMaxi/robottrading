@@ -88,6 +88,34 @@ async def test_cross_exchange_falls_back_to_top_of_book_without_a_local_order_bo
 
 
 @pytest.mark.asyncio
+async def test_cross_exchange_falls_back_to_top_of_book_when_the_local_order_book_is_stale():
+    """Failure injection (Reality Engine spec, section 78) — a real order
+    book that stopped updating (WS stall) must not be trusted past
+    MAX_ORDER_BOOK_AGE_SECONDS, same as if it never existed. Deeper levels
+    the stale book claims must not be used to size the fill."""
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000, qty=0.001))
+    store.update_quote(make_quote("okx", "BTC/USDT", bid=100_300, ask=100_310))
+    store.update_order_book(
+        OrderBook(
+            exchange="binance",
+            symbol="BTC/USDT",
+            bids=[OrderBookLevel(99_990, 0.001)],
+            asks=[OrderBookLevel(100_000, 0.001), OrderBookLevel(100_010, 0.01)],
+            timestamp=time.time() - 10.0,  # far older than MAX_ORDER_BOOK_AGE_SECONDS (2.0s)
+        )
+    )
+
+    engine = CrossExchangeArbitrageEngine(assets=["BTC"], store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    assert len(opportunities) == 1
+    # Capped at the thin top-of-book quantity, exactly like the "no order
+    # book at all" case — the stale deeper levels were correctly ignored.
+    assert opportunities[0].capital_usd == pytest.approx(100.0, abs=1.0)
+
+
+@pytest.mark.asyncio
 async def test_cross_exchange_no_opportunity_without_spread():
     store = MarketDataStore()
     store.update_quote(make_quote("binance", "BTC/USDT", bid=100_000, ask=100_010))
