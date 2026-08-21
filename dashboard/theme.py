@@ -300,6 +300,50 @@ def inject_css() -> None:
         .simple-trade-status.lost {{ background: rgba(208,59,59,0.16); color: #f87171; }}
 
         section[data-testid="stSidebar"] {{ display: none; }}
+
+        /* --- Live Dashboard (Reality Engine addendum) --- */
+        .simple-connection-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 12px;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            margin-left: 8px;
+        }}
+        .simple-connection-live {{ background: rgba(12,163,12,0.16); color: #4ade80; }}
+        .simple-connection-reconnecting {{ background: rgba(250,178,25,0.16); color: #fbbf24; }}
+        .simple-connection-down {{ background: rgba(208,59,59,0.16); color: #f87171; }}
+
+        @keyframes pulseGood {{
+            0% {{ box-shadow: 0 0 0 0 rgba(12,163,12,0.45); }}
+            100% {{ box-shadow: 0 0 0 10px rgba(12,163,12,0); }}
+        }}
+        @keyframes pulseBad {{
+            0% {{ box-shadow: 0 0 0 0 rgba(208,59,59,0.45); }}
+            100% {{ box-shadow: 0 0 0 10px rgba(208,59,59,0); }}
+        }}
+        .simple-card.pulse-good {{ animation: pulseGood 1.1s ease-out 1; }}
+        .simple-card.pulse-bad {{ animation: pulseBad 1.1s ease-out 1; }}
+
+        .simple-pnl-split-row {{ display: flex; justify-content: space-between; padding: 6px 0; font-size: 0.92rem; }}
+        .simple-pnl-split-row .k {{ color: {INK_MUTED}; }}
+        .simple-pnl-split-row .v {{ font-weight: 650; }}
+        .simple-pnl-split-total {{ border-top: 1px solid {GRIDLINE}; margin-top: 4px; padding-top: 10px; font-size: 1.05rem; }}
+
+        .simple-event-row {{
+            display: flex;
+            gap: 12px;
+            padding: 7px 0;
+            font-size: 0.86rem;
+            border-bottom: 1px solid {GRIDLINE};
+        }}
+        .simple-event-row:last-child {{ border-bottom: none; }}
+        .simple-event-time {{ color: {INK_MUTED}; width: 58px; flex-shrink: 0; }}
+        .simple-event-text {{ color: {INK_SECONDARY}; flex: 1; }}
+        .simple-event-text b {{ color: {INK_PRIMARY}; }}
         </style>
         """,
         unsafe_allow_html=True,

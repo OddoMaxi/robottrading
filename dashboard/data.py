@@ -109,7 +109,7 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
     return result_df
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def get_opportunities_cached(limit: int = 300) -> pd.DataFrame:
     return asyncio.run(fetch_opportunities(limit))
 
@@ -237,7 +237,7 @@ async def fetch_weekly_analytics() -> WeeklyAnalytics:
         await engine.dispose()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10)
 def get_daily_summary_cached() -> DailySummary:
     return asyncio.run(fetch_daily_summary())
 
@@ -265,7 +265,7 @@ async def fetch_rotation_report(mode: str | None, hours: float = 24.0) -> Rotati
         await engine.dispose()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10)
 def get_rotation_report_cached(mode: str | None, hours: float = 24.0) -> RotationReport | None:
     return asyncio.run(fetch_rotation_report(mode, hours))
 
@@ -309,7 +309,7 @@ async def fetch_robot_status() -> RobotStatus:
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=3)
 def get_robot_status_cached() -> RobotStatus:
     return asyncio.run(fetch_robot_status())
 
@@ -327,7 +327,7 @@ async def fetch_simple_capital() -> float | None:
         await engine.dispose()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=5)
 def get_simple_capital_cached() -> float | None:
     return asyncio.run(fetch_simple_capital())
 
@@ -345,7 +345,7 @@ async def fetch_equity_curve(hours: float = 24.0) -> list[EquityPoint]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def get_equity_curve_cached(hours: float = 24.0) -> list[EquityPoint]:
     return asyncio.run(fetch_equity_curve(hours))
 
@@ -363,7 +363,7 @@ async def fetch_recent_trades(limit: int = 50) -> list[TradeRow]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=5)
 def get_recent_trades_cached(limit: int = 50) -> list[TradeRow]:
     return asyncio.run(fetch_recent_trades(limit))
 
@@ -382,7 +382,7 @@ async def fetch_capital_utilization() -> CapitalUtilization | None:
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def get_capital_utilization_cached() -> CapitalUtilization | None:
     return asyncio.run(fetch_capital_utilization())
 
@@ -401,7 +401,7 @@ async def fetch_open_positions() -> list[OpenPosition]:
         await engine.dispose()
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=5)
 def get_open_positions_cached() -> list[OpenPosition]:
     return asyncio.run(fetch_open_positions())
 
@@ -480,7 +480,7 @@ async def fetch_reality_capture(hours: float = 24.0) -> RealityCaptureReport | N
         await engine.dispose()
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=15)
 def get_reality_capture_cached(hours: float = 24.0) -> RealityCaptureReport | None:
     return asyncio.run(fetch_reality_capture(hours))
 

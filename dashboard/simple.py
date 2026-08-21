@@ -10,6 +10,7 @@ strategy, or risk logic lives here (spec section 31).
 """
 
 import math
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,7 +19,7 @@ import streamlit as st
 import dashboard.data as data
 from app.config.constants import PRIORITY_EXCHANGES
 from app.reporting.rotation import RotationReport
-from app.reporting.simple_summary import CapitalUtilization, OpenPosition, build_explainer_narrative, pick_robot_state_message
+from app.reporting.simple_summary import CapitalUtilization, OpenPosition, TradeRow, build_explainer_narrative, pick_robot_state_message
 from dashboard.theme import (
     INK_MUTED,
     INK_PRIMARY,
@@ -85,21 +86,41 @@ def _money(value: float) -> str:
 # --- Header (spec sections 3, 15, 27) ---
 
 
-def render_header(active_page: str) -> None:
+CONNECTION_BADGE = {
+    "running": ("simple-connection-live", "🟢 LIVE DATA"),
+    "degraded": ("simple-connection-reconnecting", "🟠 Reconnexion..."),
+    "down": ("simple-connection-down", "🔴 Données interrompues"),
+}
+
+
+@st.fragment(run_every="2s")
+def render_live_status_row() -> None:
+    """Live Dashboard addendum, sections 10-11 — the robot status pill and
+    connection indicator update on their own every 2s, independent of the
+    nav bar below (which only changes on an explicit click). No manual
+    reconnect is needed: a fragment that keeps auto-rerunning *is* the
+    reconnect loop — the moment fresh data is available again, the next
+    tick picks it up."""
     robot = data.get_robot_status_cached()
     status_class = {"running": "simple-status-running", "degraded": "simple-status-degraded", "down": "simple-status-down"}[robot.health.value]
     status_label = {"running": "🟢 EN MARCHE", "degraded": "🟡 SURVEILLANCE", "down": "🔴 PROBLÈME"}[robot.health.value]
+    connection_class, connection_label = CONNECTION_BADGE[robot.health.value]
     exchange_bits = " &nbsp;·&nbsp; ".join(
         f'<b>{name.capitalize()}</b> {"✓" if ok else "✕"}' for name, ok in robot.exchanges_connected.items()
     )
 
     st.markdown(
         f'<div class="simple-topbar"><div class="simple-brand">🤖 ROBOT</div>'
-        f'<div class="simple-status-pill {status_class}">{status_label}</div></div>'
+        f'<div class="simple-status-pill {status_class}">{status_label}</div>'
+        f'<span class="simple-connection-badge {connection_class}">{connection_label}</span></div>'
         f'<div class="simple-exchanges">{exchange_bits}</div>'
         '<div><span class="simple-sim-badge">MODE SIMULATION</span></div>',
         unsafe_allow_html=True,
     )
+
+
+def render_header(active_page: str) -> None:
+    render_live_status_row()
 
     nav_cols = st.columns(len(NAV_PAGES) + 1)
     for col, (key, label) in zip(nav_cols, NAV_PAGES):
@@ -115,7 +136,24 @@ def render_header(active_page: str) -> None:
 # --- Home cards (spec sections 4-14) ---
 
 
+def _pulse_class(key: str, value: float | None) -> str:
+    """Live Dashboard addendum, section 21 — fires a one-shot pulse
+    animation class only on the fragment run where a value actually
+    changed since the previous one (tracked in st.session_state, which
+    survives across st.fragment(run_every=...) reruns). Never a permanent
+    color change — that's what the existing good/bad tone classes already
+    do — just a brief flash so a moving number is noticeable without
+    forcing the user to stare at it."""
+    state_key = f"_live_prev_{key}"
+    previous = st.session_state.get(state_key)
+    st.session_state[state_key] = value
+    if value is None or previous is None or value == previous:
+        return ""
+    return "pulse-good" if value > previous else "pulse-bad"
+
+
 def render_capital_card(capital: float | None, utilization: CapitalUtilization | None = None) -> None:
+    pulse = _pulse_class("capital", capital)
     if capital is None:
         body = '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
     else:
@@ -123,19 +161,48 @@ def render_capital_card(capital: float | None, utilization: CapitalUtilization |
         if utilization is not None:
             available = utilization.total_capital_usd - utilization.engaged_usd
             body += f'<div class="simple-card-sub">Disponible maintenant : <b>{_money(available)}</b></div>'
-    st.markdown(f'<div class="simple-card"><div class="simple-card-label">Capital virtuel</div>{body}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="simple-card {pulse}"><div class="simple-card-label">Capital virtuel</div>{body}</div>', unsafe_allow_html=True)
 
 
 def render_gain_card(capital: float | None, today: RotationReport | None) -> None:
     if capital is None or today is None or today.completed_trades == 0:
         body = '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
+        pulse = ""
     else:
         pnl = today.net_pnl_usd
+        pulse = _pulse_class("gain", pnl)
         base = capital - pnl
         pct = (pnl / base * 100) if base else 0.0
         tone = "good" if pnl >= 0 else "bad"
         body = f'<div class="simple-card-figure {tone}">{pnl:+,.2f} $</div>'.replace(",", " ") + f'<div class="simple-card-sub {tone}">{pct:+.2f} %</div>'
-    st.markdown(f'<div class="simple-card"><div class="simple-card-label">Gain aujourd\'hui</div>{body}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="simple-card {pulse}"><div class="simple-card-label">Gain aujourd\'hui</div>{body}</div>', unsafe_allow_html=True)
+
+
+def render_pnl_split_card(today: RotationReport | None, positions: list[OpenPosition]) -> None:
+    """Live Dashboard addendum, section 8 — realized vs unrealized P&L kept
+    visually distinct: the capital card above only ever grows with
+    REALIZED profit (booked when a position closes), while an open
+    position's current paper gain is real but not yet locked in. Both
+    numbers already exist elsewhere (today's RotationReport, each open
+    OpenPosition's own net_profit_usd) — this is a pure display
+    combination, not a new calculation."""
+    realized = today.net_pnl_usd if today is not None else 0.0
+    unrealized = sum(p.net_profit_usd for p in positions)
+    total = realized + unrealized
+    pulse = _pulse_class("pnl_total", total)
+
+    def _row(label: str, value: float, extra_class: str = "") -> str:
+        color = STATUS_GOOD if value >= 0 else STATUS_CRITICAL
+        return f'<div class="simple-pnl-split-row {extra_class}"><span class="k">{label}</span><span class="v" style="color:{color};">{value:+.2f} $</span></div>'
+
+    st.markdown(
+        f'<div class="simple-card {pulse}"><div class="simple-card-label">Répartition du gain</div>'
+        f'{_row("Gain réalisé", realized)}'
+        f'{_row("Positions en cours (non réalisé)", unrealized)}'
+        f'{_row("Total actuel", total, "simple-pnl-split-total")}'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_trades_rotation_grid(today: RotationReport | None, utilization: CapitalUtilization | None) -> None:
@@ -183,6 +250,52 @@ def render_positions_card(positions: list[OpenPosition]) -> None:
         '<div class="simple-card"><div class="simple-card-label">Positions en cours</div>' + "".join(rows) + "</div>",
         unsafe_allow_html=True,
     )
+
+
+def render_event_feed(trades: list[TradeRow], now: datetime | None = None) -> None:
+    """Live Dashboard addendum, section 9 — a small live feed of what just
+    happened, capped at a handful of rows. Built entirely from already-
+    fetched recent trades (no new backend query): a row is either "position
+    ouverte" (still inside its holding period) or "trade clôturé" with its
+    booked result — the same open/closed distinction TradeStatusBreakdown
+    already uses (app.reporting.simple_summary._classify_trade_status)."""
+    if not trades:
+        return
+    now = now or datetime.now(UTC)
+    rows = []
+    for t in trades[:8]:
+        executed_at = t.executed_at if t.executed_at.tzinfo else t.executed_at.replace(tzinfo=UTC)
+        is_open = t.holding_period_seconds is not None and executed_at + timedelta(seconds=t.holding_period_seconds) > now
+        asset = t.symbol.split("->")[0].split("/")[0]
+        time_label = executed_at.strftime("%H:%M:%S")
+        if is_open:
+            text = f"Position <b>{asset}</b> ouverte"
+        else:
+            color = STATUS_GOOD if t.net_profit_usd >= 0 else STATUS_CRITICAL
+            text = f'Trade <b>{asset}</b> clôturé <span style="color:{color};font-weight:700;">{t.net_profit_usd:+.2f} $</span>'
+        rows.append(f'<div class="simple-event-row"><span class="simple-event-time">{time_label}</span><span class="simple-event-text">{text}</span></div>')
+    st.markdown(
+        '<div class="simple-card"><div class="simple-card-label">Activité récente</div>' + "".join(rows) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _maybe_toast_new_trade(trades: list[TradeRow]) -> None:
+    """Live Dashboard addendum, section 22 — a discrete toast the moment a
+    newly-closed trade appears since the last live-fragment tick. Skips the
+    very first tick after page load (nothing to compare against yet), so
+    opening the dashboard doesn't immediately toast for trades that already
+    existed before this browser session started."""
+    if not trades:
+        return
+    latest = trades[0]
+    seen_key = "_live_last_seen_trade_id"
+    previous_id = st.session_state.get(seen_key)
+    st.session_state[seen_key] = latest.id
+    if previous_id is None or latest.id == previous_id:
+        return
+    asset = latest.symbol.split("->")[0].split("/")[0]
+    st.toast(f"Trade {asset} terminé {latest.net_profit_usd:+.2f} $", icon="✅" if latest.net_profit_usd >= 0 else "⚠️")
 
 
 def render_state_card(daily) -> None:
@@ -343,28 +456,50 @@ def render_equity_chart(hours: float = 24.0) -> None:
     st.plotly_chart(style_fig(fig, height=260), use_container_width=True)
 
 
-def render_accueil() -> None:
+@st.fragment(run_every="2s")
+def render_live_accueil_body() -> None:
+    """Live Dashboard addendum — everything on the Accueil page that should
+    change without a manual refresh lives in this one fragment, so a single
+    2s tick keeps capital, gain, positions, the current opportunity, and
+    the event feed all in sync with each other (no risk of one card
+    updating a beat ahead of another). The equity chart gets its own,
+    slower-cadence fragment below — redrawing a Plotly chart every 2s would
+    be visually noisy for something that doesn't need sub-10s freshness."""
     df = data.get_opportunities_cached()
     capital = data.get_simple_capital_cached()
     today_report = data.get_rotation_report_cached(mode=None, hours=24.0)
     daily = data.get_daily_summary_cached()
     utilization = data.get_capital_utilization_cached()
     positions = data.get_open_positions_cached()
+    trades = data.get_recent_trades_cached(limit=8)
+
+    _maybe_toast_new_trade(trades)
 
     render_capital_card(capital, utilization)
     render_gain_card(capital, today_report)
+    render_pnl_split_card(today_report, positions)
     render_trades_rotation_grid(today_report, utilization)
     render_positions_card(positions)
     render_state_card(daily)
     render_reality_indicator()
     render_opportunity_card(df)
+    render_event_feed(trades)
     render_ignored_example(df)
     render_explainer(today_report)
     render_performance_summary()
+
+
+@st.fragment(run_every="10s")
+def render_live_equity_chart() -> None:
+    render_equity_chart()
+
+
+def render_accueil() -> None:
+    render_live_accueil_body()
     if st.button("Voir plus →", key="perf_see_more"):
         st.session_state.simple_page = "performance"
         st.rerun()
-    render_equity_chart()
+    render_live_equity_chart()
 
 
 # --- Trades page (spec section 16) ---
