@@ -102,6 +102,12 @@ class MarketDataStore:
     def quotes_for_symbol(self, market: MarketType, symbol: str) -> dict[str, NormalizedQuote]:
         return {ex: q for (ex, m, s), q in self._quotes.items() if m == market and s == symbol}
 
+    def all_quotes(self) -> list[NormalizedQuote]:
+        """Every currently-known quote, for callers that need a point-in-time
+        snapshot rather than a single (exchange, symbol) lookup — e.g. the
+        Live Stress Test (app.simulation.live_stress_test)."""
+        return list(self._quotes.values())
+
     def update_funding(self, snapshot: FundingSnapshot) -> None:
         self._funding[(snapshot.exchange, snapshot.symbol)] = snapshot
 

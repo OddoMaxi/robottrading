@@ -10,6 +10,7 @@ from app.database.models import OpportunityRecord
 from app.database.session import get_session
 from app.market_data.store import market_data_store
 from app.risk.risk_engine import risk_engine
+from app.simulation.live_stress_test import run_live_stress_test
 
 router = APIRouter()
 
@@ -72,6 +73,24 @@ async def market_data_health(symbols: str | None = None) -> list[dict]:
                 }
             )
     return rows
+
+
+@router.get("/stress-test/run")
+async def stress_test_run(seed: int = 0) -> dict:
+    """Reality Engine spec, sections 46-47 — replays a snapshot of the
+    market as it looks *right now* through Normal/Stress1/Stress2 latency
+    conditions (quote-driven engines only — Stablecoin, Cross-Exchange,
+    Triangular) and reports how much of the Normal-condition P&L survives.
+    Fully read-only: never touches the live portfolios or position tracker."""
+    report = await run_live_stress_test(seed=seed)
+    return {
+        "net_profit_by_scenario_usd": {scenario.value: profit for scenario, profit in report.net_profit_by_scenario_usd.items()},
+        "trades_executed_by_scenario": {scenario.value: result.trades_executed for scenario, result in report.results.items()},
+        "opportunities_detected_by_scenario": {
+            scenario.value: result.opportunities_detected for scenario, result in report.results.items()
+        },
+        "robustness_score": report.robustness_score,
+    }
 
 
 @router.get("/opportunities")
