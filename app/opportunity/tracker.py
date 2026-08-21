@@ -30,9 +30,15 @@ DEFAULT_LIVENESS_SECONDS = 5.0
 
 
 def opportunity_key(opp: Opportunity) -> str:
-    """strategy|symbol|exchange_market_side+... — spec section 5's dedup key,
-    built from fields every engine already sets deterministically per leg."""
-    legs_desc = "+".join(f"{leg.get('exchange')}_{leg.get('market')}_{leg.get('side')}" for leg in opp.legs)
+    """strategy|symbol|chain_exchange_market_side_pool+... — spec section 5's
+    dedup key (CEX), extended for the Multi-Market Opportunity Engine (V5.5,
+    spec section 20: "chain, DEX route, tokens, direction, strategy, pool
+    IDs") — chain/pool_id are simply absent (None) on every CEX leg, so this
+    is a no-op there: two CEX opportunities that were distinguishable before
+    still are, since the same constant is appended to every CEX leg alike."""
+    legs_desc = "+".join(
+        f"{leg.get('chain')}_{leg.get('exchange')}_{leg.get('market')}_{leg.get('side')}_{leg.get('pool_id')}" for leg in opp.legs
+    )
     return f"{opp.strategy}|{opp.symbol}|{legs_desc}"
 
 

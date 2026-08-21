@@ -49,6 +49,12 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
+from app.onchain.constants import CROSS_DEX_CHAINS, DEX_VENUES
+from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity
+from app.onchain.gas_engine import RpcGasProvider
+from app.onchain.market_data_provider import GeckoTerminalProvider
+from app.onchain.models import DexPool
+from app.onchain.pool_discovery import discover_pools
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
 from app.reporting.micro_live_readiness import build_micro_live_readiness
@@ -164,6 +170,100 @@ background_tasks: list[asyncio.Task] = []
 # between the live portfolios and the DB ledger long before it matters.
 LEDGER_CHECK_INTERVAL_SECONDS = 60.0
 _last_ledger_check_at = 0.0
+
+# Multi-Market Opportunity Engine, V5.5 (user directive, 2026-08-21) — the
+# on-chain side of the Master Opportunity Engine. Its own OpportunityTracker
+# instance (not the CEX one above) — full state isolation, not just a
+# non-colliding key namespace, so a bug here can never corrupt CEX's
+# in-memory tracking either. Polls on a much slower cadence than the
+# event-driven CEX loop: GeckoTerminal's free (no API key) tier returns 429s
+# under a burst of requests (confirmed live researching this feature), and
+# a DEX price gap doesn't need sub-second detection the way a CEX order
+# book does — the underlying pools only update once per block anyway.
+DEX_POLL_INTERVAL_SECONDS = 45.0
+dex_opportunity_tracker = OpportunityTracker()
+_dex_market_data_provider = GeckoTerminalProvider()
+_dex_gas_provider = RpcGasProvider()
+
+_NATIVE_TOKEN_SYMBOL_BY_CHAIN = {"eth": "WETH", "bsc": "WBNB", "solana": "SOL"}
+
+
+def _find_native_token_price_usd(pools: list[DexPool], chain: str) -> float | None:
+    """The gas engine needs the chain's native token priced in USD to
+    convert a gas estimate (in ETH/BNB/SOL) into dollars — derived from
+    whichever already-discovered pool happens to quote it against a
+    stablecoin, rather than a second, redundant price fetch."""
+    native = _NATIVE_TOKEN_SYMBOL_BY_CHAIN.get(chain)
+    if native is None:
+        return None
+    for pool in pools:
+        if pool.token0_symbol.upper() == native and pool.token1_symbol.upper() in ("USDC", "USDT"):
+            return pool.price
+        if pool.token1_symbol.upper() == native and pool.token0_symbol.upper() in ("USDC", "USDT"):
+            return (1 / pool.price) if pool.price else None
+    return None
+
+
+async def dex_detection_loop() -> None:
+    """Isolated on-chain detection loop (spec section 1: "CEX and ON-CHAIN
+    engines must remain isolated. A bug in DEX must never stop or corrupt
+    CEX.") — its own try/except boundary below is what makes that literally
+    true: an exception here is caught, logged, and the loop keeps going on
+    its own schedule, entirely independent of detection_loop() above."""
+    while True:
+        try:
+            pools_by_venue: dict[tuple[str, str], list[DexPool]] = {}
+            for venue in DEX_VENUES:
+                pools = await discover_pools(_dex_market_data_provider, venue.chain, venue.dex)
+                pools_by_venue[(venue.chain, venue.dex)] = pools
+                logger.info("dex pool discovery: %s/%s — %d eligible pools", venue.chain, venue.dex, len(pools))
+
+            scan_time = time.time()
+            async with async_session_factory() as session:
+                for chain in CROSS_DEX_CHAINS:
+                    venues_on_chain = [v for v in DEX_VENUES if v.chain == chain]
+                    if len(venues_on_chain) < 2:
+                        continue
+                    chain_pools = [p for v in venues_on_chain for p in pools_by_venue[(v.chain, v.dex)]]
+
+                    native_price_usd = _find_native_token_price_usd(chain_pools, chain)
+                    if native_price_usd is None:
+                        logger.warning(
+                            "dex detection: no native token price available for chain=%s this cycle — skipping (no fabricated gas estimate)",
+                            chain,
+                        )
+                        continue
+                    gas_estimate = await _dex_gas_provider.estimate_gas_cost_usd(chain, native_price_usd)
+
+                    pools_by_pair: dict[tuple[str, str], list[DexPool]] = {}
+                    for pool in chain_pools:
+                        pair = tuple(sorted([pool.token0_symbol.upper(), pool.token1_symbol.upper()]))
+                        pools_by_pair.setdefault(pair, []).append(pool)
+
+                    for pools in pools_by_pair.values():
+                        for i in range(len(pools)):
+                            for j in range(i + 1, len(pools)):
+                                if pools[i].dex == pools[j].dex:
+                                    continue  # same-venue "arbitrage" isn't real — needs 2 distinct DEXs
+                                opp = detect_cross_dex_opportunity(
+                                    pools[i], pools[j], gas_estimate.gas_cost_usd, gas_estimate.gas_cost_usd
+                                )
+                                if opp is None:
+                                    continue
+                                observation = dex_opportunity_tracker.observe(opp, now=scan_time)
+                                if observation.is_new:
+                                    await save_opportunity(session, opp)
+                                else:
+                                    await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=None)
+
+                for tracked in dex_opportunity_tracker.expire_stale(now=scan_time):
+                    await close_opportunity_tracking(session, tracked, closed_at=scan_time)
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("dex detection loop iteration failed — CEX detection loop is unaffected")
+        await asyncio.sleep(DEX_POLL_INTERVAL_SECONDS)
 
 
 async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str, int]) -> None:
@@ -347,6 +447,15 @@ async def lifespan(app: FastAPI):
     ]
     detector = OpportunityDetector(engines)
     background_tasks.append(asyncio.create_task(detection_loop(detector, portfolio_ids), name="detection_loop"))
+
+    # Multi-Market Opportunity Engine, V5.5 (user directive, 2026-08-21) —
+    # a fully separate background task from detection_loop above: its own
+    # try/except, its own tracker instance, its own poll cadence. Shadow
+    # mode only (spec section 23) — detected/persisted/tracked exactly like
+    # CEX opportunities, but never handed to paper_trader or any
+    # VirtualPortfolio, so it can never affect CEX capital or historical
+    # P&L (spec section 39).
+    background_tasks.append(asyncio.create_task(dex_detection_loop(), name="dex_detection_loop"))
 
     logger.info("startup complete: %d background tasks running", len(background_tasks))
     yield

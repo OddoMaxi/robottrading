@@ -13,6 +13,17 @@ class Strategy(StrEnum):
     TRIANGULAR = "triangular"
     FUNDING = "funding"
     BASIS = "basis"
+    # Multi-Market Opportunity Engine, V5.5 (user directive, 2026-08-21) —
+    # the on-chain/DEX side of the Master Opportunity Engine. Only
+    # DEX_CROSS is implemented so far; the other three are reserved names
+    # for the not-yet-built DEX-native triangular, multi-hop, atomic, and
+    # flash-loan-research strategies (spec sections 6-9) so the Opportunity
+    # Bus's strategy identity space is settled once, not extended ad hoc.
+    DEX_CROSS = "dex_cross"
+    DEX_TRIANGULAR = "dex_triangular"
+    DEX_MULTIHOP = "dex_multihop"
+    ATOMIC = "atomic"
+    FLASH_LOAN_RESEARCH = "flash_loan_research"
 
 
 class MarketType(StrEnum):
