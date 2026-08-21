@@ -339,6 +339,67 @@ def compute_max_drawdown_usd(capital_values: list[float]) -> float:
     return max_drawdown
 
 
+def compute_profit_factor(net_profits_usd: list[float]) -> float | None:
+    """Reality Engine spec, section 34 — gross winning P&L / absolute gross
+    losing P&L. None (undefined, not infinite or zero) when there are no
+    losing trades to divide by — a caller should render that as "—" or
+    "n/a", never as a fabricated number."""
+    gross_winning = sum(p for p in net_profits_usd if p > 0)
+    gross_losing = sum(p for p in net_profits_usd if p < 0)  # negative or zero
+    if gross_losing == 0:
+        return None
+    return gross_winning / abs(gross_losing)
+
+
+@dataclass(slots=True)
+class PerformanceMetrics:
+    max_drawdown_usd: float
+    max_drawdown_pct: float
+    peak_capital_usd: float
+    profit_factor: float | None
+    gross_winning_usd: float
+    gross_losing_usd: float
+
+
+async def build_performance_metrics(
+    session: AsyncSession, portfolio_id: int, initial_capital_usd: float, hours: float = 24.0, now: datetime | None = None
+) -> PerformanceMetrics:
+    """Reality Engine spec, sections 34-35 — Profit Factor and Maximum
+    Drawdown, Expert Mode's own reminder that a robot isn't judged on
+    profit alone. Both pure-computed from data already fetched elsewhere
+    (build_equity_curve, the trade ledger) — no new persistence needed."""
+    points = await build_equity_curve(session, portfolio_id, initial_capital_usd, hours=hours, now=now)
+    capital_values = [p.capital_usd for p in points]
+    max_drawdown_usd = compute_max_drawdown_usd(capital_values)
+    peak_capital_usd = max(capital_values) if capital_values else initial_capital_usd
+    max_drawdown_pct = (max_drawdown_usd / peak_capital_usd * 100) if peak_capital_usd else 0.0
+
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(hours=hours)
+    net_profits = (
+        await session.execute(
+            select(SimulatedTradeRecord.net_profit_usd).where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                SimulatedTradeRecord.executed_at >= cutoff,
+            )
+        )
+    ).scalars().all()
+    net_profits = [float(p) for p in net_profits]
+    profit_factor = compute_profit_factor(net_profits)
+    gross_winning_usd = sum(p for p in net_profits if p > 0)
+    gross_losing_usd = sum(p for p in net_profits if p < 0)
+
+    return PerformanceMetrics(
+        max_drawdown_usd=max_drawdown_usd,
+        max_drawdown_pct=max_drawdown_pct,
+        peak_capital_usd=peak_capital_usd,
+        profit_factor=profit_factor,
+        gross_winning_usd=gross_winning_usd,
+        gross_losing_usd=gross_losing_usd,
+    )
+
+
 @dataclass(slots=True)
 class TradeRow:
     id: int

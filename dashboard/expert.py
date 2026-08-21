@@ -465,6 +465,32 @@ def render_expert_mode() -> None:
 
     st.divider()
 
+    # --- Drawdown & Profit Factor (Reality Engine spec, sections 34-35) ---
+    st.subheader("📉 Plus forte baisse & Profit Factor")
+    st.caption("Un robot ne se juge pas uniquement au profit — ces deux chiffres montrent le risque traversé pour l'obtenir.")
+    metrics = data.get_performance_metrics_cached(hours=24.0)
+    if metrics is None:
+        st.info("Portefeuille de référence introuvable — le robot vient peut-être de démarrer.")
+    else:
+        profit_factor_display = f"{metrics.profit_factor:.2f}" if metrics.profit_factor is not None else "—"
+        render_stat_cards(
+            [
+                {"label": "Plus forte baisse ($)", "value": f"{metrics.max_drawdown_usd:+.2f} $"},
+                {"label": "Plus forte baisse (%)", "value": f"{metrics.max_drawdown_pct:+.2f} %", "sub": f"pic à {metrics.peak_capital_usd:,.2f} $".replace(",", " ")},
+                {"label": "Profit Factor", "value": profit_factor_display, "sub": "gains bruts / pertes brutes"},
+                {"label": "Gains bruts / Pertes brutes", "value": f"{metrics.gross_winning_usd:+.2f} $ / {metrics.gross_losing_usd:+.2f} $"},
+            ]
+        )
+        with st.expander("Comment lire ces deux chiffres ?"):
+            st.markdown(
+                """
+                - **Plus forte baisse (Maximum Drawdown)** : la plus grosse chute entre un sommet et un creux du capital sur la période — même un robot rentable peut traverser une chute intermédiaire importante avant de se redresser.
+                - **Profit Factor** : gains bruts cumulés des trades gagnants, divisés par la valeur absolue des pertes brutes cumulées des trades perdants. Au-dessus de 1 = plus gagné que perdu ; en dessous de 1 = l'inverse. « — » s'affiche s'il n'y a pas encore eu de trade perdant sur la période (division par zéro évitée, pas un chiffre inventé).
+                """
+            )
+
+    st.divider()
+
     # --- Rapport hebdomadaire + verdict GO/MODIFY/NO-GO ---
     st.subheader("📊 Bilan sur 7 jours — quelle stratégie garder ?")
     weekly = data.get_weekly_analytics_cached()

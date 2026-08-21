@@ -11,6 +11,7 @@ from app.reporting.simple_summary import (
     build_explainer_narrative,
     classify_robot_health,
     compute_max_drawdown_usd,
+    compute_profit_factor,
     pick_robot_state_message,
 )
 
@@ -218,3 +219,25 @@ def test_reality_capture_empty_rows():
     assert report.realistic_usd == 0.0
     assert report.capture_ratio_pct == 0.0
     assert report.trade_count == 0
+
+
+# --- Reality Engine spec, section 34: Profit Factor ---
+
+
+def test_profit_factor_matches_the_textbook_ratio():
+    # $10 won across winners, $4 lost across losers -> 2.5
+    assert compute_profit_factor([5.0, 5.0, -2.0, -2.0]) == pytest.approx(2.5)
+
+
+def test_profit_factor_none_when_there_are_no_losing_trades():
+    """Undefined (would be a divide-by-zero), not infinite or zero — the
+    caller must render "—", never a fabricated number."""
+    assert compute_profit_factor([5.0, 3.0, 0.0]) is None
+
+
+def test_profit_factor_below_one_means_losses_outweigh_wins():
+    assert compute_profit_factor([1.0, -5.0]) == pytest.approx(0.2)
+
+
+def test_profit_factor_empty_list_is_none():
+    assert compute_profit_factor([]) is None

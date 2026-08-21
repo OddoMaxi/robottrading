@@ -23,12 +23,14 @@ from app.reporting.simple_summary import (
     CapitalUtilization,
     EquityPoint,
     OpenPosition,
+    PerformanceMetrics,
     RealityCaptureReport,
     RobotStatus,
     TradeRow,
     TradeStatusBreakdown,
     build_capital_utilization,
     build_equity_curve,
+    build_performance_metrics,
     build_portfolio_capital,
     build_reality_capture,
     build_robot_status,
@@ -479,3 +481,21 @@ async def fetch_reality_capture(hours: float = 24.0) -> RealityCaptureReport | N
 @st.cache_data(ttl=30)
 def get_reality_capture_cached(hours: float = 24.0) -> RealityCaptureReport | None:
     return asyncio.run(fetch_reality_capture(hours))
+
+
+async def fetch_performance_metrics(hours: float = 24.0) -> PerformanceMetrics | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            return await build_performance_metrics(session, portfolio.id, float(portfolio.initial_capital_usd), hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30)
+def get_performance_metrics_cached(hours: float = 24.0) -> PerformanceMetrics | None:
+    return asyncio.run(fetch_performance_metrics(hours))
