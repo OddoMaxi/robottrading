@@ -143,6 +143,31 @@ async def test_triangular_detects_loop():
 
 
 @pytest.mark.asyncio
+async def test_triangular_evaluates_the_reverse_direction_of_the_same_loop():
+    # Opportunity Expansion spec, Step 3 (user directive, 2026-08-21) — a
+    # real order book is almost never symmetric enough for both directions
+    # of the same loop shape to agree: here the forward direction
+    # (USDT->BTC->ETH->USDT) is a small loss, while the reverse
+    # (USDT->ETH->BTC->USDT) is a real edge. Before this change, only the
+    # forward direction was ever evaluated, so this profitable reverse loop
+    # would have been silently invisible to the engine forever.
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000))
+    store.update_quote(make_quote("binance", "ETH/BTC", bid=0.0359, ask=0.0360))
+    store.update_quote(make_quote("binance", "ETH/USDT", bid=3_550, ask=3_551))
+
+    engine = TriangularArbitrageEngine(exchange="binance", store=store, capital_usd=1_000)
+    opportunities = await engine.detect()
+
+    symbols = {o.symbol for o in opportunities}
+    assert "USDT->BTC->ETH->USDT" not in symbols  # forward direction is a loss here, correctly rejected
+    assert "USDT->ETH->BTC->USDT" in symbols  # reverse direction is the real edge
+    reverse_opp = next(o for o in opportunities if o.symbol == "USDT->ETH->BTC->USDT")
+    assert reverse_opp.gross_spread_pct > 0
+    assert [leg["symbol"] for leg in reverse_opp.legs] == ["ETH/USDT", "ETH/BTC", "BTC/USDT"]
+
+
+@pytest.mark.asyncio
 async def test_triangular_no_opportunity_when_consistent():
     store = MarketDataStore()
     store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000))

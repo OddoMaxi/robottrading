@@ -57,11 +57,20 @@ class TriangularArbitrageEngine(ArbitrageEngine):
         self.break_even_pct = compute_break_even(fee_engine, three_taker_legs).total_pct
 
     async def detect(self) -> list[Opportunity]:
+        # Opportunity Expansion spec, Step 3 (user directive, 2026-08-21) —
+        # each configured (base, leg1, leg2) triple is one loop shape;
+        # walking it forward (base->leg1->leg2->base) and backward
+        # (base->leg2->leg1->base) are two economically distinct paths that
+        # can each independently clear or miss break-even, not the same
+        # opportunity seen twice — the forward direction buys leg1 and sells
+        # leg2 against it, the reverse does the opposite, and real order
+        # books are almost never symmetric enough for both to be identical.
         opportunities: list[Opportunity] = []
         for base, leg1_asset, leg2_asset in self.paths:
-            opp = self._evaluate_path(base, leg1_asset, leg2_asset)
-            if opp is not None:
-                opportunities.append(opp)
+            for a, b in ((leg1_asset, leg2_asset), (leg2_asset, leg1_asset)):
+                opp = self._evaluate_path(base, a, b)
+                if opp is not None:
+                    opportunities.append(opp)
         return opportunities
 
     def _find_hop(self, from_asset: str, to_asset: str) -> _Hop | None:
