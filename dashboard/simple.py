@@ -169,11 +169,22 @@ def render_gain_card(capital: float | None, today: RotationReport | None) -> Non
     base = capital - pnl
     pct = (pnl / base * 100) if base else 0.0
     tone_color = STATUS_GOOD if pnl >= 0 else STATUS_CRITICAL
+    trade_word = "trade" if today.completed_trades == 1 else "trades"
     render_live_number_card(
         "Gain aujourd'hui",
         [
             {"value": pnl, "decimals": 2, "big": True, "suffix": " $", "signed": True, "color": tone_color},
-            {"value": pct, "decimals": 2, "suffix": " %", "signed": True, "color": tone_color},
+            {
+                "value": pct,
+                "decimals": 2,
+                "suffix": " %",
+                "signed": True,
+                "color": tone_color,
+                # User feedback: the % looked like an isolated, jumpy number on
+                # every refresh — this is a running total for the whole day, not
+                # one trade's result, so the trade count makes that explicit.
+                "sub_text": f"Cumul sur {today.completed_trades} {trade_word} aujourd'hui ({today.win_count} gagnant(s) · {today.loss_count} perdant(s))",
+            },
         ],
         key="gain",
     )
