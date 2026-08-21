@@ -39,6 +39,16 @@ class RotationReport:
     trades_per_hour: float
     net_profit_per_hour_usd: float
     roi_pct: float  # net_pnl / base_capital_usd — return on the capital this report is measured against
+    net_return_per_hour_pct: float  # roi_pct / hours — the central "capital velocity optimizer" rate metric
+    # FAST ROTATION & CAPITAL VELOCITY OPTIMIZER (user directive, 2026-08-21)
+    # — the realized counterpart of app.analytics.capital_velocity's
+    # predictive per-opportunity score: net P&L per dollar of capital held
+    # per minute, across every trade actually executed in this window. A
+    # $2 profit on $1,000 held for 10 minutes scores worse here than $0.80
+    # on $1,000 held for 1 minute — exactly the "A can beat B once capital
+    # gets recycled" example from the spec, but measured after the fact
+    # instead of predicted before it.
+    net_profit_per_capital_minute_usd: float | None
 
 
 async def build_rotation_report(
@@ -63,6 +73,7 @@ async def build_rotation_report(
 
     win_case = case((SimulatedTradeRecord.net_profit_usd > 0, 1), else_=0)
     loss_case = case((SimulatedTradeRecord.net_profit_usd < 0, 1), else_=0)
+    capital_minutes = SimulatedTradeRecord.capital_usd * OpportunityRecord.holding_period_seconds / 60.0
     query = (
         select(
             func.count(),
@@ -71,6 +82,7 @@ async def build_rotation_report(
             func.avg(OpportunityRecord.holding_period_seconds),
             func.coalesce(func.sum(win_case), 0),
             func.coalesce(func.sum(loss_case), 0),
+            func.coalesce(func.sum(capital_minutes), 0),
         )
         .select_from(SimulatedTradeRecord)
         .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
@@ -85,10 +97,12 @@ async def build_rotation_report(
     elif mode == "fast":
         query = query.where(OpportunityRecord.holding_time_category != HoldingTimeCategory.CARRY)
 
-    count, total_capital, net_pnl, avg_holding, wins, losses = (await session.execute(query)).first()
+    count, total_capital, net_pnl, avg_holding, wins, losses, total_capital_minutes = (await session.execute(query)).first()
 
     total_capital = float(total_capital)
     net_pnl = float(net_pnl)
+    total_capital_minutes = float(total_capital_minutes)
+    roi_pct = (net_pnl / base_capital_usd * 100) if base_capital_usd else 0.0
     return RotationReport(
         period_start=period_start,
         period_end=now,
@@ -104,5 +118,7 @@ async def build_rotation_report(
         avg_holding_time_seconds=float(avg_holding) if avg_holding is not None else None,
         trades_per_hour=(count / hours) if hours else 0.0,
         net_profit_per_hour_usd=(net_pnl / hours) if hours else 0.0,
-        roi_pct=(net_pnl / base_capital_usd * 100) if base_capital_usd else 0.0,
+        roi_pct=roi_pct,
+        net_return_per_hour_pct=(roi_pct / hours) if hours else 0.0,
+        net_profit_per_capital_minute_usd=(net_pnl / total_capital_minutes) if total_capital_minutes > 0 else None,
     )

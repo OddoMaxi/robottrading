@@ -9,11 +9,24 @@ alone).
 Like the Opportunity Score (app.opportunity.scorer), this is an explicit,
 documented deterministic formula — a starting point pending recalibration
 once real execution data exists, not a measurement.
+
+Weights match the user's own explicit priority order (FAST ROTATION &
+CAPITAL VELOCITY OPTIMIZER, 2026-08-21): 1. realistic net profit,
+2. execution probability, 3. capital efficiency, 4. short holding time,
+5. frequency. "Frequency" isn't scored here — it's a property of how
+often the market creates a given edge, observable only in aggregate
+across many detections, not something a single opportunity's own fields
+can express; scoring higher on this formula just means an opportunity is
+individually a better use of capital *right now*, which is the honest
+scope of a per-opportunity ranking function. The previous version's
+separate "release_speed" factor was dropped — it was, by its own
+docstring, mathematically identical to holding_time_score, so it was
+double-weighting the same signal under two names rather than adding one.
 """
 
 from dataclasses import dataclass
 
-WEIGHTS = {"profit": 0.25, "probability": 0.20, "holding_time": 0.25, "capital": 0.10, "liquidity": 0.10, "release_speed": 0.10}
+WEIGHTS = {"profit": 0.35, "probability": 0.25, "capital": 0.20, "holding_time": 0.15, "liquidity": 0.05}
 
 # Reference scales used to normalize raw values into 0-1 sub-scores.
 PROFIT_REFERENCE_USD = 20.0  # a $20 profit on a single trade scores full marks on that factor
@@ -39,7 +52,6 @@ class VelocityFactors:
     holding_time_score: float
     capital_score: float
     liquidity_score: float
-    release_speed_score: float
 
 
 def capital_velocity_score(
@@ -54,17 +66,13 @@ def capital_velocity_score(
     probability_score = _clamp01(execution_probability)
     holding_time_score = _clamp01(1 - holding_time_seconds / HOLDING_TIME_REFERENCE_SECONDS)
     capital_score = _clamp01(1 - capital_usd / CAPITAL_REFERENCE_USD)
-    # Capital frees up exactly when the position closes, so "how fast does it
-    # release" carries the same signal as "how short is the hold".
-    release_speed_score = holding_time_score
 
-    factors = VelocityFactors(profit_score, probability_score, holding_time_score, capital_score, liquidity_score, release_speed_score)
+    factors = VelocityFactors(profit_score, probability_score, holding_time_score, capital_score, liquidity_score)
     raw = (
         WEIGHTS["profit"] * factors.profit_score
         + WEIGHTS["probability"] * factors.probability_score
-        + WEIGHTS["holding_time"] * factors.holding_time_score
         + WEIGHTS["capital"] * factors.capital_score
+        + WEIGHTS["holding_time"] * factors.holding_time_score
         + WEIGHTS["liquidity"] * factors.liquidity_score
-        + WEIGHTS["release_speed"] * factors.release_speed_score
     )
     return round(raw * 100, 1), factors

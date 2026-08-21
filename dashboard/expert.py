@@ -640,8 +640,13 @@ def render_expert_mode() -> None:
                 """
             )
 
-    # --- Efficacité d'exécution (user request — mesurer avant d'optimiser) ---
-    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Efficacité d\'exécution (portefeuille 5K, 24h)</div>', unsafe_allow_html=True)
+    # --- FAST ROTATION & CAPITAL VELOCITY OPTIMIZER (user directive, 2026-08-21) ---
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Optimiseur de rotation du capital (portefeuille 5K, 24h)</div>', unsafe_allow_html=True)
+    st.caption(
+        "L'objectif n'est pas de maximiser le nombre de trades, mais le gain net réaliste par minute de capital "
+        "immobilisé, sous risque contrôlé. Ces chiffres mesurent ce qui s'est réellement passé — jamais utilisés "
+        "pour extrapoler qu'une opportunité va se répéter."
+    )
     efficiency_report = data.get_rotation_report_cached(mode=None, hours=24.0)
     if efficiency_report is None or efficiency_report.completed_trades == 0:
         st.info("Pas encore assez de trades pour mesurer l'efficacité d'exécution.")
@@ -650,11 +655,33 @@ def render_expert_mode() -> None:
         attempts = (trade_breakdown.failed + trade_breakdown.closed + trade_breakdown.open) if trade_breakdown else 0
         failure_rate_display = f"{trade_breakdown.failed / attempts * 100:.1f} %" if attempts else "—"
 
+        capital_util = data.get_capital_utilization_cached()
+        capital_idle_display = f"{100 - capital_util.utilization_pct:.0f} %" if capital_util else "—"
+
+        exec_funnel = data.get_execution_funnel_cached(hours=24.0)
+        executable_count = exec_funnel.stage("executable").count
+        executed_count = exec_funnel.stage("executed").count
+        capture_rate_display = f"{executed_count / executable_count * 100:.1f} %" if executable_count else "—"
+
+        capital_minute_display = (
+            f"{efficiency_report.net_profit_per_capital_minute_usd:+.5f} $"
+            if efficiency_report.net_profit_per_capital_minute_usd is not None
+            else "—"
+        )
+
         render_stat_cards(
             [
+                {"label": "Trades / heure", "value": f"{efficiency_report.trades_per_hour:.1f} /h"},
                 {"label": "Gain net / heure", "value": f"{efficiency_report.net_profit_per_hour_usd:+.2f} $"},
-                {"label": "Rendement sur capital (ROI)", "value": f"{efficiency_report.roi_pct:+.2f} %"},
-                {"label": "Rythme d'exécution", "value": f"{efficiency_report.trades_per_hour:.1f} /h"},
+                {"label": "Rendement net / heure", "value": f"{efficiency_report.net_return_per_hour_pct:+.4f} %"},
+                {"label": "Gain net / capital-minute", "value": capital_minute_display, "sub": "la métrique centrale de l'optimiseur"},
+                {"label": "Rotation du capital", "value": f"{efficiency_report.capital_rotation_rate:.1f}×"},
+                {"label": "Capital inactif", "value": capital_idle_display, "sub": "% du capital non engagé en ce moment"},
+                {
+                    "label": "Taux de capture",
+                    "value": capture_rate_display,
+                    "sub": f"{executed_count}/{executable_count} opportunités exécutables réellement exécutées",
+                },
                 {"label": "Taux d'échec", "value": failure_rate_display, "sub": "opportunités validées jamais exécutées"},
             ]
         )
