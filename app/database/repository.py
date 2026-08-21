@@ -88,6 +88,26 @@ async def update_opportunity_tracking(
     )
 
 
+async def close_orphaned_opportunity_tracking(session: AsyncSession, now: datetime | None = None) -> int:
+    """Restart-amnesia fix (same bug class as app.simulation.state_recovery
+    fixes for capital/positions) — OpportunityTracker is pure in-memory
+    state; every process restart starts with an empty tracker, orphaning
+    any row still 'detected'/'active' in the DB that the previous process
+    was watching, since nothing in the new process's lifecycle will ever
+    call close_opportunity_tracking() on a key it never saw. Found live:
+    3.76M rows stuck at 'detected' after two days of restarts across a
+    single deploy session. Run once at startup, before detection starts —
+    bulk-closes every such row as expired rather than leaving it stuck
+    forever; a signal that's genuinely still happening gets freshly
+    re-detected as a brand new row on the very next scan anyway, which is
+    the correct behavior regardless."""
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    result = await session.execute(
+        update(OpportunityRecord).where(OpportunityRecord.status.in_(["detected", "active"])).values(status="expired", closed_at=now)
+    )
+    return result.rowcount
+
+
 async def close_opportunity_tracking(session: AsyncSession, tracked: TrackedOpportunity, closed_at: float | None = None) -> None:
     """The signal has gone quiet (OpportunityTracker.expire_stale) without
     ever being traded — mark it closed so it stops looking perpetually ACTIVE."""

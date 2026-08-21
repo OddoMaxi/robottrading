@@ -30,6 +30,7 @@ from app.config.constants import (
 from app.config.settings import get_settings
 from app.database.repository import (
     close_opportunity_tracking,
+    close_orphaned_opportunity_tracking,
     create_all_tables,
     get_or_create_exchange,
     get_or_create_portfolio,
@@ -202,6 +203,16 @@ async def lifespan(app: FastAPI):
         # committed for days or weeks (Basis/Funding). Must run before any
         # collector/detection task starts.
         await rebuild_portfolio_state(session, portfolios, portfolio_ids, position_tracker)
+
+        # Same restart-amnesia bug class, applied to opportunity tracking —
+        # the in-memory OpportunityTracker built above starts empty, so any
+        # row still 'detected'/'active' in the DB from the previous process
+        # would otherwise never get closed out. Must also run before any
+        # collector/detection task starts.
+        orphaned_count = await close_orphaned_opportunity_tracking(session)
+        await session.commit()
+        if orphaned_count:
+            logger.warning("closed %d orphaned opportunity-tracking rows left open by a previous process", orphaned_count)
 
     collectors = [
         BinanceCollector(SPOT_SYMBOLS),
