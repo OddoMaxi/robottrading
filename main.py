@@ -49,6 +49,7 @@ from app.market_data.store import market_data_store
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
 from app.risk.risk_engine import risk_engine
+from app.simulation.ledger_integrity import check_ledger_integrity
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
@@ -82,10 +83,22 @@ position_tracker = OpenPositionTracker()
 # economic event thousands of times over (event-driven detection can
 # re-fire several times a second).
 opportunity_tracker = OpportunityTracker()
+# Populated once by lifespan() at startup, mutated in place (never
+# reassigned) — module-level so both detection_loop and the /ledger/*
+# endpoints below can look up each portfolio's DB id.
+portfolio_ids: dict[str, int] = {}
 background_tasks: list[asyncio.Task] = []
+
+# Ledger Integrity (Reality Engine spec, sections 30-31) — cheap enough to
+# run often, but not worth a DB round-trip per scan when scans can fire
+# several times a second; once a minute is plenty to catch a real drift
+# between the live portfolios and the DB ledger long before it matters.
+LEDGER_CHECK_INTERVAL_SECONDS = 60.0
+_last_ledger_check_at = 0.0
 
 
 async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str, int]) -> None:
+    global _last_ledger_check_at
     while True:
         try:
             opportunities = await detector.scan_once()
@@ -142,6 +155,24 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 for tracked in opportunity_tracker.expire_stale(now=scan_time):
                     await close_opportunity_tracking(session, tracked, closed_at=scan_time)
                 await session.commit()
+
+                # Ledger Integrity (spec sections 30-31, 10) — a violation
+                # here means the live portfolios have drifted out of sync
+                # with the DB ledger (a write that silently failed, a
+                # restart-recovery inconsistency): stop all new executions
+                # immediately rather than keep compounding an accounting
+                # error. Detection/observation keep running.
+                if scan_time - _last_ledger_check_at >= LEDGER_CHECK_INTERVAL_SECONDS:
+                    _last_ledger_check_at = scan_time
+                    for portfolio in portfolios:
+                        check = await check_ledger_integrity(session, portfolio, portfolio_ids[portfolio.name], now=scan_time)
+                        if not check.reconciled and not risk_engine.kill_switch_engaged:
+                            logger.critical(
+                                "LEDGER INTEGRITY VIOLATION on portfolio %s: %s — engaging kill switch",
+                                check.portfolio_name,
+                                "; ".join(check.violations),
+                            )
+                            risk_engine.engage_kill_switch(f"ledger integrity violation: {'; '.join(check.violations)}")
             if opportunities:
                 logger.info("scan: %d opportunities detected", len(opportunities))
         except asyncio.CancelledError:
@@ -156,7 +187,6 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
 async def lifespan(app: FastAPI):
     await create_all_tables()
 
-    portfolio_ids: dict[str, int] = {}
     async with async_session_factory() as session:
         for exchange in PRIORITY_EXCHANGES:
             await get_or_create_exchange(session, exchange, exchange.capitalize())
@@ -231,6 +261,30 @@ async def capital_pool() -> list[dict]:
         }
         for portfolio in portfolios
     ]
+
+
+@app.get("/ledger/integrity")
+async def ledger_integrity() -> list[dict]:
+    """Reality Engine spec, sections 30-31 — on-demand version of the same
+    check the detection loop already runs every LEDGER_CHECK_INTERVAL_SECONDS
+    and engages the kill switch on: live portfolio equity vs. what the DB
+    trade ledger itself reconstructs it as, for every portfolio right now."""
+    now = time.time()
+    results = []
+    async with async_session_factory() as session:
+        for portfolio in portfolios:
+            check = await check_ledger_integrity(session, portfolio, portfolio_ids[portfolio.name], now=now)
+            results.append(
+                {
+                    "portfolio": check.portfolio_name,
+                    "equity_usd": check.equity_usd,
+                    "available_usd": check.available_usd,
+                    "db_reconstructed_equity_usd": check.db_reconstructed_equity_usd,
+                    "reconciled": check.reconciled,
+                    "violations": check.violations,
+                }
+            )
+    return results
 
 
 if __name__ == "__main__":

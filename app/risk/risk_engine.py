@@ -12,6 +12,7 @@ class RiskEngine:
     def __init__(self, limits: RiskLimits = RiskLimits()) -> None:
         self.limits = limits
         self._kill_switch_engaged = False
+        self._kill_switch_reason: str | None = None
 
     def engage_kill_switch(self, reason: str) -> None:
         self._kill_switch_engaged = True
@@ -24,6 +25,10 @@ class RiskEngine:
     @property
     def kill_switch_engaged(self) -> bool:
         return self._kill_switch_engaged
+
+    @property
+    def kill_switch_reason(self) -> str | None:
+        return self._kill_switch_reason
 
     def check(self, opportunity: Opportunity, capital_usd: float, current_latency_ms: float) -> list[str]:
         """Return a list of violated limit names. Empty list means the trade may proceed."""

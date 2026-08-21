@@ -30,6 +30,20 @@ def test_check_flags_latency_over_the_limit():
 def test_kill_switch_starts_disengaged():
     engine = RiskEngine()
     assert engine.kill_switch_engaged is False
+    assert engine.kill_switch_reason is None
+
+
+def test_kill_switch_reason_is_reported_while_engaged():
+    engine = RiskEngine()
+    engine.engage_kill_switch("ledger integrity violation: available_usd is negative")
+    assert engine.kill_switch_reason == "ledger integrity violation: available_usd is negative"
+
+
+def test_kill_switch_reason_clears_on_disengage():
+    engine = RiskEngine()
+    engine.engage_kill_switch("manual stop")
+    engine.disengage_kill_switch()
+    assert engine.kill_switch_reason is None
 
 
 def test_engaging_the_kill_switch_blocks_every_check():

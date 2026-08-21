@@ -27,6 +27,7 @@ class KillSwitchRequest(BaseModel):
 async def risk_status() -> dict:
     return {
         "kill_switch_engaged": risk_engine.kill_switch_engaged,
+        "kill_switch_reason": risk_engine.kill_switch_reason,
         "max_capital_per_trade_usd": risk_engine.limits.max_capital_per_trade_usd,
         "max_concurrent_trades": risk_engine.limits.max_concurrent_trades,
         "max_daily_loss_usd": risk_engine.limits.max_daily_loss_usd,
