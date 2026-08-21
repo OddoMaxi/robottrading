@@ -38,12 +38,21 @@ HARD_STOP_HOLDING_SECONDS = 1800.0  # 30 minutes
 async def _find_opening_trade(
     session: AsyncSession, portfolio_id: int, strategy: str, exchange: str, symbol: str
 ) -> tuple[int, object, float, float] | None:
-    """The most recent executed trade on this portfolio matching
+    """The most recent GENUINE opening trade on this portfolio matching
     (strategy, exchange, symbol) — the one that opened the position
     overdue_locks just flagged. Filtered on (strategy, symbol) in SQL,
     then on the JSON legs[0].exchange in Python (matching the existing
     pattern in app.reporting.simple_summary._reconstruct_open_positions
-    rather than a JSON-operator query)."""
+    rather than a JSON-operator query).
+
+    Explicitly excludes time_stop_exit rows (bug found live, 2026-08-21):
+    without this, a stale reconstructed lock this function is never
+    supposed to see in the first place (see the fix in
+    app.simulation.state_recovery) could otherwise find its OWN previous
+    adjustment record as "the opening trade" and reverse that reversal —
+    flipping the sign positive. Kept as defense in depth even though the
+    root cause is fixed at the reconstruction layer.
+    """
     rows = (
         await session.execute(
             select(
@@ -58,6 +67,7 @@ async def _find_opening_trade(
             .where(
                 SimulatedTradeRecord.portfolio_id == portfolio_id,
                 SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                SimulatedTradeRecord.status != TradeStatus.TIME_STOP_EXIT.value,
                 OpportunityRecord.strategy == strategy,
                 OpportunityRecord.symbol == symbol,
             )

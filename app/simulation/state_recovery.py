@@ -83,6 +83,7 @@ async def rebuild_portfolio_state(
                     SimulatedTradeRecord.capital_usd,
                     SimulatedTradeRecord.net_profit_usd,
                     SimulatedTradeRecord.executed_at,
+                    SimulatedTradeRecord.status,
                     OpportunityRecord.strategy,
                     OpportunityRecord.symbol,
                     OpportunityRecord.legs,
@@ -100,13 +101,35 @@ async def rebuild_portfolio_state(
             )
         ).all()
 
+        # FAST TRADING ONLY bug found live, 2026-08-21 — a time_stop_exit
+        # record is a settling event, not an opening one; without this map,
+        # a restart would reconstruct the position from its ORIGINAL
+        # opening trade (whose own nominal holding_period_seconds is
+        # unaware time_stop already closed it), re-lock it, and the very
+        # next scan's time_stop check would find app.simulation.time_stop's
+        # own PREVIOUS adjustment record as "the opening trade" and reverse
+        # ITS reversal — flipping the sign positive. See
+        # app.reporting.simple_summary's identical fix for the dashboard
+        # reconstruction side of this same bug class.
+        force_closed_at: dict[str, datetime] = {}
+        for _capital_usd, _net_profit_usd, executed_at, status, strategy, symbol, legs, _holding_period_seconds in rows:
+            if status == "time_stop_exit":
+                exchange = legs[0].get("exchange") if legs else None
+                key = f"{strategy}:{exchange}:{symbol}"
+                if key not in force_closed_at or executed_at > force_closed_at[key]:
+                    force_closed_at[key] = executed_at
+
         # Earliest-wins per key — see module docstring for why later
         # overlapping trades on the same key are treated as bug artifacts,
         # not additional independent positions.
         earliest_open_by_key: dict[str, tuple] = {}
-        for capital_usd, net_profit_usd, executed_at, strategy, symbol, legs, holding_period_seconds in rows:
+        for capital_usd, net_profit_usd, executed_at, status, strategy, symbol, legs, holding_period_seconds in rows:
+            if status == "time_stop_exit":
+                continue  # a settling event, never itself a position to reopen
             exchange = legs[0].get("exchange") if legs else None
             key = f"{strategy}:{exchange}:{symbol}"
+            if key in force_closed_at:
+                continue  # already closed by a later time_stop_exit — nothing to reconstruct
             closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
             if closes_at <= now_dt or key in earliest_open_by_key:
                 continue
