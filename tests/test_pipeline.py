@@ -23,6 +23,9 @@ class _DeterministicRng:
     def gauss(self, mu: float, sigma: float) -> float:
         return mu
 
+    def uniform(self, low: float, high: float) -> float:
+        return low
+
 
 def make_quote(exchange: str, symbol: str, bid: float, ask: float, qty: float = 10.0) -> NormalizedQuote:
     now = time.time()

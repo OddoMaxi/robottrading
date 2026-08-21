@@ -12,13 +12,17 @@ from app.simulation.portfolios import VirtualPortfolio
 class _DeterministicRng:
     """Stub for tests that need exact profit assertions: `.random()` never
     trips a rare-event `< probability` check, `.gauss()` always returns
-    exactly the mean (zero variance) instead of a real sample."""
+    exactly the mean (zero variance) instead of a real sample, `.uniform()`
+    always returns its low bound (used for latency sampling)."""
 
     def random(self) -> float:
         return 1.0
 
     def gauss(self, mu: float, sigma: float) -> float:
         return mu
+
+    def uniform(self, low: float, high: float) -> float:
+        return low
 
 
 class _AlwaysLegFailureRng:
@@ -29,6 +33,9 @@ class _AlwaysLegFailureRng:
 
     def gauss(self, mu: float, sigma: float) -> float:
         return mu
+
+    def uniform(self, low: float, high: float) -> float:
+        return low
 
 
 def make_opportunity(**overrides) -> Opportunity:
@@ -152,6 +159,37 @@ def test_partial_liquidity_gives_partial_fill():
     trader = PaperTrader()
     opp = make_opportunity(capital_usd=DEFAULT_OPPORTUNITY_CAPITAL_USD * 0.5)
     assert trader.determine_outcome(opp) == TradeStatus.PARTIAL_FILL
+
+
+def test_comfortable_edge_survives_latency_revalidation():
+    """Reality Engine spec, sections 10-11 — an opportunity with a real
+    break_even_pct goes through latency revalidation; a comfortably
+    profitable one should essentially always survive it."""
+    trader = PaperTrader(rng=_DeterministicRng())
+    opp = make_opportunity(net_spread_pct=0.30, break_even_pct=0.05)
+    assert trader.determine_outcome(opp) == TradeStatus.SIMULATED_EXECUTED
+
+
+def test_razor_thin_edge_can_be_missed_by_latency_revalidation():
+    """A spread priced right at its break-even floor must sometimes fail
+    revalidation over many samples — otherwise latency has no teeth."""
+    saw_missed = False
+    for seed in range(500):
+        trader = PaperTrader(rng=random.Random(seed))
+        opp = make_opportunity(net_spread_pct=0.051, break_even_pct=0.05)
+        if trader.determine_outcome(opp) == TradeStatus.MISSED:
+            saw_missed = True
+            break
+    assert saw_missed
+
+
+def test_opportunity_without_break_even_pct_skips_latency_revalidation():
+    """Basis/Funding never set break_even_pct — a few hundred ms is
+    economically irrelevant against a multi-day carry position, so they
+    should never be rejected by this check."""
+    trader = PaperTrader(rng=_DeterministicRng())
+    opp = make_opportunity(net_spread_pct=0.30, break_even_pct=None)
+    assert trader.determine_outcome(opp) == TradeStatus.SIMULATED_EXECUTED
 
 
 def test_taker_taker_never_misses_regardless_of_probability():

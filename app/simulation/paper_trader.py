@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD
+from app.execution.latency_engine import DEFAULT_PROFILE, LatencyProfile, revalidate_after_latency
 from app.opportunity.false_opportunity_filter import MAX_QUOTE_AGE_SECONDS
 from app.opportunity.models import Opportunity
 from app.risk.limits import RiskLimits
@@ -71,14 +72,32 @@ def _position_key(opportunity: Opportunity) -> str | None:
 
 
 class PaperTrader:
-    def __init__(self, rng: random.Random | None = None, risk_limits: RiskLimits = RiskLimits()) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        risk_limits: RiskLimits = RiskLimits(),
+        latency_profile: LatencyProfile = DEFAULT_PROFILE,
+    ) -> None:
         self._rng = rng or random.Random()
         self._risk_limits = risk_limits
+        self._latency_profile = latency_profile
 
     def determine_outcome(self, opportunity: Opportunity) -> TradeStatus:
         """Sample the execution outcome once per opportunity — shared across every portfolio's replay of it."""
         if opportunity.market_data_age_seconds is not None and opportunity.market_data_age_seconds > MAX_QUOTE_AGE_SECONDS:
             return TradeStatus.SIMULATED_FAILED
+
+        # Latency Engine + pre-execution revalidation (Reality Engine spec,
+        # sections 10-11) — only meaningful for opportunities that actually
+        # carry a break-even floor to revalidate against (fast strategies);
+        # Basis/Funding don't set one, since a few hundred ms is economically
+        # irrelevant against a multi-day carry position.
+        if opportunity.net_spread_pct is not None and opportunity.break_even_pct is not None:
+            revalidation = revalidate_after_latency(
+                opportunity.net_spread_pct, opportunity.break_even_pct, self._latency_profile, self._rng
+            )
+            if not revalidation.still_valid:
+                return TradeStatus.MISSED
 
         if (
             opportunity.execution_mode
