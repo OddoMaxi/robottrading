@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config.constants import PRIORITY_EXCHANGES
-from app.database.models import OpportunityRecord, PriceSnapshot, SimulatedTradeRecord
+from app.database.models import OpportunityRecord, PriceSnapshot, SimulatedTradeRecord, VirtualPortfolioRecord
 from app.reporting.rotation import EXECUTED_STATUSES
 
 # Price data older than this means that exchange's feed has likely stalled
@@ -231,25 +231,43 @@ class EquityPoint:
 
 
 async def build_equity_curve(
-    session: AsyncSession, portfolio_id: int, initial_capital_usd: float, hours: float = 24.0, now: datetime | None = None
+    session: AsyncSession, portfolio_id: int, initial_capital_usd: float, hours: float | None = 24.0, now: datetime | None = None
 ) -> list[EquityPoint]:
     """Capital over time, reconstructed as a running total from the trade
-    ledger — the one chart Simple Mode's home screen shows (spec section 14)."""
-    now = now or datetime.now(UTC).replace(tzinfo=None)
-    period_start = now - timedelta(hours=hours)
+    ledger — the one chart Simple Mode's home screen shows (spec section 14).
 
-    # Capital already earned/lost *before* the window, so the curve starts
-    # at the right level instead of resetting to initial_capital_usd at
-    # period_start.
-    pre_window_pnl = (
-        await session.execute(
-            select(func.coalesce(func.sum(SimulatedTradeRecord.net_profit_usd), 0)).where(
-                SimulatedTradeRecord.portfolio_id == portfolio_id,
-                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
-                SimulatedTradeRecord.executed_at < period_start,
+    hours=None means the full history: the first point anchors at the
+    portfolio's actual creation time with initial_capital_usd exactly —
+    "use the real starting capital as the first point" — rather than an
+    approximation of "capital as of N hours ago". The last point is then
+    initial_capital_usd + the sum of every executed trade's net_profit_usd,
+    which is mathematically the same total build_portfolio_capital computes
+    (just accumulated incrementally here instead of summed at once) — so
+    the equity curve's final value is guaranteed to equal the Capital
+    virtuel card by construction, not by coincidence, as long as both are
+    queried against the same `now`.
+    """
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+
+    if hours is None:
+        period_start = (
+            await session.execute(select(VirtualPortfolioRecord.created_at).where(VirtualPortfolioRecord.id == portfolio_id))
+        ).scalar() or now
+        pre_window_pnl = 0.0
+    else:
+        period_start = now - timedelta(hours=hours)
+        # Capital already earned/lost *before* the window, so the curve
+        # starts at the right level instead of resetting to
+        # initial_capital_usd at period_start.
+        pre_window_pnl = (
+            await session.execute(
+                select(func.coalesce(func.sum(SimulatedTradeRecord.net_profit_usd), 0)).where(
+                    SimulatedTradeRecord.portfolio_id == portfolio_id,
+                    SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                    SimulatedTradeRecord.executed_at < period_start,
+                )
             )
-        )
-    ).scalar() or 0.0
+        ).scalar() or 0.0
 
     rows = (
         await session.execute(

@@ -507,20 +507,41 @@ def render_performance_summary() -> None:
     )
 
 
-def render_equity_chart(hours: float = 24.0) -> None:
+EQUITY_CURVE_TOLERANCE_USD = 0.02
+
+
+def render_equity_chart(hours: float | None = None) -> None:
     """Reality Engine spec, section 36 — sources exclusively from the
     Portfolio Ledger's own equity reconstruction (build_equity_curve), never
     a value invented for display. Points with a missing/non-finite capital
     value are dropped defensively — Plotly renders a `null` y as a gap, but
     a bare unlabeled trace hovering over one can show "undefined" in the
     tooltip, which is the bug this was reported against; an explicit name
-    and hovertemplate remove the ambiguity regardless of the exact cause."""
+    and hovertemplate remove the ambiguity regardless of the exact cause.
+
+    hours=None (default) — full history, so the first point is the real
+    starting capital rather than an approximation from a rolling window,
+    and the last point is checked against the Capital virtuel card's own
+    figure (app.reporting.simple_summary.build_portfolio_capital): both are
+    the same all-time sum by construction, so any divergence beyond
+    floating-point tolerance means the two reconstructions disagree — a
+    genuine accounting anomaly, not a display quirk. Shown as a visible
+    warning rather than silently trusting either number."""
     points = data.get_equity_curve_cached(hours=hours)
     points = [p for p in points if p.at is not None and p.capital_usd is not None and math.isfinite(p.capital_usd)]
     st.markdown('<div class="simple-card-label" style="margin-top:6px;">Évolution du capital</div>', unsafe_allow_html=True)
     if len(points) < 2:
         st.info("Pas encore assez de données pour tracer l'évolution du capital.")
         return
+
+    capital = data.get_simple_capital_cached()
+    if capital is not None and abs(points[-1].capital_usd - capital) > EQUITY_CURVE_TOLERANCE_USD:
+        st.error(
+            f"⚠️ Anomalie comptable : le graphique termine à {points[-1].capital_usd:,.2f} $ mais la carte Capital "
+            f"affiche {capital:,.2f} $ — écart de {points[-1].capital_usd - capital:+.2f} $. "
+            "Ces deux valeurs doivent toujours être identiques."
+        )
+
     fig = go.Figure(
         go.Scatter(
             x=[p.at for p in points],
@@ -680,7 +701,7 @@ def render_trade_status_breakdown() -> None:
 def render_performance_page() -> None:
     st.markdown('<div style="font-size:1.4rem;font-weight:700;margin:6px 0 14px 0;">Performance</div>', unsafe_allow_html=True)
     render_performance_summary()
-    render_equity_chart(hours=24.0 * 7)
+    render_equity_chart()
     render_trade_status_breakdown()
     render_opportunity_funnel()
 

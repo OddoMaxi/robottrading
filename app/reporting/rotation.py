@@ -37,6 +37,8 @@ class RotationReport:
     avg_net_profit_per_trade_usd: float
     avg_holding_time_seconds: float | None
     trades_per_hour: float
+    net_profit_per_hour_usd: float
+    roi_pct: float  # net_pnl / base_capital_usd — return on the capital this report is measured against
 
 
 async def build_rotation_report(
@@ -101,4 +103,6 @@ async def build_rotation_report(
         avg_net_profit_per_trade_usd=(net_pnl / count) if count else 0.0,
         avg_holding_time_seconds=float(avg_holding) if avg_holding is not None else None,
         trades_per_hour=(count / hours) if hours else 0.0,
+        net_profit_per_hour_usd=(net_pnl / hours) if hours else 0.0,
+        roi_pct=(net_pnl / base_capital_usd * 100) if base_capital_usd else 0.0,
     )

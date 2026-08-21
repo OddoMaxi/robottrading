@@ -28,6 +28,7 @@ from dashboard.theme import (
     SEQUENTIAL_BLUE,
     STATUS_CRITICAL,
     STATUS_GOOD,
+    REJECTION_REASON_LABELS,
     STRATEGY_LABELS,
     SURFACE,
     humanize_delta,
@@ -488,6 +489,73 @@ def render_expert_mode() -> None:
                 - **Profit Factor** : gains bruts cumulés des trades gagnants, divisés par la valeur absolue des pertes brutes cumulées des trades perdants. Au-dessus de 1 = plus gagné que perdu ; en dessous de 1 = l'inverse. « — » s'affiche s'il n'y a pas encore eu de trade perdant sur la période (division par zéro évitée, pas un chiffre inventé).
                 """
             )
+
+    st.divider()
+
+    # --- Execution Engine Audit — Funnel (pre-live-trading audit, user request) ---
+    st.subheader("🔎 Audit du moteur d'exécution — entonnoir complet")
+    st.caption(
+        "Détectées → rentables après frais → rejetées / exécutables → exécutées → clôturées. "
+        "Chaque pourcentage est relatif au nombre d'opportunités détectées (24h)."
+    )
+    funnel = data.get_execution_funnel_cached(hours=24.0)
+    stage_labels = {
+        "detected": "Détectées",
+        "profitable_after_fees": "Rentables après frais",
+        "rejected": "Rejetées",
+        "executable": "Exécutables",
+        "executed": "Exécutées",
+        "closed": "Clôturées",
+    }
+    if funnel.stage("detected").count == 0:
+        st.info("Aucune opportunité détectée sur la période — le robot vient peut-être de démarrer.")
+    else:
+        rows_html = "".join(
+            f'<div class="simple-perf-row"><span class="k">{stage_labels[s.name]}</span>'
+            f'<span class="v">{s.count:,} <span style="color:{INK_MUTED};font-weight:500;">({s.pct_of_detected:.1f} %)</span></span></div>'.replace(",", " ")
+            for s in funnel.stages
+        )
+        st.markdown(f'<div class="simple-card">{rows_html}</div>', unsafe_allow_html=True)
+
+        if funnel.rejection_reasons:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Principales raisons de rejet</div>', unsafe_allow_html=True)
+            reason_rows = "".join(
+                f'<div class="simple-perf-row"><span class="k">{REJECTION_REASON_LABELS.get(reason, reason)}</span>'
+                f'<span class="v">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({pct:.1f} %)</span></span></div>'.replace(",", " ")
+                for reason, count, pct in funnel.rejection_reasons
+            )
+            st.markdown(f'<div class="simple-card">{reason_rows}</div>', unsafe_allow_html=True)
+
+        with st.expander("Comment lire cet entonnoir ?"):
+            st.markdown(
+                """
+                - **Détectées** : événements économiques distincts (une même opportunité observée plusieurs fois d'affilée compte une seule fois).
+                - **Rentables après frais** : l'écart brut couvre les frais et le coût VWAP au moment de la détection — avant toute autre contrainte.
+                - **Rejetées** : n'a pas passé la validation (données trop anciennes, frais trop élevés, écart trop faible, position déjà ouverte).
+                - **Exécutables** : a passé la validation — une allocation de capital aurait été tentée.
+                - **Exécutées** : au moins un portefeuille a réellement simulé un trade dessus.
+                - **Clôturées** : le trade exécuté a atteint la fin de sa durée de détention — résultat définitif.
+                """
+            )
+
+    # --- Efficacité d'exécution (user request — mesurer avant d'optimiser) ---
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Efficacité d\'exécution (portefeuille 5K, 24h)</div>', unsafe_allow_html=True)
+    efficiency_report = data.get_rotation_report_cached(mode=None, hours=24.0)
+    if efficiency_report is None or efficiency_report.completed_trades == 0:
+        st.info("Pas encore assez de trades pour mesurer l'efficacité d'exécution.")
+    else:
+        trade_breakdown = data.get_trade_status_breakdown_cached(hours=24.0)
+        attempts = (trade_breakdown.failed + trade_breakdown.closed + trade_breakdown.open) if trade_breakdown else 0
+        failure_rate_display = f"{trade_breakdown.failed / attempts * 100:.1f} %" if attempts else "—"
+
+        render_stat_cards(
+            [
+                {"label": "Gain net / heure", "value": f"{efficiency_report.net_profit_per_hour_usd:+.2f} $"},
+                {"label": "Rendement sur capital (ROI)", "value": f"{efficiency_report.roi_pct:+.2f} %"},
+                {"label": "Rythme d'exécution", "value": f"{efficiency_report.trades_per_hour:.1f} /h"},
+                {"label": "Taux d'échec", "value": failure_rate_display, "sub": "opportunités validées jamais exécutées"},
+            ]
+        )
 
     st.divider()
 

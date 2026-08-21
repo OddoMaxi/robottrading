@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.execution_funnel import ExecutionFunnelReport, build_execution_funnel
 from app.reporting.holding_time_performance import HoldingTimeBucketStats, build_holding_time_performance
 from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.simple_summary import (
@@ -332,7 +333,7 @@ def get_simple_capital_cached() -> float | None:
     return asyncio.run(fetch_simple_capital())
 
 
-async def fetch_equity_curve(hours: float = 24.0) -> list[EquityPoint]:
+async def fetch_equity_curve(hours: float | None = 24.0) -> list[EquityPoint]:
     engine = create_async_engine(get_settings().database_url)
     try:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -346,7 +347,7 @@ async def fetch_equity_curve(hours: float = 24.0) -> list[EquityPoint]:
 
 
 @st.cache_data(ttl=10, show_spinner=False)
-def get_equity_curve_cached(hours: float = 24.0) -> list[EquityPoint]:
+def get_equity_curve_cached(hours: float | None = 24.0) -> list[EquityPoint]:
     return asyncio.run(fetch_equity_curve(hours))
 
 
@@ -532,3 +533,18 @@ async def fetch_micro_live_readiness() -> ReadinessSummary:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_micro_live_readiness_cached() -> ReadinessSummary:
     return asyncio.run(fetch_micro_live_readiness())
+
+
+async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_execution_funnel(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_execution_funnel_cached(hours: float = 24.0) -> ExecutionFunnelReport:
+    return asyncio.run(fetch_execution_funnel(hours))
