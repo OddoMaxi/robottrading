@@ -131,3 +131,34 @@ def test_force_release_lock_frees_capital_immediately_ignoring_natural_expiry():
 def test_force_release_lock_on_an_unknown_key_returns_none():
     portfolio = make_portfolio(1_000.0)
     assert portfolio.force_release_lock("does:not:exist") is None
+
+
+def test_lock_capital_defaults_opened_at_to_now_for_a_fresh_lock():
+    """The normal case (app.simulation.paper_trader.simulate opening a
+    brand new position) never passes opened_at explicitly — it must equal
+    the moment the lock was actually taken."""
+    portfolio = make_portfolio(1_000.0)
+    portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=10_000.0, now=500.0)
+    overdue = portfolio.overdue_locks(now=500.0 + 1_800.0, max_age_seconds=1_800.0)
+    assert overdue == []  # exactly at the boundary, not yet overdue
+    overdue = portfolio.overdue_locks(now=500.0 + 1_801.0, max_age_seconds=1_800.0)
+    assert len(overdue) == 1
+
+
+def test_lock_capital_accepts_an_explicit_opened_at_for_state_recovery():
+    """The bug found live, 2026-08-21: state_recovery reconstructing a
+    position at restart time must be able to say "this position actually
+    opened 2 days ago", not have its age silently reset to zero just
+    because the reservation happens to be re-applied at restart time."""
+    portfolio = make_portfolio(10_000.0)
+    restart_time = 1_000_000.0
+    true_opened_at = restart_time - 2 * 86400.0  # opened 2 real days before this restart
+    portfolio.lock_capital(
+        "basis:binance:BTC/USDT", 5_000.0, expiry=restart_time + 34 * 86400.0, now=restart_time, opened_at=true_opened_at
+    )
+    # Immediately after "restart", the position must already read as ~2
+    # days old — not 0 seconds old — and therefore already overdue.
+    overdue = portfolio.overdue_locks(now=restart_time, max_age_seconds=1_800.0)
+    assert len(overdue) == 1
+    key, amount, age = overdue[0]
+    assert age == pytest.approx(2 * 86400.0)

@@ -110,9 +110,9 @@ async def rebuild_portfolio_state(
             closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
             if closes_at <= now_dt or key in earliest_open_by_key:
                 continue
-            earliest_open_by_key[key] = (capital_usd, net_profit_usd, closes_at, strategy, exchange, symbol)
+            earliest_open_by_key[key] = (capital_usd, net_profit_usd, executed_at, closes_at, strategy, exchange, symbol)
 
-        for key, (capital_usd, net_profit_usd, closes_at, strategy, exchange, symbol) in earliest_open_by_key.items():
+        for key, (capital_usd, net_profit_usd, executed_at, closes_at, strategy, exchange, symbol) in earliest_open_by_key.items():
             remaining_seconds = (closes_at - now_dt).total_seconds()
             if remaining_seconds <= 0:
                 continue
@@ -121,7 +121,15 @@ async def rebuild_portfolio_state(
             # historical position; we just may not be able to safely
             # account for its capital under today's risk limits (see below).
             position_tracker.open_position((strategy, exchange, symbol), now, remaining_seconds)
-            reserved = portfolio.lock_capital(key, float(capital_usd) + float(net_profit_usd), now + remaining_seconds, now=now)
+            # opened_at must be the position's TRUE original executed_at,
+            # not this restart's `now` (FAST TRADING ONLY bug found live,
+            # 2026-08-21) — otherwise every restart resets every open
+            # position's age to zero, permanently defeating time_stop's
+            # 30-minute hard stop for anything that survives a restart.
+            opened_at_epoch = executed_at.replace(tzinfo=UTC).timestamp()
+            reserved = portfolio.lock_capital(
+                key, float(capital_usd) + float(net_profit_usd), now + remaining_seconds, now=now, opened_at=opened_at_epoch
+            )
             if not reserved:
                 # A position sized under since-superseded rules (e.g.
                 # pre-dating the % risk-limit fix) can be larger than

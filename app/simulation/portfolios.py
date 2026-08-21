@@ -56,7 +56,7 @@ class VirtualPortfolio:
         self._prune_expired(now)
         return len(self._locked)
 
-    def lock_capital(self, position_key: str, amount: float, expiry: float, now: float) -> bool:
+    def lock_capital(self, position_key: str, amount: float, expiry: float, now: float, opened_at: float | None = None) -> bool:
         """Urgent audit fix, section 1 — capital reservation must be atomic
         and available_capital must never go negative. Returns False (and
         reserves nothing) if `amount` exceeds what's actually free right
@@ -70,6 +70,16 @@ class VirtualPortfolio:
         the same position) releases its old amount first, so the check is
         against what's free *excluding* this key's own prior reservation,
         not a double-count.
+
+        `opened_at` defaults to `now` — correct for a freshly-opened
+        position (paper_trader.simulate calls this the moment a trade
+        executes, so "now" genuinely is "when this opened"). state_recovery
+        must pass the position's TRUE original executed_at explicitly
+        (FAST TRADING ONLY bug found live, 2026-08-21): without it, every
+        restart resets every open position's age to zero, permanently
+        defeating app.simulation.time_stop's 30-minute hard stop for any
+        position that survives a restart — exactly backwards from a safety
+        mechanism whose whole job is catching positions that ran long.
         """
         self._prune_expired(now)
         previous_amount = self._locked.get(position_key, (0.0, 0.0, 0.0))[0]
@@ -83,7 +93,7 @@ class VirtualPortfolio:
                 max(0.0, available_excluding_this_key),
             )
             return False
-        self._locked[position_key] = (amount, expiry, now)
+        self._locked[position_key] = (amount, expiry, opened_at if opened_at is not None else now)
         return True
 
     def _prune_expired(self, now: float) -> None:
