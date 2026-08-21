@@ -99,6 +99,7 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
                 "_holding_period_seconds": float(r.holding_period_seconds) if r.holding_period_seconds is not None else None,
                 "_execution_fill_probability": float(r.execution_fill_probability) if r.execution_fill_probability is not None else None,
                 "_classification": r.classification,
+                "_status": r.status,
                 "_legs": r.legs,
             }
             for r in rows

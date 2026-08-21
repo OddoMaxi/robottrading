@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import dashboard.data as data
-from app.config.constants import PRIORITY_EXCHANGES
+from app.config.constants import PRIORITY_EXCHANGES, OpportunityStatus
 from app.reporting.rotation import RotationReport
 from app.reporting.simple_summary import CapitalUtilization, OpenPosition, TradeRow, build_explainer_narrative, pick_robot_state_message
 from dashboard.theme import (
@@ -39,6 +39,20 @@ from dashboard.theme import (
 # opportunity for paper-trading — Simple Mode's "current opportunity" card
 # only ever shows one that clears this bar.
 GOOD_CLASSIFICATIONS = {"interesting", "good", "strong", "exceptional"}
+
+# Bug found live, 2026-08-21 — the query behind this card had no freshness
+# check at all: "Opportunité actuelle" could (and did) show a signal
+# detected 40+ minutes earlier, styled exactly like a live one ("🟢
+# Excellente opportunité", a 8s estimated duration), with nothing on the
+# card hinting it was long gone. A user reasonably read that as "the robot
+# is looking at an excellent trade right now and just... not taking it,
+# despite the 30-minute rule" — the opposite of what was actually
+# happening: nothing was on the radar at all. DETECTED/ACTIVE is the same
+# "still on the radar right now" definition app.reporting.shadow_live
+# already uses for signals_on_radar; OPEN is deliberately excluded — a
+# trade already happened on that signal, so re-presenting it as "here's a
+# fresh opportunity" would be its own kind of misleading.
+_ON_RADAR_STATUSES = {OpportunityStatus.DETECTED.value, OpportunityStatus.ACTIVE.value}
 
 CLASSIFICATION_BADGES = {
     "exceptional": ("🟢", "Excellente opportunité"),
@@ -411,7 +425,9 @@ def render_reality_indicator() -> None:
 
 
 def render_opportunity_card(df: pd.DataFrame) -> None:
-    candidates = df[df["_classification"].isin(GOOD_CLASSIFICATIONS)] if not df.empty else df
+    candidates = (
+        df[df["_classification"].isin(GOOD_CLASSIFICATIONS) & df["_status"].isin(_ON_RADAR_STATUSES)] if not df.empty else df
+    )
     if df.empty or candidates.empty:
         st.markdown(
             '<div class="simple-card"><div class="simple-card-label">Opportunité actuelle</div>'
