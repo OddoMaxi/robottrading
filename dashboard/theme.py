@@ -66,6 +66,7 @@ REJECTION_REASON_LABELS = {
     "fees_too_high": "Frais trop élevés",
     "edge_too_low": "Écart trop faible",
     "position_already_open": "Déjà en position",
+    "holding_too_long": "Durée de détention trop longue (> 20 min)",
 }
 
 ILLUSTRATIVE_CAPITAL_USD = 1_000

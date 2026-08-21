@@ -73,6 +73,18 @@ def compute_maker_analysis(
     return pd.DataFrame(rows)
 
 
+def _format_seconds(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    if seconds < 90:
+        return f"~{int(seconds)} s"
+    if seconds < 3600:
+        return f"~{int(seconds / 60)} min"
+    if seconds < 86400:
+        return f"~{seconds / 3600:.1f} h"
+    return f"~{seconds / 86400:.1f} j"
+
+
 def render_expert_mode() -> None:
     df = data.get_opportunities_cached()
     profitable = df[df["Gain net (%)"] > 0] if not df.empty else df
@@ -558,6 +570,27 @@ def render_expert_mode() -> None:
             f"{name.capitalize()} {'✓' if ok else '✕'}" for name, ok in why_report.robot_status.exchanges_connected.items()
         )
         st.markdown(f"{health_icon} **{why_report.robot_status.health.value}** — {exchanges_text}")
+
+    # --- FAST TRADING ONLY — holding-time compliance (user directive, 2026-08-21) ---
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Profil de durée de détention (24h) — FAST TRADING ONLY</div>', unsafe_allow_html=True)
+    dist = data.get_holding_time_distribution_cached(hours=24.0)
+    if dist is None or dist.trade_count == 0:
+        st.info("Pas encore de trade sur la période pour mesurer le profil de durée.")
+    else:
+        render_stat_cards(
+            [
+                {"label": "Durée moyenne", "value": _format_seconds(dist.avg_holding_seconds)},
+                {"label": "Durée médiane", "value": _format_seconds(dist.median_holding_seconds)},
+                {"label": "% trades < 5 min", "value": f"{dist.pct_under_5min:.0f} %"},
+                {"label": "% trades < 10 min", "value": f"{dist.pct_under_10min:.0f} %"},
+                {"label": "% trades < 20 min", "value": f"{dist.pct_under_20min:.0f} %"},
+                {
+                    "label": "Trade le plus long",
+                    "value": _format_seconds(dist.longest_holding_seconds),
+                    "sub": f"{dist.longest_trade_symbol}" if dist.longest_trade_symbol else None,
+                },
+            ]
+        )
 
     st.divider()
 

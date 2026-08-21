@@ -72,3 +72,28 @@ def test_opportunity_with_no_holding_period_skips_the_position_check():
     opp = make_opp(holding_period_seconds=None)
     result = validate(opp, OpenPositionTracker(), now=1_000.0)
     assert result.approved is True
+
+
+def test_rejects_a_holding_period_over_20_minutes_as_too_long():
+    """FAST TRADING ONLY (user directive, 2026-08-21) — a brand new
+    position is never opened with an expected hold beyond 20 minutes,
+    which is what excludes Basis/Funding-style multi-hour-to-multi-week
+    strategies from ever reaching validate() in the first place, even if
+    one were re-enabled by mistake."""
+    opp = make_opp(holding_period_seconds=1_201.0)
+    result = validate(opp, OpenPositionTracker(), now=1_000.0)
+    assert result.approved is False
+    assert result.reason == RejectionReason.HOLDING_TOO_LONG
+
+
+def test_approves_a_holding_period_at_exactly_20_minutes():
+    opp = make_opp(holding_period_seconds=1_200.0)
+    result = validate(opp, OpenPositionTracker(), now=1_000.0)
+    assert result.approved is True
+
+
+def test_a_multi_week_basis_style_holding_period_is_rejected():
+    opp = make_opp(holding_period_seconds=3_123_377.0)  # ~36 days, matching the legacy position found live
+    result = validate(opp, OpenPositionTracker(), now=1_000.0)
+    assert result.approved is False
+    assert result.reason == RejectionReason.HOLDING_TOO_LONG

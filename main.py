@@ -40,9 +40,7 @@ from app.database.repository import (
     update_opportunity_tracking,
 )
 from app.database.session import async_session_factory
-from app.engines.basis import BasisArbitrageEngine
 from app.engines.cross_exchange import CrossExchangeArbitrageEngine
-from app.engines.funding import FundingArbitrageEngine
 from app.engines.stablecoin import StablecoinArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
 from app.execution.validator import validate
@@ -237,12 +235,19 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(poll_binance_delivery_futures(market_data_store, DELIVERY_FUTURES_ASSETS), name="basis:binance")
     )
 
+    # FAST TRADING ONLY (user directive, 2026-08-21) — Basis and Funding are
+    # deliberately excluded. Both naturally hold for hours-to-weeks (basis
+    # converges at the future's expiry; funding accrues per 8h cycle), which
+    # is the opposite of this engine's purpose: fast profit, fast capital
+    # release, fast re-entry. A single basis position was found to have
+    # locked ~$5,015 of a $5,196 portfolio until 2026-09-25. The engine
+    # classes and their collectors are left in place (disabled, not
+    # deleted) in case Carry Mode becomes its own deliberate product
+    # decision later — this is a strategy-set change, not a data-loss one.
     engines = [
         StablecoinArbitrageEngine(),
         CrossExchangeArbitrageEngine(),
         *(TriangularArbitrageEngine(exchange=exchange) for exchange in PRIORITY_EXCHANGES),
-        FundingArbitrageEngine(),
-        BasisArbitrageEngine(),
     ]
     detector = OpportunityDetector(engines)
     background_tasks.append(asyncio.create_task(detection_loop(detector, portfolio_ids), name="detection_loop"))

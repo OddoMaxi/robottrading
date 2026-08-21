@@ -29,12 +29,23 @@ from app.simulation.position_tracker import OpenPositionTracker
 # there was no edge left *at all* once fees were paid.
 _MARGINAL_CLASSIFICATIONS = {OpportunityClassification.WATCH}
 
+# FAST TRADING ONLY (user directive, 2026-08-21) — a brand new position is
+# never even opened with an expected hold beyond this ("> 20 minutes:
+# normalement rejeté" in the user's own holding-time profile). This is
+# distinct from app.simulation.time_stop.HARD_STOP_HOLDING_SECONDS (30 min),
+# which governs forcing an ALREADY-OPEN position out — that one is "a
+# safety limit, never a target", this one is the target-side gate that
+# should make the safety limit nearly unreachable for anything opened
+# after this rule existed.
+MAX_NEW_POSITION_HOLDING_SECONDS = 1200.0
+
 
 class RejectionReason(StrEnum):
     STALE_DATA = "stale_data"
     FEES_TOO_HIGH = "fees_too_high"  # net_spread_pct <= 0 — the whole gross edge went to fees/costs
     EDGE_TOO_LOW = "edge_too_low"  # net-positive but below the minimum worth attempting
     POSITION_ALREADY_OPEN = "position_already_open"
+    HOLDING_TOO_LONG = "holding_too_long"  # would tie up capital past MAX_NEW_POSITION_HOLDING_SECONDS
 
 
 @dataclass(slots=True)
@@ -53,6 +64,9 @@ def validate(opp: Opportunity, position_tracker: OpenPositionTracker, now: float
         return ValidationResult(False, RejectionReason.FEES_TOO_HIGH)
     if opp.classification is None or opp.classification in _MARGINAL_CLASSIFICATIONS:
         return ValidationResult(False, RejectionReason.EDGE_TOO_LOW)
+
+    if opp.holding_period_seconds is not None and opp.holding_period_seconds > MAX_NEW_POSITION_HOLDING_SECONDS:
+        return ValidationResult(False, RejectionReason.HOLDING_TOO_LONG)
 
     if opp.holding_period_seconds is not None and opp.legs:
         position_key = (opp.strategy, opp.legs[0].get("exchange"), opp.symbol)

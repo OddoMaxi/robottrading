@@ -20,7 +20,12 @@ from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.daily import DailySummary, build_daily_summary
 from app.reporting.execution_funnel import ExecutionFunnelReport, build_execution_funnel
-from app.reporting.holding_time_performance import HoldingTimeBucketStats, build_holding_time_performance
+from app.reporting.holding_time_performance import (
+    HoldingTimeBucketStats,
+    HoldingTimeDistribution,
+    build_holding_time_distribution,
+    build_holding_time_performance,
+)
 from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.simple_summary import (
     CapitalUtilization,
@@ -291,6 +296,24 @@ async def fetch_holding_time_performance(hours: float = 24.0) -> list[HoldingTim
 @st.cache_data(ttl=60, show_spinner=False)
 def get_holding_time_performance_cached(hours: float = 24.0) -> list[HoldingTimeBucketStats]:
     return asyncio.run(fetch_holding_time_performance(hours))
+
+
+async def fetch_holding_time_distribution(hours: float = 24.0) -> HoldingTimeDistribution | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            return await build_holding_time_distribution(session, portfolio.id, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_holding_time_distribution_cached(hours: float = 24.0) -> HoldingTimeDistribution | None:
+    return asyncio.run(fetch_holding_time_distribution(hours))
 
 
 # --- Simple Mode data ---

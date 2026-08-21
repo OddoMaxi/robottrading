@@ -79,3 +79,85 @@ async def build_holding_time_performance(
             )
         )
     return results
+
+
+@dataclass(slots=True)
+class HoldingTimeDistribution:
+    """FAST TRADING ONLY (user directive, 2026-08-21) — is the engine
+    actually behaving like a fast-rotation system, in one glance. Uses
+    holding_period_seconds (the planned hold every strategy commits to at
+    open time, which is what actually determines how long capital stays
+    locked) — there is no separately-tracked "actual" duration in this V1
+    model, positions don't run long or short of their planned hold."""
+
+    trade_count: int
+    avg_holding_seconds: float | None
+    median_holding_seconds: float | None
+    pct_under_5min: float
+    pct_under_10min: float
+    pct_under_20min: float
+    longest_holding_seconds: float | None
+    longest_trade_symbol: str | None
+    longest_trade_executed_at: datetime | None
+
+
+async def build_holding_time_distribution(
+    session: AsyncSession, portfolio_id: int, hours: float = 24.0, now: datetime | None = None
+) -> HoldingTimeDistribution:
+    now = now or datetime.now(UTC).replace(tzinfo=None)
+    period_start = now - timedelta(hours=hours)
+
+    under_5min = case((OpportunityRecord.holding_period_seconds < 300, 1), else_=0)
+    under_10min = case((OpportunityRecord.holding_period_seconds < 600, 1), else_=0)
+    under_20min = case((OpportunityRecord.holding_period_seconds < 1200, 1), else_=0)
+    median_expr = func.percentile_cont(0.5).within_group(OpportunityRecord.holding_period_seconds)
+
+    count, avg_holding, median_holding, under_5, under_10, under_20 = (
+        await session.execute(
+            select(
+                func.count(),
+                func.avg(OpportunityRecord.holding_period_seconds),
+                median_expr,
+                func.coalesce(func.sum(under_5min), 0),
+                func.coalesce(func.sum(under_10min), 0),
+                func.coalesce(func.sum(under_20min), 0),
+            )
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.executed_at >= period_start,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                OpportunityRecord.holding_period_seconds.is_not(None),
+            )
+        )
+    ).first()
+    count = count or 0
+
+    longest_row = (
+        await session.execute(
+            select(OpportunityRecord.holding_period_seconds, OpportunityRecord.symbol, SimulatedTradeRecord.executed_at)
+            .select_from(SimulatedTradeRecord)
+            .join(OpportunityRecord, OpportunityRecord.id == SimulatedTradeRecord.opportunity_id)
+            .where(
+                SimulatedTradeRecord.portfolio_id == portfolio_id,
+                SimulatedTradeRecord.executed_at >= period_start,
+                SimulatedTradeRecord.status.in_(EXECUTED_STATUSES),
+                OpportunityRecord.holding_period_seconds.is_not(None),
+            )
+            .order_by(OpportunityRecord.holding_period_seconds.desc())
+            .limit(1)
+        )
+    ).first()
+
+    return HoldingTimeDistribution(
+        trade_count=count,
+        avg_holding_seconds=float(avg_holding) if avg_holding is not None else None,
+        median_holding_seconds=float(median_holding) if median_holding is not None else None,
+        pct_under_5min=(under_5 / count * 100) if count else 0.0,
+        pct_under_10min=(under_10 / count * 100) if count else 0.0,
+        pct_under_20min=(under_20 / count * 100) if count else 0.0,
+        longest_holding_seconds=float(longest_row[0]) if longest_row else None,
+        longest_trade_symbol=longest_row[1] if longest_row else None,
+        longest_trade_executed_at=longest_row[2] if longest_row else None,
+    )
