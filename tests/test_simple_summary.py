@@ -28,8 +28,12 @@ def test_robot_health_degraded_when_no_data_yet():
     assert classify_robot_health(None, {}) == RobotHealth.DEGRADED
 
 
-def test_robot_health_down_when_detection_loop_is_stale():
-    assert classify_robot_health(300.0, {"binance": True, "okx": True, "bybit": True}) == RobotHealth.DOWN
+def test_robot_health_stays_running_when_exchanges_fresh_even_with_no_recent_opportunity():
+    # FAST TRADING ONLY (user directive, 2026-08-21) — with Basis/Funding
+    # removed, minutes between distinct new opportunities is the observed
+    # norm, not a sign the engine is stuck. Health must not false-alarm on
+    # this while every exchange is still ticking normally.
+    assert classify_robot_health(1_200.0, {"binance": True, "okx": True, "bybit": True}) == RobotHealth.RUNNING
 
 
 def test_robot_health_down_when_every_exchange_disconnected():

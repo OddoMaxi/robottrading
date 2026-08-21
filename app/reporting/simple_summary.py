@@ -20,12 +20,10 @@ from app.reporting.rotation import EXECUTED_STATUSES
 # Price data older than this means that exchange's feed has likely stalled
 # (collectors push on every tick) rather than the market just being quiet —
 # same freshness assumption the False Opportunity Filter uses per-quote,
-# applied here per-exchange for the header's connection indicator.
+# applied here per-exchange for the header's connection indicator. This is
+# the ONLY freshness signal health is based on — see the note below on why
+# "time since last NEW opportunity" was dropped from this classification.
 EXCHANGE_STALE_AFTER_SECONDS = 30.0
-# No opportunity detected at all in this long means the detection loop
-# itself is probably stuck — not just "no edge right now", which happens
-# constantly and is normal (see EXCHANGE_STALE_AFTER_SECONDS for that check).
-ENGINE_STALE_AFTER_SECONDS = 120.0
 
 
 class RobotHealth(StrEnum):
@@ -35,9 +33,28 @@ class RobotHealth(StrEnum):
 
 
 def classify_robot_health(last_opportunity_age_seconds: float | None, exchanges_connected: dict[str, bool]) -> RobotHealth:
+    """Health is derived purely from exchange data freshness, not from how
+    long ago the last NEW opportunity was recorded.
+
+    That used to double as a "the detection loop is stuck" signal (a
+    ENGINE_STALE_AFTER_SECONDS=120s threshold), on the assumption that
+    *some* engine finds a genuinely new spread constantly. That assumption
+    broke the moment Basis/Funding were removed (FAST TRADING ONLY, user
+    directive, 2026-08-21): with only the fast engines left, gaps between
+    distinct new opportunities of tens of seconds to several minutes are
+    the observed norm (verified live: median ~35s, several gaps over
+    10 minutes, in an otherwise perfectly healthy window). Left in place,
+    that threshold produced a false "🔴 Données interrompues" every few
+    minutes even with all three exchanges ticking normally — which actively
+    misleads rather than informs. Price-snapshot freshness is written by
+    the exact same detection-loop iteration that runs the scan, so it's
+    already a reliable, low-latency proxy for "is the loop actually
+    running" without needing a second, opportunity-shaped signal for it.
+    `last_opportunity_age_seconds` is kept as informational context only.
+    """
     if last_opportunity_age_seconds is None:
         return RobotHealth.DEGRADED  # just started, no data yet — not necessarily broken
-    if last_opportunity_age_seconds > ENGINE_STALE_AFTER_SECONDS or not any(exchanges_connected.values()):
+    if not any(exchanges_connected.values()):
         return RobotHealth.DOWN
     if not all(exchanges_connected.values()):
         return RobotHealth.DEGRADED
