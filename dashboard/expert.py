@@ -18,6 +18,7 @@ from app.config.fees import DEFAULT_FEE_SCHEDULES, uniform_fee_schedules
 
 import dashboard.data as data
 from dashboard.theme import (
+    ATTEMPT_OUTCOME_LABELS,
     BORDER,
     EXCHANGE_COLORS,
     GRIDLINE,
@@ -505,9 +506,13 @@ def render_expert_mode() -> None:
 
     st.divider()
 
-    # --- "Pourquoi le robot ne trade pas ?" (user request — live diagnostic) ---
+    # --- "Pourquoi le robot ne trade pas ?" (user request — live diagnostic,
+    # expanded to the EXECUTION INACTIVITY DIAGNOSTIC spec, 2026-08-21) ---
     st.subheader("🩺 Pourquoi le robot ne trade pas ?")
-    st.caption("Diagnostic en direct depuis le dernier trade réellement exécuté sur le portefeuille de référence (5K).")
+    st.caption(
+        "Diagnostic en direct depuis le dernier trade réellement exécuté sur le portefeuille de référence (5K) — "
+        "distingue « le marché ne donne rien » de « le robot trouve des opportunités mais ne peut pas les prendre »."
+    )
     why_report = data.get_why_no_trade_cached()
     if why_report is None:
         st.info("Portefeuille de référence introuvable.")
@@ -515,40 +520,73 @@ def render_expert_mode() -> None:
         st.info("Aucun trade exécuté pour l'instant sur ce portefeuille.")
     else:
         funnel = why_report.funnel
+        market_events_display = (
+            f"{why_report.market_events_since_last_trade:,}".replace(",", " ")
+            if why_report.market_events_since_last_trade is not None
+            else "—"
+        )
         render_stat_cards(
             [
                 {"label": "Dernier trade", "value": humanize_delta(why_report.last_trade_at)},
-                {"label": "Opportunités analysées depuis", "value": f"{funnel.stage('detected').count:,}".replace(",", " ")},
-                {"label": "Rentables après frais", "value": f"{funnel.stage('profitable_after_fees').count:,}".replace(",", " ")},
-                {"label": "Exécutables", "value": f"{funnel.stage('executable').count:,}".replace(",", " ")},
+                {"label": "Ticks de marché depuis", "value": market_events_display, "sub": "tous exchanges confondus"},
+                {"label": "Opportunités uniques détectées", "value": f"{funnel.stage('detected').count:,}".replace(",", " ")},
+                {"label": "Positives après coûts", "value": f"{funnel.stage('profitable_after_fees').count:,}".replace(",", " "), "sub": "écart net > 0 (frais + coût VWAP)"},
+                {"label": "Rentables", "value": f"{funnel.stage('profitable').count:,}".replace(",", " "), "sub": "au-dessus du seuil minimal jugé valable"},
+                {"label": "Exécutables", "value": f"{funnel.stage('executable').count:,}".replace(",", " "), "sub": "a passé toute la validation"},
+                {"label": "Tentatives d'exécution", "value": f"{funnel.execution_attempts:,}".replace(",", " "), "sub": "sur les 5 portefeuilles, tous statuts"},
+                {"label": "Rejetées", "value": f"{funnel.stage('rejected').count:,}".replace(",", " ")},
             ]
         )
 
         if funnel.rejection_reasons:
-            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Principales raisons de rejet</div>', unsafe_allow_html=True)
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Répartition des rejets (avant tentative — niveau opportunité)</div>', unsafe_allow_html=True)
             reason_rows = "".join(
                 f'<div class="simple-perf-row"><span class="k">{REJECTION_REASON_LABELS.get(reason, reason)}</span>'
                 f'<span class="v">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({pct:.1f} %)</span></span></div>'.replace(",", " ")
                 for reason, count, pct in funnel.rejection_reasons
             )
             st.markdown(f'<div class="simple-card">{reason_rows}</div>', unsafe_allow_html=True)
+            st.caption(
+                "5 raisons réellement suivies aujourd'hui par le moteur (app.execution.validator) — "
+                "aucune catégorie inventée. « Écart trop faible » couvre à la fois net ≤ 0 et net positif mais "
+                "sous le seuil minimal ; slippage, liquidité et notionnel minimum ne sont pas des filtres de rejet "
+                "distincts dans le code actuel (le slippage s'applique après exécution, sur le P&L réalisé)."
+            )
+
+        if funnel.attempt_outcomes:
+            st.markdown(
+                '<div class="simple-card-label" style="margin-top:14px;">Résultat des tentatives (après validation — niveau exécution)</div>',
+                unsafe_allow_html=True,
+            )
+            outcome_rows = "".join(
+                f'<div class="simple-perf-row"><span class="k">{ATTEMPT_OUTCOME_LABELS.get(status, status)}</span>'
+                f'<span class="v">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({pct:.1f} %)</span></span></div>'.replace(",", " ")
+                for status, count, pct in funnel.attempt_outcomes
+            )
+            st.markdown(f'<div class="simple-card">{outcome_rows}</div>', unsafe_allow_html=True)
+            st.caption(
+                "« Capital indisponible » et « limite de positions atteinte » sont la vraie réponse à "
+                "« le robot trouve des opportunités mais ne peut pas les prendre » : une opportunité approuvée est "
+                "toujours tentée sur les 5 portefeuilles, indépendamment du capital disponible sur chacun."
+            )
 
         st.markdown('<div class="simple-card-label" style="margin-top:14px;">Capital</div>', unsafe_allow_html=True)
         available = why_report.capital.total_capital_usd - why_report.capital.engaged_usd
         render_stat_cards(
             [
                 {"label": "Total", "value": f"{why_report.capital.total_capital_usd:,.2f} $".replace(",", " ")},
+                {"label": "Disponible", "value": f"{available:,.2f} $".replace(",", " ")},
                 {
-                    "label": "Engagé (verrouillé)",
+                    "label": "Engagé / Réservé",
                     "value": f"{why_report.capital.engaged_usd:,.2f} $".replace(",", " "),
                     "sub": f"{why_report.capital.utilization_pct:.0f} % du capital",
                 },
-                {"label": "Disponible", "value": f"{available:,.2f} $".replace(",", " ")},
+                {"label": "Positions ouvertes", "value": f"{why_report.capital.open_position_count}"},
             ]
         )
         st.caption(
-            "Le modèle actuel n'a pas d'état « réservé » distinct : le capital est soit engagé "
-            "(verrouillé sur une position ouverte), soit disponible."
+            "Le modèle actuel n'a pas d'état « réservé » distinct de « engagé » : le capital d'une position "
+            "ouverte est verrouillé (= engagé = réservé, un seul et même état), sinon disponible."
         )
 
         if why_report.open_positions:
@@ -604,6 +642,7 @@ def render_expert_mode() -> None:
     stage_labels = {
         "detected": "Détectées",
         "profitable_after_fees": "Rentables après frais",
+        "profitable": "Rentables (au-dessus du seuil)",
         "rejected": "Rejetées",
         "executable": "Exécutables",
         "executed": "Exécutées",
@@ -632,8 +671,9 @@ def render_expert_mode() -> None:
             st.markdown(
                 """
                 - **Détectées** : événements économiques distincts (une même opportunité observée plusieurs fois d'affilée compte une seule fois).
-                - **Rentables après frais** : l'écart brut couvre les frais et le coût VWAP au moment de la détection — avant toute autre contrainte.
-                - **Rejetées** : n'a pas passé la validation (données trop anciennes, frais trop élevés, écart trop faible, position déjà ouverte).
+                - **Rentables après frais** : l'écart net (après frais + coût VWAP) est strictement positif.
+                - **Rentables (au-dessus du seuil)** : sous-ensemble du précédent — la classification dépasse le seuil minimal jugé valable (le même seuil qui déclenche le rejet « écart trop faible » en dessous).
+                - **Rejetées** : n'a pas passé la validation (données trop anciennes, frais trop élevés, écart trop faible, position déjà ouverte, durée de détention trop longue).
                 - **Exécutables** : a passé la validation — une allocation de capital aurait été tentée.
                 - **Exécutées** : au moins un portefeuille a réellement simulé un trade dessus.
                 - **Clôturées** : le trade exécuté a atteint la fin de sa durée de détention — résultat définitif.

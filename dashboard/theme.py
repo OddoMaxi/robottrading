@@ -69,6 +69,24 @@ REJECTION_REASON_LABELS = {
     "holding_too_long": "Durée de détention trop longue (> 20 min)",
 }
 
+# TradeStatus values (app.simulation.paper_trader) — trade-attempt
+# granularity, distinct from REJECTION_REASON_LABELS above (which is
+# opportunity-level, from app.execution.validator). This is what actually
+# answers "the engine tried but couldn't take it": NO_CAPITAL_AVAILABLE and
+# MAX_CONCURRENT_POSITIONS have no opportunity-level equivalent — an
+# approved opportunity is always attempted against every portfolio
+# regardless of any single one's capital state.
+ATTEMPT_OUTCOME_LABELS = {
+    "simulated_executed": "Exécuté",
+    "partial_fill": "Exécuté (remplissage partiel)",
+    "missed": "Manqué — jambe maker non remplie à temps",
+    "simulated_failed": "Échoué — données déjà obsolètes au moment du pricing",
+    "no_capital_available": "Capital indisponible sur ce portefeuille",
+    "max_concurrent_positions": "Limite de positions simultanées atteinte",
+    "emergency_unwind": "Débouclage d'urgence (une jambe a échoué)",
+    "time_stop_exit": "Sorti par le stop de durée (30 min)",
+}
+
 ILLUSTRATIVE_CAPITAL_USD = 1_000
 
 

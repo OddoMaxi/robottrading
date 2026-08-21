@@ -13,10 +13,10 @@ just packaged for a glance instead of a manual SQL session.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import SimulatedTradeRecord
+from app.database.models import PriceSnapshot, SimulatedTradeRecord
 from app.reporting.execution_funnel import ExecutionFunnelReport, build_execution_funnel
 from app.reporting.rotation import EXECUTED_STATUSES
 from app.reporting.simple_summary import (
@@ -33,6 +33,7 @@ from app.reporting.simple_summary import (
 class WhyNoTradeReport:
     last_trade_at: datetime | None
     hours_since_last_trade: float | None
+    market_events_since_last_trade: int | None
     funnel: ExecutionFunnelReport | None
     capital: CapitalUtilization
     open_positions: list[OpenPosition]
@@ -55,12 +56,21 @@ async def build_why_no_trade_report(
 
     funnel = None
     hours_since = None
+    market_events = None
     if last_trade_at is not None:
         # A floor above zero — a trade that just landed a moment ago still
         # gets a valid (tiny) funnel window rather than a division-by-zero
         # edge case in build_execution_funnel's own percentage math.
         hours_since = max((now - last_trade_at).total_seconds() / 3600.0, 1e-6)
         funnel = await build_execution_funnel(session, hours=hours_since, now=now)
+        # Raw market ticks (every exchange, every symbol) since the last
+        # trade — distinct from the funnel's "detected" count, which is
+        # already deduplicated to one row per economic event. This answers
+        # "was the engine even looking at fresh data" independent of
+        # whether that data ever produced a tradeable signal.
+        market_events = (
+            await session.execute(select(func.count()).where(PriceSnapshot.recorded_at >= last_trade_at))
+        ).scalar() or 0
 
     capital = await build_capital_utilization(session, portfolio_id, total_capital_usd, now=now)
     open_positions = await list_open_positions(session, portfolio_id, total_capital_usd, now=now)
@@ -69,6 +79,7 @@ async def build_why_no_trade_report(
     return WhyNoTradeReport(
         last_trade_at=last_trade_at,
         hours_since_last_trade=hours_since,
+        market_events_since_last_trade=market_events,
         funnel=funnel,
         capital=capital,
         open_positions=open_positions,
