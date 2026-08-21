@@ -125,6 +125,7 @@ async def _fetch_open_position_rows(session: AsyncSession, portfolio_id: int, no
                 SimulatedTradeRecord.capital_usd,
                 SimulatedTradeRecord.net_profit_usd,
                 SimulatedTradeRecord.executed_at,
+                SimulatedTradeRecord.status,
                 OpportunityRecord.strategy,
                 OpportunityRecord.symbol,
                 OpportunityRecord.legs,
@@ -144,18 +145,41 @@ async def _fetch_open_position_rows(session: AsyncSession, portfolio_id: int, no
     return rows
 
 
+# FAST TRADING ONLY (user directive, 2026-08-21) — a trade with one of
+# these statuses on a (strategy, exchange, symbol) key is a settling
+# event, not an opening one: it means that position closed right then,
+# regardless of what its ORIGINAL opportunity's holding_period_seconds
+# would otherwise imply (app.simulation.time_stop reuses the original
+# opportunity_id for its adjustment record, so the audit trail stays
+# honestly tied to the real position — this is what keeps that from
+# making the position look "open" for its original, much longer nominal
+# hold after time_stop has already released it).
+_FORCE_CLOSED_STATUSES = ("time_stop_exit",)
+
+
 def _reconstruct_open_positions(rows: list[tuple], total_capital_usd: float, now: datetime) -> list[tuple]:
     """Returns [(capital_usd, net_profit_usd, executed_at, strategy, symbol)]
     for positions that are both still open and safely fit within equity."""
+    force_closed_at: dict[str, datetime] = {}
+    for _capital_usd, _net_profit_usd, executed_at, status, strategy, symbol, legs, _holding_period_seconds in rows:
+        if status in _FORCE_CLOSED_STATUSES:
+            exchange = legs[0].get("exchange") if legs else None
+            key = f"{strategy}:{exchange}:{symbol}"
+            if key not in force_closed_at or executed_at > force_closed_at[key]:
+                force_closed_at[key] = executed_at
+
     seen_keys: set[str] = set()
     engaged_so_far = 0.0
     kept: list[tuple] = []
-    for capital_usd, net_profit_usd, executed_at, strategy, symbol, legs, holding_period_seconds in rows:
+    for capital_usd, net_profit_usd, executed_at, status, strategy, symbol, legs, holding_period_seconds in rows:
+        if status in _FORCE_CLOSED_STATUSES:
+            continue  # a settling event, not a position to list as open
         exchange = legs[0].get("exchange") if legs else None
         key = f"{strategy}:{exchange}:{symbol}"
         if key in seen_keys:
             continue  # a later trade on an already-open key — restart-amnesia duplicate
-        closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
+        nominal_closes_at = executed_at + timedelta(seconds=float(holding_period_seconds))
+        closes_at = min(nominal_closes_at, force_closed_at[key]) if key in force_closed_at else nominal_closes_at
         if closes_at <= now:
             continue
         seen_keys.add(key)
@@ -487,7 +511,11 @@ def _classify_trade_status(
     4) is unit-testable without a database."""
     if status not in EXECUTED_STATUSES:
         return "failed"  # never became a real position: missed, stale data, no capital, or concurrency-capped
-    if holding_period_seconds is not None and executed_at + timedelta(seconds=float(holding_period_seconds)) > now:
+    # A forced early exit (FAST TRADING ONLY, 2026-08-21) settles the
+    # position at the moment of the record — the original opportunity's
+    # own holding_period_seconds (often much longer, e.g. a basis trade's
+    # multi-week hold) is irrelevant to whether *this* row is still open.
+    if status not in _FORCE_CLOSED_STATUSES and holding_period_seconds is not None and executed_at + timedelta(seconds=float(holding_period_seconds)) > now:
         return "open"
     return "winning" if net_profit_usd > 0 else "losing"
 

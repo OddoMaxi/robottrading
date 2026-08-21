@@ -51,6 +51,7 @@ class TradeStatus(StrEnum):
     NO_CAPITAL_AVAILABLE = "no_capital_available"  # portfolio's capital is already locked in other open positions
     MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"  # portfolio already holds max_concurrent_trades open positions
     EMERGENCY_UNWIND = "emergency_unwind"  # one leg filled, the other failed — exited at a loss, not the priced edge
+    TIME_STOP_EXIT = "time_stop_exit"  # FAST TRADING ONLY (2026-08-21) — forced out for overstaying the 30-min hard stop
 
 
 @dataclass(slots=True)

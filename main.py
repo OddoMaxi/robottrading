@@ -52,6 +52,7 @@ from app.reporting.micro_live_readiness import build_micro_live_readiness
 from app.reporting.shadow_live import build_shadow_live_status
 from app.risk.risk_engine import risk_engine
 from app.simulation.ledger_integrity import check_ledger_integrity
+from app.simulation.time_stop import force_exit_overdue_positions
 from app.simulation.paper_trader import PaperTrader
 from app.simulation.portfolios import build_default_portfolios
 from app.simulation.position_tracker import OpenPositionTracker
@@ -149,6 +150,16 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         for portfolio in portfolios:
                             trade = paper_trader.simulate(opp, portfolio, outcome, now=now)
                             await save_simulated_trade(session, trade, opp.id, portfolio_ids[portfolio.name])
+
+                # FAST TRADING ONLY (user directive, 2026-08-21) — 30-minute
+                # hard stop. Cheap when nothing is overdue (a single
+                # in-memory dict scan per portfolio, no DB query), so this
+                # runs every scan rather than being throttled like the
+                # ledger check below.
+                for portfolio in portfolios:
+                    forced_count = await force_exit_overdue_positions(session, portfolio, portfolio_ids[portfolio.name], now=scan_time)
+                    if forced_count:
+                        logger.warning("TIME STOP: forced %d overdue position(s) out of portfolio %s", forced_count, portfolio.name)
 
                 # Signals that stopped being observed this scan — close them
                 # out rather than leaving them ACTIVE forever. A later

@@ -22,12 +22,17 @@ class VirtualPortfolio:
     # references the current (profit-inclusive) balance, so gains compound
     # into bigger positions — spec section 32's two reinvestment modes.
     capital_mode: CapitalMode = "compound"
-    # Capital tied up in open hold-based positions (Basis/Funding), keyed by
-    # "strategy:exchange:symbol" -> (amount_usd, expiry_epoch_seconds). A
-    # portfolio can only deploy capital it doesn't already have committed
-    # elsewhere — without this, a $25,000 portfolio would happily "open"
-    # unlimited $1,000 positions in parallel with no regard for its actual size.
-    _locked: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # Capital tied up in open hold-based positions, keyed by
+    # "strategy:exchange:symbol" -> (amount_usd, expiry_epoch_seconds,
+    # opened_at_epoch_seconds). A portfolio can only deploy capital it
+    # doesn't already have committed elsewhere — without this, a $25,000
+    # portfolio would happily "open" unlimited $1,000 positions in
+    # parallel with no regard for its actual size. opened_at (FAST TRADING
+    # ONLY, user directive 2026-08-21) is what lets app.simulation.time_stop
+    # find positions that have overstayed the 30-minute hard limit and
+    # force them out, independent of their own (possibly much longer)
+    # natural expiry.
+    _locked: dict[str, tuple[float, float, float]] = field(default_factory=dict)
 
     @property
     def current_value_usd(self) -> float:
@@ -42,7 +47,7 @@ class VirtualPortfolio:
 
     def available_usd(self, now: float) -> float:
         self._prune_expired(now)
-        locked_total = sum(amount for amount, _ in self._locked.values())
+        locked_total = sum(amount for amount, _, _ in self._locked.values())
         return max(0.0, self.current_value_usd - locked_total)
 
     def open_position_count(self, now: float) -> int:
@@ -67,8 +72,8 @@ class VirtualPortfolio:
         not a double-count.
         """
         self._prune_expired(now)
-        previous_amount = self._locked.get(position_key, (0.0, 0.0))[0]
-        locked_total_excluding_this_key = sum(a for a, _ in self._locked.values()) - previous_amount
+        previous_amount = self._locked.get(position_key, (0.0, 0.0, 0.0))[0]
+        locked_total_excluding_this_key = sum(a for a, _, _ in self._locked.values()) - previous_amount
         available_excluding_this_key = self.current_value_usd - locked_total_excluding_this_key
         if amount > available_excluding_this_key + 1e-6:  # epsilon for float rounding
             logger.warning(
@@ -78,13 +83,36 @@ class VirtualPortfolio:
                 max(0.0, available_excluding_this_key),
             )
             return False
-        self._locked[position_key] = (amount, expiry)
+        self._locked[position_key] = (amount, expiry, now)
         return True
 
     def _prune_expired(self, now: float) -> None:
-        expired_keys = [key for key, (_, expiry) in self._locked.items() if expiry <= now]
+        expired_keys = [key for key, (_, expiry, _) in self._locked.items() if expiry <= now]
         for key in expired_keys:
             del self._locked[key]
+
+    def overdue_locks(self, now: float, max_age_seconds: float) -> list[tuple[str, float, float]]:
+        """FAST TRADING ONLY (user directive, 2026-08-21) — every currently
+        locked position older than max_age_seconds, as (position_key,
+        amount_usd, age_seconds). Used by app.simulation.time_stop to find
+        positions that must be forced out under the 30-minute hard stop,
+        independent of whatever (possibly much longer) natural expiry they
+        were opened with."""
+        self._prune_expired(now)
+        return [
+            (key, amount, now - opened_at)
+            for key, (amount, _, opened_at) in self._locked.items()
+            if now - opened_at > max_age_seconds
+        ]
+
+    def force_release_lock(self, position_key: str) -> float | None:
+        """Releases a lock immediately, ignoring its natural expiry —
+        returns the released amount, or None if the key wasn't locked.
+        Does not touch balances; the caller (app.simulation.time_stop) is
+        responsible for booking whatever P&L adjustment the forced exit
+        implies."""
+        entry = self._locked.pop(position_key, None)
+        return entry[0] if entry is not None else None
 
 
 def build_default_portfolios(capital_mode: CapitalMode = "compound") -> list[VirtualPortfolio]:

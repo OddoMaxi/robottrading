@@ -89,3 +89,45 @@ def test_reopening_the_same_key_excludes_its_own_prior_amount_from_the_check():
     reserved = portfolio.lock_capital("basis:binance:BTC/USDT", 950.0, expiry=200.0, now=50.0)
     assert reserved is True
     assert portfolio.available_usd(now=50.0) == pytest.approx(50.0)
+
+
+# --- FAST TRADING ONLY (user directive, 2026-08-21): overdue_locks / force_release_lock ---
+
+
+def test_overdue_locks_is_empty_when_nothing_is_old_enough():
+    portfolio = make_portfolio(1_000.0)
+    portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=999_999.0, now=0.0)
+    assert portfolio.overdue_locks(now=100.0, max_age_seconds=1_800.0) == []
+
+
+def test_overdue_locks_finds_a_position_older_than_the_limit_regardless_of_its_own_expiry():
+    portfolio = make_portfolio(1_000.0)
+    # Opened at t=0 with an expiry far in the future (a basis-style long hold).
+    portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=10_000_000.0, now=0.0)
+    overdue = portfolio.overdue_locks(now=2_000.0, max_age_seconds=1_800.0)
+    assert len(overdue) == 1
+    key, amount, age = overdue[0]
+    assert key == "basis:binance:BTC/USDT"
+    assert amount == pytest.approx(400.0)
+    assert age == pytest.approx(2_000.0)
+
+
+def test_overdue_locks_excludes_a_position_exactly_at_the_boundary():
+    portfolio = make_portfolio(1_000.0)
+    portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=10_000_000.0, now=0.0)
+    assert portfolio.overdue_locks(now=1_800.0, max_age_seconds=1_800.0) == []
+
+
+def test_force_release_lock_frees_capital_immediately_ignoring_natural_expiry():
+    portfolio = make_portfolio(1_000.0)
+    portfolio.lock_capital("basis:binance:BTC/USDT", 400.0, expiry=10_000_000.0, now=0.0)
+    assert portfolio.available_usd(now=100.0) == pytest.approx(600.0)
+
+    released = portfolio.force_release_lock("basis:binance:BTC/USDT")
+    assert released == pytest.approx(400.0)
+    assert portfolio.available_usd(now=100.0) == pytest.approx(1_000.0)
+
+
+def test_force_release_lock_on_an_unknown_key_returns_none():
+    portfolio = make_portfolio(1_000.0)
+    assert portfolio.force_release_lock("does:not:exist") is None

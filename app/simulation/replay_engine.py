@@ -31,7 +31,7 @@ from app.simulation.paper_trader import PaperTrader, TradeStatus
 from app.simulation.portfolios import VirtualPortfolio
 from app.simulation.position_tracker import OpenPositionTracker
 
-EXECUTED_STATUSES = (TradeStatus.SIMULATED_EXECUTED, TradeStatus.PARTIAL_FILL, TradeStatus.EMERGENCY_UNWIND)
+EXECUTED_STATUSES = (TradeStatus.SIMULATED_EXECUTED, TradeStatus.PARTIAL_FILL, TradeStatus.EMERGENCY_UNWIND, TradeStatus.TIME_STOP_EXIT)
 
 
 @dataclass(slots=True)

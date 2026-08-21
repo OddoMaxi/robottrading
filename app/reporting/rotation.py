@@ -19,7 +19,7 @@ from app.database.models import OpportunityRecord, SimulatedTradeRecord
 # so it belongs in every "did a real trade happen" aggregate, same as a
 # clean fill. Excluding it would make emergency-unwind losses invisible to
 # reporting, which is the opposite of the audit's intent.
-EXECUTED_STATUSES = ("simulated_executed", "partial_fill", "emergency_unwind")
+EXECUTED_STATUSES = ("simulated_executed", "partial_fill", "emergency_unwind", "time_stop_exit")
 
 
 @dataclass(slots=True)

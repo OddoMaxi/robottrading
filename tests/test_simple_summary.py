@@ -97,11 +97,12 @@ def test_explainer_narrative_handles_zero_observed():
 NOW = datetime(2026, 8, 20, 12, 0, 0)
 
 
-def _row(capital_usd, net_profit_usd, hours_ago, strategy="basis", symbol="BTC/USDT", exchange="binance", holding_days=35):
+def _row(capital_usd, net_profit_usd, hours_ago, strategy="basis", symbol="BTC/USDT", exchange="binance", holding_days=35, status="simulated_executed"):
     return (
         capital_usd,
         net_profit_usd,
         NOW - timedelta(hours=hours_ago),
+        status,
         strategy,
         symbol,
         [{"exchange": exchange, "side": "buy", "market": "spot"}],
@@ -151,6 +152,32 @@ def test_reconstruct_excludes_already_closed_positions():
     rows = [_row(1000.0, 3.0, hours_ago=1000, holding_days=1)]  # opened ~41 days ago, 1-day hold — long closed
     kept = _reconstruct_open_positions(rows, total_capital_usd=5000.0, now=NOW)
     assert kept == []
+
+
+def test_reconstruct_treats_a_time_stop_exit_as_closing_the_position_immediately():
+    """FAST TRADING ONLY (2026-08-21) — a basis-style position with a
+    36-day nominal hold, force-exited by time_stop 2 hours ago: must show
+    as closed *now*, not still "open" for the next 34 days, even though
+    the opening trade's own holding_period_seconds says otherwise."""
+    rows = [
+        _row(5000.0, 15.77, hours_ago=48, holding_days=36),  # the original open, 2 days ago
+        _row(5000.0, -12.5, hours_ago=2, status="time_stop_exit"),  # forced out 2 hours ago
+    ]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5196.0, now=NOW)
+    assert kept == []
+
+
+def test_reconstruct_a_time_stop_exit_in_the_future_relative_to_now_still_keeps_it_open():
+    """Sanity check on the override direction: if the force-close event
+    hasn't happened *yet* relative to `now`, the position must still show
+    open — this isn't a blanket "ignore holding_period_seconds", only an
+    override once the closing event has actually occurred."""
+    rows = [
+        _row(5000.0, 15.77, hours_ago=1, holding_days=36),
+        _row(5000.0, -12.5, hours_ago=-1, status="time_stop_exit"),  # "closes" 1h in the future
+    ]
+    kept = _reconstruct_open_positions(rows, total_capital_usd=5196.0, now=NOW)
+    assert len(kept) == 1
 
 
 # --- Urgent audit item 4: Closed / Winning / Losing / Open / Failed ---
