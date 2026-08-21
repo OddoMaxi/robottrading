@@ -42,6 +42,7 @@ from app.reporting.simple_summary import (
     list_recent_trades,
 )
 from app.reporting.weekly import WeeklyAnalytics, build_weekly_analytics
+from app.reporting.why_no_trade import WhyNoTradeReport, build_why_no_trade_report
 from dashboard.theme import EXECUTION_MODE_LABELS, STRATEGY_LABELS, ILLUSTRATIVE_CAPITAL_USD, humanize_delta
 
 # Reference portfolio for every single-portfolio KPI (Simple Mode's capital
@@ -509,3 +510,22 @@ async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
 @st.cache_data(ttl=30, show_spinner=False)
 def get_execution_funnel_cached(hours: float = 24.0) -> ExecutionFunnelReport:
     return asyncio.run(fetch_execution_funnel(hours))
+
+
+async def fetch_why_no_trade() -> WhyNoTradeReport | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            total_capital = await build_portfolio_capital(session, portfolio.id, float(portfolio.initial_capital_usd))
+            return await build_why_no_trade_report(session, portfolio.id, total_capital)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def get_why_no_trade_cached() -> WhyNoTradeReport | None:
+    return asyncio.run(fetch_why_no_trade())

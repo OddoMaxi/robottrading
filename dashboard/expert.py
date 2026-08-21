@@ -5,6 +5,7 @@ Mode is the new default, this is the "show me everything" view (spec section 28)
 """
 
 import asyncio
+from datetime import UTC, datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -489,6 +490,74 @@ def render_expert_mode() -> None:
                 - **Profit Factor** : gains bruts cumulés des trades gagnants, divisés par la valeur absolue des pertes brutes cumulées des trades perdants. Au-dessus de 1 = plus gagné que perdu ; en dessous de 1 = l'inverse. « — » s'affiche s'il n'y a pas encore eu de trade perdant sur la période (division par zéro évitée, pas un chiffre inventé).
                 """
             )
+
+    st.divider()
+
+    # --- "Pourquoi le robot ne trade pas ?" (user request — live diagnostic) ---
+    st.subheader("🩺 Pourquoi le robot ne trade pas ?")
+    st.caption("Diagnostic en direct depuis le dernier trade réellement exécuté sur le portefeuille de référence (5K).")
+    why_report = data.get_why_no_trade_cached()
+    if why_report is None:
+        st.info("Portefeuille de référence introuvable.")
+    elif why_report.last_trade_at is None or why_report.funnel is None:
+        st.info("Aucun trade exécuté pour l'instant sur ce portefeuille.")
+    else:
+        funnel = why_report.funnel
+        render_stat_cards(
+            [
+                {"label": "Dernier trade", "value": humanize_delta(why_report.last_trade_at)},
+                {"label": "Opportunités analysées depuis", "value": f"{funnel.stage('detected').count:,}".replace(",", " ")},
+                {"label": "Rentables après frais", "value": f"{funnel.stage('profitable_after_fees').count:,}".replace(",", " ")},
+                {"label": "Exécutables", "value": f"{funnel.stage('executable').count:,}".replace(",", " ")},
+            ]
+        )
+
+        if funnel.rejection_reasons:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Principales raisons de rejet</div>', unsafe_allow_html=True)
+            reason_rows = "".join(
+                f'<div class="simple-perf-row"><span class="k">{REJECTION_REASON_LABELS.get(reason, reason)}</span>'
+                f'<span class="v">{count:,} <span style="color:{INK_MUTED};font-weight:500;">({pct:.1f} %)</span></span></div>'.replace(",", " ")
+                for reason, count, pct in funnel.rejection_reasons
+            )
+            st.markdown(f'<div class="simple-card">{reason_rows}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Capital</div>', unsafe_allow_html=True)
+        available = why_report.capital.total_capital_usd - why_report.capital.engaged_usd
+        render_stat_cards(
+            [
+                {"label": "Total", "value": f"{why_report.capital.total_capital_usd:,.2f} $".replace(",", " ")},
+                {
+                    "label": "Engagé (verrouillé)",
+                    "value": f"{why_report.capital.engaged_usd:,.2f} $".replace(",", " "),
+                    "sub": f"{why_report.capital.utilization_pct:.0f} % du capital",
+                },
+                {"label": "Disponible", "value": f"{available:,.2f} $".replace(",", " ")},
+            ]
+        )
+        st.caption(
+            "Le modèle actuel n'a pas d'état « réservé » distinct : le capital est soit engagé "
+            "(verrouillé sur une position ouverte), soit disponible."
+        )
+
+        if why_report.open_positions:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Positions ouvertes</div>', unsafe_allow_html=True)
+            position_rows = []
+            for p in why_report.open_positions:
+                remaining_seconds = max(0.0, (p.closes_at - datetime.now(UTC).replace(tzinfo=None)).total_seconds())
+                remaining_days = remaining_seconds / 86400.0
+                remaining_display = f"~{remaining_days:.1f} j" if remaining_days >= 1 else f"~{int(remaining_seconds / 60)} min"
+                position_rows.append(
+                    f'<div class="simple-perf-row"><span class="k">{p.strategy} · {p.symbol}</span>'
+                    f'<span class="v">{p.capital_usd:,.2f} $ — ferme dans {remaining_display}</span></div>'.replace(",", " ")
+                )
+            st.markdown(f'<div class="simple-card">{"".join(position_rows)}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">État du moteur</div>', unsafe_allow_html=True)
+        health_icon = {"running": "🟢", "degraded": "🟡", "down": "🔴"}[why_report.robot_status.health.value]
+        exchanges_text = " · ".join(
+            f"{name.capitalize()} {'✓' if ok else '✕'}" for name, ok in why_report.robot_status.exchanges_connected.items()
+        )
+        st.markdown(f"{health_icon} **{why_report.robot_status.health.value}** — {exchanges_text}")
 
     st.divider()
 
