@@ -18,6 +18,31 @@ class ExchangeFeeSchedule:
     vip_level: int = 0
 
 
+@dataclass(frozen=True)
+class PairFeeOverride:
+    """A symbol-specific rate that replaces the exchange's default for that
+    one pair — e.g. Binance's periodic 0-fee FDUSD promotions. `None` on
+    either field means "no override, use the exchange's standard rate."""
+
+    maker_fee_spot: float | None = None
+    taker_fee_spot: float | None = None
+    note: str = ""
+
+
+# Reality Engine spec, sections 12-13 — pair-specific fee overrides
+# ("Special Pair Fees... Fee Promotions... FDUSD Promotions"). Deliberately
+# empty: no public API exposes an account's live promotional fee status,
+# and Binance's FDUSD promotions have historically started, expired, and
+# changed scope without notice. Hardcoding a rate we can't verify right now
+# would silently make results look better than reality — the opposite of
+# this spec's own rule (section 87: never tune a number just to get a
+# better result). Populate an entry here only after checking
+# https://www.binance.com/fee/schedule (or the account's own fee page) for
+# whichever promotion is actually live, e.g.:
+#   ("binance", "BTC/FDUSD"): PairFeeOverride(maker_fee_spot=0.0, taker_fee_spot=0.0, note="verified <date>")
+PAIR_FEE_OVERRIDES: dict[tuple[str, str], PairFeeOverride] = {}
+
+
 def uniform_fee_schedules(maker_fee_spot: float, taker_fee_spot: float) -> dict[str, ExchangeFeeSchedule]:
     """Build a fee schedule with the same maker/taker spot rate on every exchange.
 
