@@ -9,12 +9,15 @@ portfolio) pair, since a maker order either fills or it doesn't regardless
 of which virtual portfolio is tracking the result.
 """
 
+import logging
 import random
 import time
 from dataclasses import dataclass
 from enum import StrEnum
 
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD
+
+logger = logging.getLogger(__name__)
 from app.execution.latency_engine import DEFAULT_PROFILE, LatencyProfile, revalidate_after_latency
 from app.opportunity.false_opportunity_filter import MAX_QUOTE_AGE_SECONDS
 from app.opportunity.models import Opportunity
@@ -182,6 +185,10 @@ class PaperTrader:
             slippage_usd = capital * (slippage_pct / 100)
             net_profit += slippage_usd
             fees = gross_profit - net_profit
+            logger.info(
+                "TEMP_DIAG slippage_pct=%.6f slippage_usd=%.6f capital=%.2f pre_slip_net=%.4f post_slip_net=%.4f opp_id=%s strategy=%s",
+                slippage_pct, slippage_usd, capital, opportunity.expected_profit_usd * scale, net_profit, opportunity.id, opportunity.strategy,
+            )
 
         # Profit is credited immediately (V1 simplification — full deferred
         # settlement at close isn't built yet), so both the principal *and*
