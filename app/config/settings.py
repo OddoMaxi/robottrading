@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     bybit_api_key: str = ""
     bybit_api_secret: str = ""
 
+    # Reality Engine spec, section 57 — Binance Spot Testnet preparation.
+    # Deliberately separate fields from binance_api_key/secret above (those
+    # are reserved for a real live connection later): mixing testnet and
+    # live credentials in one field is exactly the kind of accident that
+    # shouldn't be possible. Unused for any authenticated call in V1 — see
+    # app.execution.binance_testnet_client's own docstring.
+    binance_testnet_api_key: str = ""
+    binance_testnet_api_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -47,8 +47,10 @@ from app.engines.stablecoin import StablecoinArbitrageEngine
 from app.engines.triangular import TriangularArbitrageEngine
 from app.execution.validator import validate
 from app.market_data.store import market_data_store
+from app.execution.binance_testnet_client import BinanceTestnetClient
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
+from app.reporting.micro_live_readiness import build_micro_live_readiness
 from app.reporting.shadow_live import build_shadow_live_status
 from app.risk.risk_engine import risk_engine
 from app.simulation.ledger_integrity import check_ledger_integrity
@@ -318,6 +320,25 @@ async def shadow_live_status() -> dict:
         "signals_on_radar": status.signals_on_radar,
         "approved_on_radar": status.approved_on_radar,
         "rejection_breakdown": status.rejection_breakdown,
+    }
+
+
+_binance_testnet_client = BinanceTestnetClient()
+
+
+@app.get("/micro-live/readiness")
+async def micro_live_readiness() -> dict:
+    """Reality Engine spec, sections 59-60 — composes every safety/quality
+    signal this system already computes (Ledger Integrity, Capital Pool,
+    Reality Capture, Performance Metrics, Stress Testing, Binance Testnet
+    connectivity) into one checklist and a single READY_FOR_CONTROLLED_TEST
+    / NOT_READY verdict. Read-only: never places an order, testnet or
+    otherwise — see app.execution.binance_testnet_client's own docstring."""
+    async with async_session_factory() as session:
+        report = await build_micro_live_readiness(session, portfolios, portfolio_ids, risk_engine, _binance_testnet_client)
+    return {
+        "verdict": report.verdict.value,
+        "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in report.checks],
     }
 
 
