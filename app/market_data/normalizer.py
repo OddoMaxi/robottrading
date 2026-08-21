@@ -72,6 +72,60 @@ def normalize_binance_partial_depth(symbol_common: str, data: dict) -> OrderBook
     )
 
 
+def normalize_okx_books5(symbol_common: str, data: dict) -> OrderBook | None:
+    """OKX's "books5" channel — a full top-5-levels snapshot pushed on every
+    update (no incremental reconciliation needed), same semantics as
+    Binance's depth20@100ms. Opportunity Expansion spec, Step 2 (user
+    directive, 2026-08-21): real depth for OKX, not just top-of-book. Each
+    level is [price, size, deprecated_liquidated_orders, order_count] — the
+    trailing two fields are ignored."""
+    bids, asks = data.get("bids"), data.get("asks")
+    if not bids or not asks:
+        return None
+    return OrderBook(
+        exchange="okx",
+        symbol=symbol_common,
+        bids=[OrderBookLevel(price=float(p), quantity=float(q)) for p, q, *_ in bids],
+        asks=[OrderBookLevel(price=float(p), quantity=float(q)) for p, q, *_ in asks],
+        timestamp=time.time(),
+    )
+
+
+def apply_bybit_depth_delta(levels: dict[float, float], updates: list[list[str]]) -> None:
+    """Mutates `levels` (price -> quantity) in place per Bybit v5's
+    orderbook.50 delta semantics: a size of "0" removes that price level
+    entirely, any other size upserts it. `updates` is empty for a side that
+    didn't change in this delta message, so this is a safe no-op then."""
+    for price_str, qty_str in updates:
+        price = float(price_str)
+        qty = float(qty_str)
+        if qty == 0.0:
+            levels.pop(price, None)
+        else:
+            levels[price] = qty
+
+
+def build_order_book_from_levels(
+    exchange: str, symbol_common: str, bids: dict[float, float], asks: dict[float, float], max_levels: int
+) -> OrderBook | None:
+    """Sorts and truncates a maintained {price: quantity} book (Bybit's
+    snapshot+delta local reconstruction) into the same OrderBook shape the
+    single-snapshot exchanges (Binance, OKX) produce directly — VWAP
+    simulation and every engine that reads app.market_data.store's order
+    books never needs to know which exchange used which wire protocol."""
+    if not bids or not asks:
+        return None
+    sorted_bids = sorted(bids.items(), key=lambda kv: kv[0], reverse=True)[:max_levels]
+    sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:max_levels]
+    return OrderBook(
+        exchange=exchange,
+        symbol=symbol_common,
+        bids=[OrderBookLevel(price=p, quantity=q) for p, q in sorted_bids],
+        asks=[OrderBookLevel(price=p, quantity=q) for p, q in sorted_asks],
+        timestamp=time.time(),
+    )
+
+
 def normalize_bybit_orderbook(data: dict, ts_ms: float | None) -> NormalizedQuote | None:
     # Bybit's v5 "orderbook.1" (L1) topic sends a full snapshot — both sides
     # — on every update, unlike "tickers" which stopped carrying

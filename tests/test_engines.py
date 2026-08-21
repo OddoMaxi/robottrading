@@ -36,10 +36,22 @@ async def test_cross_exchange_detects_spread():
 
     assert len(opportunities) == 1
     opp = opportunities[0]
-    assert opp.legs[0] == {"exchange": "binance", "side": "buy", "market": "spot", "price": pytest.approx(100_000), "quantity": pytest.approx(0.01)}
+    # This fixture's book is flat and effectively unlimited depth at one
+    # price (no degradation at any size) — Opportunity Expansion spec, Step
+    # 2 (2026-08-21): the engine now prices at the OPTIMAL depth-adjusted
+    # size, not a fixed $1,000 default, so with nothing to degrade against,
+    # optimal correctly lands on the largest tested capital tier ($25,000)
+    # rather than the originally-intended $1,000.
+    assert opp.legs[0]["exchange"] == "binance"
+    assert opp.legs[0]["side"] == "buy"
+    assert opp.legs[0]["price"] == pytest.approx(100_000)
+    assert opp.capital_usd == pytest.approx(25_000)
     assert opp.legs[1]["exchange"] == "okx"
     assert opp.gross_spread_pct > 0
     assert opp.net_spread_pct < opp.gross_spread_pct  # fees reduce it
+    assert opp.optimal_capital_usd == pytest.approx(25_000)
+    assert opp.theoretical_edge_pct == pytest.approx(opp.gross_spread_pct)
+    assert opp.realistic_executable_edge_pct == pytest.approx(opp.net_spread_pct)
 
 
 @pytest.mark.asyncio
@@ -69,6 +81,56 @@ async def test_cross_exchange_uses_real_order_book_depth_when_available():
     # Filled close to the full $1,000 via the deeper book, not capped at
     # the ~$100 the top-of-book quote's own ask_quantity would allow.
     assert opportunities[0].capital_usd > 500
+
+
+@pytest.mark.asyncio
+async def test_cross_exchange_never_prices_beyond_what_real_depth_can_actually_absorb_profitably():
+    """Opportunity Expansion spec, Step 2's own example (user directive,
+    2026-08-21): a theoretical +% edge with only a little real depth behind
+    it, and a book that turns unprofitable (crosses the other side) past
+    that — the engine must size DOWN to what's actually profitable, never
+    just report the naive top-of-book % against the full intended size."""
+    store = MarketDataStore()
+    store.update_quote(make_quote("binance", "BTC/USDT", bid=99_990, ask=100_000, qty=0.001))  # $100 at the good price
+    store.update_quote(make_quote("okx", "BTC/USDT", bid=100_300, ask=100_310, qty=0.001))
+    store.update_order_book(
+        OrderBook(
+            exchange="binance",
+            symbol="BTC/USDT",
+            bids=[OrderBookLevel(99_990, 0.001)],
+            asks=[OrderBookLevel(100_000, 0.001), OrderBookLevel(103_000, 10.0)],  # deep, but a much worse price
+            timestamp=time.time(),
+        )
+    )
+    store.update_order_book(
+        OrderBook(
+            exchange="okx",
+            symbol="BTC/USDT",
+            bids=[OrderBookLevel(100_300, 0.001), OrderBookLevel(97_000, 10.0)],  # deep, but a much worse price
+            asks=[OrderBookLevel(100_310, 0.001)],
+            timestamp=time.time(),
+        )
+    )
+
+    engine = CrossExchangeArbitrageEngine(assets=["BTC"], store=store, capital_usd=5_000)
+    opportunities = await engine.detect()
+
+    assert len(opportunities) == 1
+    opp = opportunities[0]
+    # Priced far below the naive $5,000 intent — the deeper levels on both
+    # sides are unprofitable, so optimal sizing stays within the real
+    # profitable depth (roughly the $100 available at the good price).
+    assert opp.capital_usd < 200
+    assert opp.optimal_capital_usd < 200
+    assert opp.max_profitable_capital_usd is not None
+    assert opp.max_profitable_capital_usd < 5_000
+    # depth_adjusted_edge_pct reflects what the naive $5,000 intent would
+    # have netted (a loss, from walking into the bad deep levels) — exactly
+    # what realistic_executable_edge_pct (priced at the real optimal size)
+    # must NOT be confused with.
+    assert opp.depth_adjusted_edge_pct is not None
+    assert opp.depth_adjusted_edge_pct < 0
+    assert opp.realistic_executable_edge_pct > 0
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,25 @@ class Opportunity:
     capital_usd: float | None = None
     expected_profit_usd: float | None = None
 
+    # Depth-Adjusted Execution Curve (Opportunity Expansion spec, Step 2,
+    # user directive, 2026-08-21) — for a liquidity-capped opportunity
+    # (Cross-Exchange/Stablecoin today), capital_usd/net_spread_pct/
+    # expected_profit_usd above are now priced AT optimal_capital_usd (the
+    # size that maximizes absolute net profit against real order-book
+    # depth on both legs), not a fixed default — so realistic_executable_edge_pct
+    # always equals net_spread_pct there; kept as its own explicitly-named
+    # field so a caller doesn't need to know that wiring detail to read it.
+    # theoretical_edge_pct is the raw top-of-book spread (mirrors
+    # gross_spread_pct); depth_adjusted_edge_pct is what net_spread_pct
+    # would have been at the naive fixed intended size, before optimizing —
+    # the three together are what let a glance tell "the headline number"
+    # from "what we'd actually net if we sized this well".
+    theoretical_edge_pct: float | None = None
+    depth_adjusted_edge_pct: float | None = None
+    realistic_executable_edge_pct: float | None = None
+    optimal_capital_usd: float | None = None
+    max_profitable_capital_usd: float | None = None
+
     # Maker/Taker Strategy Engine (informational — net_spread_pct/expected_profit_usd
     # above stay the certain-fill taker/taker baseline; these describe the
     # best of the 4 execution modes by probability-weighted expected value).

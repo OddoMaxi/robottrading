@@ -161,6 +161,19 @@ class OpportunityRecord(Base):
     capital_velocity_score: Mapped[float | None] = mapped_column(Numeric(5, 1))
     return_per_minute_pct: Mapped[float | None] = mapped_column(Numeric(14, 6))
 
+    # Depth-Adjusted Execution Curve (Opportunity Expansion spec, Step 2,
+    # user directive, 2026-08-21) — see app.analytics.execution_depth and
+    # app.opportunity.models.Opportunity's matching fields for what each
+    # one means. capital_usd/net_spread_pct/expected_profit_usd above are
+    # now themselves priced at optimal_capital_usd for a liquidity-capped
+    # opportunity — these are additive diagnostic context, not a second
+    # copy of the same numbers under new names.
+    theoretical_edge_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    depth_adjusted_edge_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    realistic_executable_edge_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    optimal_capital_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    max_profitable_capital_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
+
     detected_at: Mapped[datetime] = mapped_column(server_default=func.now())
     peak_at: Mapped[datetime | None]
     closed_at: Mapped[datetime | None]

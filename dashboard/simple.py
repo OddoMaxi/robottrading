@@ -467,6 +467,33 @@ def render_opportunity_card(df: pd.DataFrame) -> None:
             f"Le robot considère actuellement cette opportunité comme une **{label.lower()}**."
         )
 
+        # Opportunity Expansion spec, Step 2 (user directive, 2026-08-21) —
+        # théorique (top-of-book, avant toute considération de taille) vs
+        # ce que la taille prévue aurait réellement donné vs la taille qui
+        # maximise le profit réel une fois la profondeur du carnet prise
+        # en compte — le capital ci-dessus EST déjà la taille optimale, pas
+        # automatiquement le maximum disponible.
+        theoretical = row.get("_theoretical_edge_pct")
+        depth_adjusted = row.get("_depth_adjusted_edge_pct")
+        realistic = row.get("_realistic_executable_edge_pct")
+        optimal_capital = row.get("_optimal_capital_usd")
+        max_profitable = row.get("_max_profitable_capital_usd")
+        if theoretical is not None and realistic is not None:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Écart théorique vs réellement exécutable</div>', unsafe_allow_html=True)
+            edge_lines = [f"- Écart théorique (top-of-book) : **{theoretical:+.3f} %**"]
+            if depth_adjusted is not None:
+                edge_lines.append(f"- Écart net à la taille visée par défaut : **{depth_adjusted:+.3f} %**")
+            edge_lines.append(f"- Écart net réellement exécutable (à la taille optimale) : **{realistic:+.3f} %**")
+            if optimal_capital is not None:
+                edge_lines.append(f"- Capital optimal : **{_money(optimal_capital)}**")
+            if max_profitable is not None:
+                edge_lines.append(f"- Capital maximum encore rentable : **{_money(max_profitable)}**")
+            st.markdown("\n".join(edge_lines))
+            st.caption(
+                "Le capital utilisé ci-dessus est déjà la taille optimale (celle qui maximise le gain réel en dollars, "
+                "pas le meilleur pourcentage) — jamais automatiquement le capital maximum disponible."
+            )
+
 
 def render_ignored_example(df: pd.DataFrame) -> None:
     if df.empty:

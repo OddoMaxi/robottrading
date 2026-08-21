@@ -54,6 +54,11 @@ async def save_opportunity(session: AsyncSession, opportunity: Opportunity) -> O
         capital_is_liquidity_capped=opportunity.capital_is_liquidity_capped,
         capital_velocity_score=opportunity.capital_velocity_score,
         return_per_minute_pct=opportunity.return_per_minute_pct,
+        theoretical_edge_pct=opportunity.theoretical_edge_pct,
+        depth_adjusted_edge_pct=opportunity.depth_adjusted_edge_pct,
+        realistic_executable_edge_pct=opportunity.realistic_executable_edge_pct,
+        optimal_capital_usd=opportunity.optimal_capital_usd,
+        max_profitable_capital_usd=opportunity.max_profitable_capital_usd,
         max_spread_pct=edge,
         min_spread_pct=edge,
         avg_spread_pct=edge,
@@ -104,6 +109,11 @@ async def update_opportunity_tracking(
             execution_mode=opportunity.execution_mode,
             execution_fill_probability=opportunity.execution_fill_probability,
             market_data_age_seconds=opportunity.market_data_age_seconds,
+            theoretical_edge_pct=opportunity.theoretical_edge_pct,
+            depth_adjusted_edge_pct=opportunity.depth_adjusted_edge_pct,
+            realistic_executable_edge_pct=opportunity.realistic_executable_edge_pct,
+            optimal_capital_usd=opportunity.optimal_capital_usd,
+            max_profitable_capital_usd=opportunity.max_profitable_capital_usd,
         )
     )
 

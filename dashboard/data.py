@@ -101,6 +101,11 @@ async def fetch_opportunities(limit: int = 300) -> pd.DataFrame:
                 "_classification": r.classification,
                 "_status": r.status,
                 "_legs": r.legs,
+                "_theoretical_edge_pct": float(r.theoretical_edge_pct) if r.theoretical_edge_pct is not None else None,
+                "_depth_adjusted_edge_pct": float(r.depth_adjusted_edge_pct) if r.depth_adjusted_edge_pct is not None else None,
+                "_realistic_executable_edge_pct": float(r.realistic_executable_edge_pct) if r.realistic_executable_edge_pct is not None else None,
+                "_optimal_capital_usd": float(r.optimal_capital_usd) if r.optimal_capital_usd is not None else None,
+                "_max_profitable_capital_usd": float(r.max_profitable_capital_usd) if r.max_profitable_capital_usd is not None else None,
             }
             for r in rows
         ]

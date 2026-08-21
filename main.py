@@ -16,8 +16,10 @@ from app.collectors.binance.collector import BinanceCollector
 from app.collectors.binance.depth_collector import BinanceDepthCollector
 from app.collectors.binance.funding import poll_binance_funding
 from app.collectors.bybit.collector import BybitCollector
+from app.collectors.bybit.depth_collector import BybitDepthCollector
 from app.collectors.bybit.funding import poll_bybit_funding
 from app.collectors.okx.collector import OkxCollector
+from app.collectors.okx.depth_collector import OkxDepthCollector
 from app.collectors.okx.funding import poll_okx_funding
 from app.config.constants import (
     CROSS_EXCHANGE_ASSETS,
@@ -303,11 +305,18 @@ async def lifespan(app: FastAPI):
         BinanceCollector(per_exchange_spot_symbols["binance"]),
         OkxCollector(per_exchange_spot_symbols["okx"]),
         BybitCollector(per_exchange_spot_symbols["bybit"]),
-        # Reality Engine spec, sections 7-8, 53 — real multi-level depth for
-        # VWAP, Binance first ("Core Exchange"). Purely additive: the
-        # top-of-book BinanceCollector above is untouched, so a bug here
+        # Opportunity Expansion spec, Step 2 (user directive, 2026-08-21) —
+        # real multi-level depth on all 3 priority exchanges, not Binance
+        # only. Purely additive on every exchange: each top-of-book
+        # collector above is untouched, so a bug in any one depth collector
         # can't take down the quotes every engine already depends on.
+        # app.engines._shared._resolve_ask_levels/_resolve_bid_levels
+        # already read whichever exchange's order book the store has — no
+        # engine-side change needed, they just had nothing to read for
+        # OKX/Bybit before this.
         BinanceDepthCollector(CHART_SYMBOLS),
+        OkxDepthCollector(CHART_SYMBOLS),
+        BybitDepthCollector(CHART_SYMBOLS),
     ]
     for collector in collectors:
         task_name = f"collector:{collector.exchange}:{type(collector).__name__}"

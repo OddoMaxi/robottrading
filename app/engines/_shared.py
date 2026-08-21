@@ -6,6 +6,7 @@ bid/ask across exchanges — Cross-Exchange (section 5) and Stablecoin
 import time
 
 from app.analytics.break_even import compute_break_even
+from app.analytics.execution_depth import compute_depth_adjusted_edge
 from app.analytics.fees import FeeEngine
 from app.config.constants import NOMINAL_FAST_HOLDING_SECONDS, MarketType, Strategy
 from app.execution.execution_simulator import simulate_best_execution
@@ -25,8 +26,11 @@ MAX_ORDER_BOOK_AGE_SECONDS = 2.0
 
 def _resolve_ask_levels(store: MarketDataStore, exchange: str, symbol: str, quote: NormalizedQuote, now: float) -> list[OrderBookLevel]:
     """Real multi-level depth where a fresh local order book exists for
-    this (exchange, symbol) — Binance spot only, for now (section 53) —
-    else the same single top-of-book level engines have always used."""
+    this (exchange, symbol) — all 3 priority exchanges as of the
+    Opportunity Expansion spec, Step 2 (2026-08-21; Binance-only before
+    that) — else the same single top-of-book level engines have always
+    used, for whichever specific (exchange, symbol) pair doesn't have one
+    (a newly-discovered asset not yet confirmed listed there, a stale feed)."""
     book = store.get_order_book(exchange, symbol)
     if book is not None and book.asks and (now - book.timestamp) <= MAX_ORDER_BOOK_AGE_SECONDS:
         return book.asks
@@ -109,30 +113,55 @@ class QuoteSpreadScanner:
         self, symbol, buy_exchange, buy_quote, sell_exchange, sell_quote, gross_spread_pct, break_even_pct, market_data_age_seconds
     ) -> Opportunity | None:
         # Real multi-level depth where a local order book is available and
-        # fresh (Binance spot, section 53's "Core Exchange" priority) —
-        # everywhere else, still the single top-of-book level collectors
-        # have always carried (bookTicker/tickers streams).
+        # fresh — all 3 priority exchanges as of the Opportunity Expansion
+        # spec, Step 2 (2026-08-21) — everywhere else, still the single
+        # top-of-book level collectors have always carried.
         now = time.time()
-        buy_fill = simulate_vwap(_resolve_ask_levels(self.store, buy_exchange, symbol, buy_quote, now), self.capital_usd)
-        sell_fill = simulate_vwap(_resolve_bid_levels(self.store, sell_exchange, symbol, sell_quote, now), self.capital_usd)
+        ask_levels = _resolve_ask_levels(self.store, buy_exchange, symbol, buy_quote, now)
+        bid_levels = _resolve_bid_levels(self.store, sell_exchange, symbol, sell_quote, now)
+
+        # Cheap feasibility check at the standard intended size first — no
+        # point walking the full depth-adjusted-edge curve below if there's
+        # no liquidity here at all.
+        buy_fill = simulate_vwap(ask_levels, self.capital_usd)
+        sell_fill = simulate_vwap(bid_levels, self.capital_usd)
         if buy_fill.filled_usd <= 0 or sell_fill.filled_usd <= 0:
             return None
 
-        capital = min(buy_fill.filled_usd, sell_fill.filled_usd)
-        quantity = capital / buy_fill.average_price
+        # Opportunity Expansion spec, Step 2 (user directive, 2026-08-21) —
+        # a theoretical top-of-book edge must never be treated as
+        # executable just because it's positive at one fixed size (spec's
+        # own example: +0.10% with only $50 of depth against a $5,000
+        # intent isn't a real opportunity). Walk real depth on both legs
+        # across a spread of capital sizes and find the size that actually
+        # maximizes real dollar profit — not the size a fixed default
+        # happened to name, and not "however much capital happens to be
+        # available" either.
+        edge = compute_depth_adjusted_edge(
+            buy_exchange, sell_exchange, ask_levels, bid_levels, gross_spread_pct, self.fee_engine, self.capital_usd
+        )
+        if edge.optimal_capital_usd is None:
+            # Positive at the naive fixed size's approximation, but never
+            # actually profitable once real depth is walked at any tested
+            # size — not a real opportunity. Same rejection semantics as
+            # "no liquidity at all" above, never a loosened threshold.
+            return None
 
-        buy_fee = self.fee_engine.trading_fee(buy_exchange, MarketType.SPOT, capital, is_maker=False)
-        sell_notional = quantity * sell_fill.average_price
-        sell_fee = self.fee_engine.trading_fee(sell_exchange, MarketType.SPOT, sell_notional, is_maker=False)
-
-        gross_profit = quantity * (sell_fill.average_price - buy_fill.average_price)
-        net_profit = gross_profit - buy_fee - sell_fee
-        net_spread_pct = net_profit / capital * 100
+        capital = edge.optimal_capital_usd
+        buy_fill = simulate_vwap(ask_levels, capital)
+        sell_fill = simulate_vwap(bid_levels, capital)
+        filled_usd = min(buy_fill.filled_usd, sell_fill.filled_usd)
+        quantity = (filled_usd / buy_fill.average_price) if buy_fill.average_price else 0.0
+        # net_profit/net_spread_pct come straight from `edge`'s own optimal
+        # tier (identical formula, already computed) rather than being
+        # re-derived here — one source of truth, no risk of the two drifting.
+        net_profit = edge.optimal_net_profit_usd
+        net_spread_pct = edge.realistic_executable_edge_pct
 
         # Maker/Taker Strategy Engine: on top of the certain-fill taker/taker
         # numbers above, work out whether resting a maker order on either
         # leg beats it in expectation, given the fill risk.
-        best_execution = simulate_best_execution(buy_exchange, sell_exchange, buy_quote, sell_quote, capital, self.fee_engine, self.store)
+        best_execution = simulate_best_execution(buy_exchange, sell_exchange, buy_quote, sell_quote, filled_usd, self.fee_engine, self.store)
 
         return Opportunity(
             strategy=self.strategy,
@@ -144,10 +173,15 @@ class QuoteSpreadScanner:
             gross_spread_pct=gross_spread_pct,
             net_spread_pct=net_spread_pct,
             break_even_pct=break_even_pct,
-            capital_usd=capital,
+            capital_usd=filled_usd,
             expected_profit_usd=net_profit,
             execution_mode=best_execution.mode,
             execution_fill_probability=best_execution.fill_probability,
             market_data_age_seconds=market_data_age_seconds,
             holding_period_seconds=NOMINAL_FAST_HOLDING_SECONDS,
+            theoretical_edge_pct=edge.theoretical_edge_pct,
+            depth_adjusted_edge_pct=edge.depth_adjusted_edge_pct,
+            realistic_executable_edge_pct=edge.realistic_executable_edge_pct,
+            optimal_capital_usd=edge.optimal_capital_usd,
+            max_profitable_capital_usd=edge.max_profitable_capital_usd,
         )
