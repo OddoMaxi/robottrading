@@ -28,7 +28,9 @@ from dashboard.theme import (
     SEQUENTIAL_BLUE,
     STATUS_CRITICAL,
     STATUS_GOOD,
+    STATUS_WARNING,
     STRATEGY_LABELS_SIMPLE,
+    render_live_number_card,
     style_fig,
 )
 
@@ -136,46 +138,45 @@ def render_header(active_page: str) -> None:
 # --- Home cards (spec sections 4-14) ---
 
 
-def _pulse_class(key: str, value: float | None) -> str:
-    """Live Dashboard addendum, section 21 — fires a one-shot pulse
-    animation class only on the fragment run where a value actually
-    changed since the previous one (tracked in st.session_state, which
-    survives across st.fragment(run_every=...) reruns). Never a permanent
-    color change — that's what the existing good/bad tone classes already
-    do — just a brief flash so a moving number is noticeable without
-    forcing the user to stare at it."""
-    state_key = f"_live_prev_{key}"
-    previous = st.session_state.get(state_key)
-    st.session_state[state_key] = value
-    if value is None or previous is None or value == previous:
-        return ""
-    return "pulse-good" if value > previous else "pulse-bad"
-
-
 def render_capital_card(capital: float | None, utilization: CapitalUtilization | None = None) -> None:
-    pulse = _pulse_class("capital", capital)
+    """Live Dashboard addendum — user feedback: the card must stay
+    intact, only the number counts smoothly (render_live_number_card),
+    never the whole card re-rendering. The "no data yet" state has nothing
+    to animate, so it stays a plain static card."""
     if capital is None:
-        body = '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
-    else:
-        body = f'<div class="simple-card-figure">{_money(capital)}</div>'
-        if utilization is not None:
-            available = utilization.total_capital_usd - utilization.engaged_usd
-            body += f'<div class="simple-card-sub">Disponible maintenant : <b>{_money(available)}</b></div>'
-    st.markdown(f'<div class="simple-card {pulse}"><div class="simple-card-label">Capital virtuel</div>{body}</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="simple-card"><div class="simple-card-label">Capital virtuel</div>'
+            '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    rows = [{"value": capital, "decimals": 2, "big": True, "suffix": " $"}]
+    if utilization is not None:
+        available = utilization.total_capital_usd - utilization.engaged_usd
+        rows.append({"value": available, "decimals": 2, "suffix": " $", "color": INK_SECONDARY, "label": "Disponible maintenant :"})
+    render_live_number_card("Capital virtuel", rows, key="capital")
 
 
 def render_gain_card(capital: float | None, today: RotationReport | None) -> None:
     if capital is None or today is None or today.completed_trades == 0:
-        body = '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div>'
-        pulse = ""
-    else:
-        pnl = today.net_pnl_usd
-        pulse = _pulse_class("gain", pnl)
-        base = capital - pnl
-        pct = (pnl / base * 100) if base else 0.0
-        tone = "good" if pnl >= 0 else "bad"
-        body = f'<div class="simple-card-figure {tone}">{pnl:+,.2f} $</div>'.replace(",", " ") + f'<div class="simple-card-sub {tone}">{pct:+.2f} %</div>'
-    st.markdown(f'<div class="simple-card {pulse}"><div class="simple-card-label">Gain aujourd\'hui</div>{body}</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="simple-card"><div class="simple-card-label">Gain aujourd\'hui</div>'
+            '<div class="simple-card-figure">—</div><div class="simple-card-sub">Pas encore disponible</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+    pnl = today.net_pnl_usd
+    base = capital - pnl
+    pct = (pnl / base * 100) if base else 0.0
+    tone_color = STATUS_GOOD if pnl >= 0 else STATUS_CRITICAL
+    render_live_number_card(
+        "Gain aujourd'hui",
+        [
+            {"value": pnl, "decimals": 2, "big": True, "suffix": " $", "signed": True, "color": tone_color},
+            {"value": pct, "decimals": 2, "suffix": " %", "signed": True, "color": tone_color},
+        ],
+        key="gain",
+    )
 
 
 def render_pnl_split_card(today: RotationReport | None, positions: list[OpenPosition]) -> None:
@@ -189,47 +190,69 @@ def render_pnl_split_card(today: RotationReport | None, positions: list[OpenPosi
     realized = today.net_pnl_usd if today is not None else 0.0
     unrealized = sum(p.net_profit_usd for p in positions)
     total = realized + unrealized
-    pulse = _pulse_class("pnl_total", total)
-
-    def _row(label: str, value: float, extra_class: str = "") -> str:
-        color = STATUS_GOOD if value >= 0 else STATUS_CRITICAL
-        return f'<div class="simple-pnl-split-row {extra_class}"><span class="k">{label}</span><span class="v" style="color:{color};">{value:+.2f} $</span></div>'
-
-    st.markdown(
-        f'<div class="simple-card {pulse}"><div class="simple-card-label">Répartition du gain</div>'
-        f'{_row("Gain réalisé", realized)}'
-        f'{_row("Positions en cours (non réalisé)", unrealized)}'
-        f'{_row("Total actuel", total, "simple-pnl-split-total")}'
-        "</div>",
-        unsafe_allow_html=True,
+    render_live_number_card(
+        "Répartition du gain",
+        [
+            {"value": realized, "decimals": 2, "suffix": " $", "signed": True, "color": STATUS_GOOD if realized >= 0 else STATUS_CRITICAL, "label": "Gain réalisé :"},
+            {"value": unrealized, "decimals": 2, "suffix": " $", "signed": True, "color": STATUS_GOOD if unrealized >= 0 else STATUS_CRITICAL, "label": "Positions en cours :"},
+            {"value": total, "decimals": 2, "big": True, "suffix": " $", "signed": True, "color": STATUS_GOOD if total >= 0 else STATUS_CRITICAL, "label": "Total actuel :"},
+        ],
+        key="pnl_split",
     )
 
 
 def render_trades_rotation_grid(today: RotationReport | None, utilization: CapitalUtilization | None) -> None:
-    if today is None or today.completed_trades == 0:
-        trades_body = '<div class="simple-card-figure">0</div><div class="simple-card-sub">Aucun trade pour l\'instant</div>'
-        rotation_body = '<div class="simple-card-figure">—</div>'
-    else:
-        trades_body = f'<div class="simple-card-figure">{today.completed_trades}</div><div class="simple-card-sub">{today.win_count} gagnants · {today.loss_count} perdants</div>'
-        rotation_body = (
-            f'<div class="simple-card-figure">{today.capital_rotation_rate:.1f}×</div>'
-            f'<div class="simple-card-sub">Capital traité aujourd\'hui : {_money(today.total_capital_traded_usd)}</div>'
-        )
-    if utilization is None:
-        utilization_body = '<div class="simple-card-figure">—</div>'
-    else:
-        utilization_body = (
-            f'<div class="simple-card-figure">{utilization.utilization_pct:.0f} %</div>'
-            f'<div class="simple-card-sub">{utilization.open_position_count} position(s) en cours</div>'
-        )
-    st.markdown(
-        '<div class="simple-grid-2">'
-        f'<div class="simple-card"><div class="simple-card-label">Trades</div>{trades_body}</div>'
-        f'<div class="simple-card"><div class="simple-card-label">Rotation</div>{rotation_body}</div>'
-        f'<div class="simple-card"><div class="simple-card-label">Utilisation actuelle</div>{utilization_body}</div>'
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if today is None or today.completed_trades == 0:
+            st.markdown(
+                '<div class="simple-card"><div class="simple-card-label">Trades</div>'
+                '<div class="simple-card-figure">0</div><div class="simple-card-sub">Aucun trade pour l\'instant</div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            render_live_number_card(
+                "Trades",
+                [{"value": float(today.completed_trades), "decimals": 0, "big": True, "sub_text": f"{today.win_count} gagnants · {today.loss_count} perdants"}],
+                key="trades_count",
+            )
+
+    with col2:
+        if today is None or today.completed_trades == 0:
+            st.markdown('<div class="simple-card"><div class="simple-card-label">Rotation</div><div class="simple-card-figure">—</div></div>', unsafe_allow_html=True)
+        else:
+            render_live_number_card(
+                "Rotation",
+                [
+                    {
+                        "value": today.capital_rotation_rate,
+                        "decimals": 1,
+                        "big": True,
+                        "suffix": "×",
+                        "sub_text": f"Capital traité aujourd'hui : {_money(today.total_capital_traded_usd)}",
+                    }
+                ],
+                key="rotation",
+            )
+
+    with col3:
+        if utilization is None:
+            st.markdown('<div class="simple-card"><div class="simple-card-label">Utilisation actuelle</div><div class="simple-card-figure">—</div></div>', unsafe_allow_html=True)
+        else:
+            render_live_number_card(
+                "Utilisation actuelle",
+                [
+                    {
+                        "value": utilization.utilization_pct,
+                        "decimals": 0,
+                        "big": True,
+                        "suffix": " %",
+                        "sub_text": f"{utilization.open_position_count} position(s) en cours",
+                    }
+                ],
+                key="utilization",
+            )
 
 
 def render_positions_card(positions: list[OpenPosition]) -> None:
@@ -334,13 +357,23 @@ def render_reality_indicator() -> None:
     if report is None or report.trade_count == 0:
         return
     ratio = report.capture_ratio_pct
-    tone = "good" if ratio >= 50 else "warn" if ratio >= 0 else "bad"
-    st.markdown(
-        '<div class="simple-card"><div class="simple-card-label">Fiabilité de la simulation</div>'
-        f'<div class="simple-card-figure {tone}">{ratio:.0f} %</div>'
-        f'<div class="simple-card-sub">En moyenne, le robot conserve {ratio:.0f} % du gain initialement détecté '
-        "après simulation réaliste (frais, slippage, échecs d'exécution inclus).</div></div>",
-        unsafe_allow_html=True,
+    color = STATUS_GOOD if ratio >= 50 else STATUS_WARNING if ratio >= 0 else STATUS_CRITICAL
+    render_live_number_card(
+        "Fiabilité de la simulation",
+        [
+            {
+                "value": ratio,
+                "decimals": 0,
+                "big": True,
+                "suffix": " %",
+                "color": color,
+                "sub_text": (
+                    f"En moyenne, le robot conserve {ratio:.0f} % du gain initialement détecté "
+                    "après simulation réaliste (frais, slippage, échecs d'exécution inclus)."
+                ),
+            }
+        ],
+        key="reality_capture",
     )
 
 

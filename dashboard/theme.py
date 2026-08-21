@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 # --- Design tokens — validated dark palette (dataviz skill: references/palette.md) ---
 SURFACE = "#1a1a19"
@@ -366,6 +367,104 @@ def render_stat_cards(cards: list[dict]) -> None:
         parts.append("</div>")
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def render_live_number_card(label: str, rows: list[dict], *, key: str) -> None:
+    """A stat card whose numbers count smoothly from their previous value
+    to the new one, instead of the whole card re-rendering (Live Dashboard
+    addendum, user feedback: "les cartes doivent rester intactes, seuls les
+    chiffres s'actualisent, animation fluide, pas toute la carte").
+
+    Plain `st.markdown` text can't be tweened — there's no CSS mechanism to
+    animate arbitrary text content — so this renders one small,
+    self-contained HTML/JS component (an iframe, via
+    st.components.v1.html) per card. The label, background, and border are
+    baked into the SAME static HTML string every render (identical byte-
+    for-byte when nothing changed), so they never visibly change; only the
+    JS-driven `<span>` for each number moves, via requestAnimationFrame.
+
+    `rows`: each dict —
+      value: float (required)
+      decimals: int (default 2)
+      big: bool — the large hero figure (one row should set this) vs a
+           smaller sub-row (default False)
+      signed: bool — prepend "+" for a positive value, matching Python's
+              `:+.2f}` convention used everywhere else in this dashboard
+              (default False)
+      suffix: str, e.g. " $" or " %" (default "")
+      color: str hex/css color for this row's text (default INK_PRIMARY)
+      label: str | None — a small inline label before the number, e.g.
+             "Disponible maintenant :" (default None)
+      sub_text: str | None — small static text rendered under this row
+             (e.g. "12 gagnants · 3 perdants"). Not tweened — it's not a
+             single scalar — but still lives inside the same persistent
+             card, so it never causes the whole-card flash a separate
+             st.markdown call would (default None)
+    """
+    state_prefix = f"_live_prev_card_{key}_"
+    spans = []
+    scripts = []
+    height = 68  # card padding + label line
+    for i, row in enumerate(rows):
+        row_id = f"livecard_{key}_{i}"
+        value = row["value"]
+        previous = st.session_state.get(state_prefix + str(i), value)
+        st.session_state[state_prefix + str(i)] = value
+        big = row.get("big", False)
+        font_size = "2.4rem" if big else "0.95rem"
+        font_weight = "700" if big else "650"
+        color = row.get("color", INK_PRIMARY)
+        margin_top = "0px" if i == 0 else "6px"
+        prefix_label = f'<span style="color:{INK_SECONDARY};font-weight:500;">{row["label"]}</span> ' if row.get("label") else ""
+        spans.append(
+            f'<div style="margin-top:{margin_top};font-size:{font_size};font-weight:{font_weight};'
+            f'color:{color};line-height:1.2;font-family:{FONT_STACK};">'
+            f'{prefix_label}<span id="{row_id}"></span></div>'
+        )
+        if row.get("sub_text"):
+            spans.append(f'<div style="margin-top:4px;font-size:0.88rem;color:{INK_SECONDARY};font-family:{FONT_STACK};">{row["sub_text"]}</div>')
+            height += 20
+        signed = "true" if row.get("signed", False) else "false"
+        scripts.append(
+            f'tweenNumber(document.getElementById("{row_id}"), {previous!r}, {value!r}, 700, '
+            f'{row.get("decimals", 2)}, {signed}, {row.get("suffix", "")!r});'
+        )
+        height += 40 if big else 24
+
+    html = f"""
+    <div style="font-family:{FONT_STACK};background:{SURFACE};border:1px solid {BORDER};
+    border-radius:18px;padding:22px 24px;box-sizing:border-box;">
+      <div style="color:{INK_MUTED};font-size:0.8rem;font-weight:700;text-transform:uppercase;
+      letter-spacing:0.06em;margin-bottom:10px;">{label}</div>
+      {"".join(spans)}
+    </div>
+    <script>
+    function formatThousands(value, decimals) {{
+        let text = value.toFixed(decimals);
+        let neg = text.startsWith("-");
+        if (neg) text = text.slice(1);
+        let [intPart, decPart] = text.split(".");
+        intPart = intPart.replace(/\\B(?=(\\d{{3}})+(?!\\d))/g, " ");
+        return (neg ? "-" : "") + intPart + (decPart !== undefined ? "." + decPart : "");
+    }}
+    function tweenNumber(el, start, end, duration, decimals, signed, suffix) {{
+        if (!el) return;
+        const startTime = performance.now();
+        function ease(t) {{ return 1 - Math.pow(1 - t, 3); }}
+        function frame(now) {{
+            const t = Math.min(1, (now - startTime) / duration);
+            const current = start + (end - start) * ease(t);
+            let text = formatThousands(current, decimals);
+            if (signed && current >= 0) text = "+" + text;
+            el.textContent = text + suffix;
+            if (t < 1) requestAnimationFrame(frame);
+        }}
+        requestAnimationFrame(frame);
+    }}
+    {"".join(scripts)}
+    </script>
+    """
+    components.html(html, height=height)
 
 
 def style_fig(fig: go.Figure, height: int = 380) -> go.Figure:
