@@ -983,7 +983,7 @@ def render_reality_page() -> None:
         for t in tier_results:
             st.markdown(
                 f'<div class="simple-perf-row"><span class="k">{t.capital_tier_usd:,.0f} $ '
-                f'<span style="color:{INK_MUTED};">({t.n_filled} filled, {t.n_no_capital_available} sans capital)</span></span>'
+                f'<span style="color:{INK_MUTED};">({t.n_filled} filled · {t.n_no_capital_available} sans capital)</span></span>'
                 f'<span class="v">{t.total_net_profit_usd:+.2f} $</span></div>'.replace(",", " "),
                 unsafe_allow_html=True,
             )
