@@ -50,11 +50,12 @@ from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
 from app.onchain.chain_risk import ChainHealth, check_chain_health
-from app.onchain.constants import CROSS_DEX_CHAINS, DEX_VENUES
+from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES
 from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity
 from app.onchain.gas_engine import RpcGasProvider
 from app.onchain.market_data_provider import GeckoTerminalProvider
 from app.onchain.models import DexPool
+from app.onchain.multihop_arbitrage import build_token_graph, detect_multihop_opportunity
 from app.onchain.pool_discovery import discover_pools
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
@@ -220,11 +221,10 @@ async def dex_detection_loop() -> None:
                 logger.info("dex pool discovery: %s/%s — %d eligible pools", venue.chain, venue.dex, len(pools))
 
             scan_time = time.time()
+            all_chains = sorted({venue.chain for venue in DEX_VENUES})
             async with async_session_factory() as session:
-                for chain in CROSS_DEX_CHAINS:
+                for chain in all_chains:
                     venues_on_chain = [v for v in DEX_VENUES if v.chain == chain]
-                    if len(venues_on_chain) < 2:
-                        continue
 
                     # Chain Risk (spec section 30) — "If chain is degraded:
                     # increase risk buffer or stop new opportunities."
@@ -238,6 +238,8 @@ async def dex_detection_loop() -> None:
                         continue
 
                     chain_pools = [p for v in venues_on_chain for p in pools_by_venue[(v.chain, v.dex)]]
+                    if not chain_pools:
+                        continue
 
                     native_price_usd = _find_native_token_price_usd(chain_pools, chain)
                     if native_price_usd is None:
@@ -248,26 +250,48 @@ async def dex_detection_loop() -> None:
                         continue
                     gas_estimate = await _dex_gas_provider.estimate_gas_cost_usd(chain, native_price_usd)
 
-                    pools_by_pair: dict[tuple[str, str], list[DexPool]] = {}
-                    for pool in chain_pools:
-                        pair = tuple(sorted([pool.token0_symbol.upper(), pool.token1_symbol.upper()]))
-                        pools_by_pair.setdefault(pair, []).append(pool)
+                    new_opportunities: list = []
 
-                    for pools in pools_by_pair.values():
-                        for i in range(len(pools)):
-                            for j in range(i + 1, len(pools)):
-                                if pools[i].dex == pools[j].dex:
-                                    continue  # same-venue "arbitrage" isn't real — needs 2 distinct DEXs
-                                opp = detect_cross_dex_opportunity(
-                                    pools[i], pools[j], gas_estimate.gas_cost_usd, gas_estimate.gas_cost_usd
-                                )
-                                if opp is None:
-                                    continue
-                                observation = dex_opportunity_tracker.observe(opp, now=scan_time)
-                                if observation.is_new:
-                                    await save_opportunity(session, opp)
-                                else:
-                                    await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=None)
+                    # Cross-DEX Arbitrage (spec section 5) — needs 2+
+                    # distinct DEXs on this chain quoting the same pair.
+                    if len(venues_on_chain) >= 2:
+                        pools_by_pair: dict[tuple[str, str], list[DexPool]] = {}
+                        for pool in chain_pools:
+                            pair = tuple(sorted([pool.token0_symbol.upper(), pool.token1_symbol.upper()]))
+                            pools_by_pair.setdefault(pair, []).append(pool)
+
+                        for pools in pools_by_pair.values():
+                            for i in range(len(pools)):
+                                for j in range(i + 1, len(pools)):
+                                    if pools[i].dex == pools[j].dex:
+                                        continue  # same-venue "arbitrage" isn't real — needs 2 distinct DEXs
+                                    opp = detect_cross_dex_opportunity(
+                                        pools[i], pools[j], gas_estimate.gas_cost_usd, gas_estimate.gas_cost_usd
+                                    )
+                                    if opp is not None:
+                                        new_opportunities.append(opp)
+
+                    # Multi-Hop / DEX Triangular Arbitrage (spec sections 6,
+                    # 7) — a token graph over EVERY pool on this chain,
+                    # regardless of how many distinct DEXs contribute to
+                    # it (unlike cross-DEX above, a cycle can walk through
+                    # a single DEX's own pools, or mix DEXs — both are
+                    # equally atomic within one on-chain transaction). One
+                    # search per stablecoin base asset actually present in
+                    # this chain's discovered pools.
+                    graph = build_token_graph(chain_pools)
+                    base_assets_present = {p.token0_symbol.upper() for p in chain_pools} | {p.token1_symbol.upper() for p in chain_pools}
+                    for base_asset in base_assets_present & DEX_STABLECOIN_BASE_ASSETS:
+                        opp = detect_multihop_opportunity(graph, base_asset, DEFAULT_DEX_TRADE_SIZE_USD, gas_estimate.gas_cost_usd, chain)
+                        if opp is not None:
+                            new_opportunities.append(opp)
+
+                    for opp in new_opportunities:
+                        observation = dex_opportunity_tracker.observe(opp, now=scan_time)
+                        if observation.is_new:
+                            await save_opportunity(session, opp)
+                        else:
+                            await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=None)
 
                 for tracked in dex_opportunity_tracker.expire_stale(now=scan_time):
                     await close_opportunity_tracking(session, tracked, closed_at=scan_time)

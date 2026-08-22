@@ -83,3 +83,18 @@ NOMINAL_DEX_HOLDING_SECONDS = 20.0
 # GeckoTerminal's public (no API key) tier — respect it; a burst of
 # requests returns 429s, confirmed live while researching this feature.
 GECKOTERMINAL_MIN_REQUEST_INTERVAL_SECONDS = 2.5
+
+# Multi-Hop / DEX Triangular Arbitrage (spec sections 6, 7) — the base
+# asset a cycle starts and ends at must be a stablecoin, matching CEX
+# triangular's own convention (app.engines.triangular's TRIANGULAR_PATHS
+# all start from "USDT"). Search runs once per one of these actually
+# present in a given chain's discovered pools, not a single hardcoded one.
+DEX_STABLECOIN_BASE_ASSETS = {"USDC", "USDT", "FDUSD"}
+
+# A single representative trade size for multi-hop detection (spec section
+# 16's own tiered sweep is applied to cross-DEX opportunities via
+# compute_dex_depth_adjusted_edge; extending that same tiered sweep across
+# N-hop routes is a larger follow-up — see the V5.5 completion report —
+# not done for multi-hop yet, so this fixed size stands in for it, same
+# role app.config.constants.DEFAULT_OPPORTUNITY_CAPITAL_USD plays for CEX).
+DEFAULT_DEX_TRADE_SIZE_USD = 1_000.0
