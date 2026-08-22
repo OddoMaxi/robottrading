@@ -70,7 +70,13 @@ class DexTierResult:
 
 
 def evaluate_dex_capital_tier(
-    buy_pool: DexPool, sell_pool: DexPool, buy_price: float, sell_price: float, capital_usd: float, gas_cost_usd: float
+    buy_pool: DexPool,
+    sell_pool: DexPool,
+    buy_price: float,
+    sell_price: float,
+    capital_usd: float,
+    gas_cost_usd: float,
+    slippage_buffer_pct: float = SLIPPAGE_BUFFER_PCT,
 ) -> DexTierResult:
     """Walks both legs' AMM curves at one capital size — the DEX analogue
     of app.analytics.execution_depth.evaluate_capital_tier.
@@ -84,6 +90,11 @@ def evaluate_dex_capital_tier(
     with a real 1%-apart-priced pair, where every tested size came back a
     loss despite a genuine cross-pool price gap, because the calculation
     silently never multiplied by the price difference at all.
+
+    slippage_buffer_pct defaults to the module's own documented placeholder
+    (SLIPPAGE_BUFFER_PCT) — overridable so app.reporting.dex_stress_test
+    can replay real historical opportunities under an inflated assumption
+    (reality audit section 6) without duplicating this pricing math.
     """
     # Leg 1: spend capital_usd of asset_b on buy_pool to acquire asset_a —
     # filled_usd_leg1 is "value of asset_a acquired, valued at buy_pool's
@@ -102,7 +113,7 @@ def evaluate_dex_capital_tier(
     sell_fee = filled_usd_leg2 * (sell_pool.fee_pct / 100)
     final_usd = filled_usd_leg2 - sell_fee
 
-    slippage_cost = capital_usd * (SLIPPAGE_BUFFER_PCT / 100)
+    slippage_cost = capital_usd * (slippage_buffer_pct / 100)
     # MEV Risk (spec section 13) — scaled by how large this trade is
     # relative to the THINNER of the two pools (the more conservative,
     # higher-risk choice), not a flat assumption regardless of size.
@@ -140,8 +151,12 @@ def compute_dex_depth_adjusted_edge(
     gas_cost_usd: float,
     theoretical_edge_pct: float,
     test_tiers_usd: list[float] = DEX_CAPITAL_TEST_TIERS_USD,
+    slippage_buffer_pct: float = SLIPPAGE_BUFFER_PCT,
 ) -> DexDepthAdjustedEdge:
-    tiers = [evaluate_dex_capital_tier(buy_pool, sell_pool, buy_price, sell_price, size, gas_cost_usd) for size in test_tiers_usd]
+    tiers = [
+        evaluate_dex_capital_tier(buy_pool, sell_pool, buy_price, sell_price, size, gas_cost_usd, slippage_buffer_pct=slippage_buffer_pct)
+        for size in test_tiers_usd
+    ]
 
     profitable_tiers = [t for t in tiers if t.net_profit_usd > 0]
     optimal = max(profitable_tiers, key=lambda t: t.net_profit_usd, default=None)

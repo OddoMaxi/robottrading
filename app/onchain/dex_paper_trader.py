@@ -175,7 +175,7 @@ def revalidate_edge(opp: Opportunity, chain: str, rng) -> tuple[bool, float]:
     return revalidated_net_pct > 0, revalidated_net_pct
 
 
-def resize_at_attempt(opp: Opportunity, drift_pct: float, available_capital_usd: float, gas_cost_usd: float):
+def resize_at_attempt(opp: Opportunity, drift_pct: float, available_capital_usd: float, gas_cost_usd: float, slippage_buffer_pct: float | None = None):
     """Reality audit section 4: re-runs the SAME tiered capital-sizing
     sweep used at detection time (app.onchain.cross_dex_arbitrage's own
     Smart Position Sizing), but now against capital actually available in
@@ -216,9 +216,10 @@ def resize_at_attempt(opp: Opportunity, drift_pct: float, available_capital_usd:
     )
 
     tiers_capped_usd = sorted({size for size in DEX_CAPITAL_TEST_TIERS_USD if size <= available_capital_usd} | {available_capital_usd})
+    kwargs = {} if slippage_buffer_pct is None else {"slippage_buffer_pct": slippage_buffer_pct}
     edge = compute_dex_depth_adjusted_edge(
         buy_pool, sell_pool, buy_pool.price, sell_price_adjusted, gas_cost_usd,
-        theoretical_edge_pct=0.0, test_tiers_usd=tiers_capped_usd,
+        theoretical_edge_pct=0.0, test_tiers_usd=tiers_capped_usd, **kwargs,
     )
     if edge.optimal_capital_usd is None or edge.optimal_net_profit_usd is None or edge.optimal_net_profit_usd <= 0:
         return None
