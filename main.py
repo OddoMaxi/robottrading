@@ -59,6 +59,7 @@ from app.onchain.market_data_provider import GeckoTerminalProvider
 from app.onchain.models import DexPool
 from app.onchain.multihop_arbitrage import build_token_graph, detect_multihop_opportunity
 from app.onchain.pool_discovery import discover_pools
+from app.onchain.ranking import apply_master_ranking_score
 from app.opportunity.detector import OpportunityDetector
 from app.opportunity.tracker import OpportunityTracker
 from app.reporting.micro_live_readiness import build_micro_live_readiness
@@ -330,6 +331,16 @@ async def dex_detection_loop() -> None:
                         atomic_opp = as_atomic_opportunity(opp, atomic_result)
                         if atomic_opp.net_spread_pct is not None and atomic_opp.net_spread_pct >= MIN_NET_EDGE_PCT:
                             new_opportunities.append(atomic_opp)
+
+                    # Master Opportunity Ranker (spec sections 17-18) —
+                    # every DEX opportunity, regardless of which of the 4
+                    # strategies above found it, gets scored on the exact
+                    # same capital_velocity_score/return_per_minute_pct
+                    # scale a CEX opportunity already carries — the same
+                    # "Net Profit / Capital-Minute, not just absolute
+                    # profit" comparison, generalized rather than rebuilt.
+                    for opp in new_opportunities:
+                        apply_master_ranking_score(opp)
 
                     for opp in new_opportunities:
                         observation = dex_opportunity_tracker.observe(opp, now=scan_time)
