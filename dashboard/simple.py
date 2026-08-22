@@ -61,7 +61,7 @@ CLASSIFICATION_BADGES = {
     "interesting": ("🟡", "Opportunité correcte"),
 }
 
-NAV_PAGES = [("accueil", "Accueil"), ("trades", "Trades"), ("performance", "Performance"), ("parametres", "Paramètres")]
+NAV_PAGES = [("accueil", "Accueil"), ("trades", "Trades"), ("performance", "Performance"), ("reality", "Reality"), ("parametres", "Paramètres")]
 
 
 def describe_route(strategy: str, legs: list[dict]) -> str:
@@ -647,6 +647,7 @@ def render_accueil() -> None:
         st.session_state.simple_page = "performance"
         st.rerun()
     render_live_equity_chart()
+    render_reality_snapshot_card()
 
 
 # --- Trades page (spec section 16) ---
@@ -785,6 +786,241 @@ def render_parametres_page() -> None:
         st.rerun()
 
 
+# --- Reality page (V5/V5.5 Master Orchestration, user directive, 2026-08-22) ---
+
+
+def _reality_engine_status() -> tuple[str, str]:
+    """LIVE / DEGRADED / STOPPED / AUDIT — spec Part N: never show LIVE if
+    an essential component is stale."""
+    robot = data.get_robot_status_cached()
+    dq = data.get_data_quality_report_cached()
+    dex_live_count = sum(1 for status in dq.dex_chains.values() if status.value == "live")
+    if robot.health.value == "down" or dex_live_count == 0:
+        return "🔴 STOPPED", "simple-status-down"
+    if robot.health.value == "degraded" or dex_live_count < len(dq.dex_chains):
+        return "🟡 DEGRADED", "simple-status-degraded"
+    return "🟢 LIVE", "simple-status-running"
+
+
+def render_reality_snapshot_card() -> None:
+    """Spec Part AG — Accueil gets only a compact summary card + a link,
+    never the full Reality page inline."""
+    capital_state = data.get_global_capital_state_cached()
+    if capital_state is None:
+        return
+    funnel = data.get_master_frequency_report_cached(hours=24.0)
+    dex_funnels = data.get_dex_execution_funnel_cached(hours=24.0)
+    total_filled = sum(f.filled for f in dex_funnels)
+    total_attempts = sum(f.attempts for f in dex_funnels)
+    capture_pct = (total_filled / total_attempts * 100) if total_attempts else None
+
+    status_label, status_class = _reality_engine_status()
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">Reality Snapshot</div>', unsafe_allow_html=True)
+    render_stat_cards(
+        [
+            {"label": "Capital total", "value": _money(capital_state.total_capital_usd)},
+            {"label": "Capital disponible", "value": _money(capital_state.available_usd)},
+            {"label": "Capital utilisé", "value": _money(capital_state.total_reserved_usd), "sub": f"{capital_state.capital_utilization_pct:.1f} % utilisation"},
+            {"label": "Trades DEX filled (24h)", "value": f"{total_filled:,}".replace(",", " ")},
+            {"label": "Capture rate DEX (24h)", "value": f"{capture_pct:.0f} %" if capture_pct is not None else "—"},
+            {"label": "État moteur", "value": status_label},
+        ]
+    )
+    if st.button("Voir Reality →", key="accueil_to_reality", use_container_width=True):
+        st.session_state.simple_page = "reality"
+        st.rerun()
+
+
+def render_reality_page() -> None:
+    st.markdown('<div style="font-size:1.4rem;font-weight:700;margin:6px 0 14px 0;">Reality</div>', unsafe_allow_html=True)
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    baseline_hours = data.hours_since_baseline(now)
+    window_choice = st.radio(
+        "Fenêtre",
+        ["Depuis l'audit", "24h", "7j"],
+        horizontal=True,
+        key="reality_window",
+        label_visibility="collapsed",
+    )
+    hours = {"Depuis l'audit": baseline_hours, "24h": 24.0, "7j": 24.0 * 7}[window_choice]
+    if window_choice != "Depuis l'audit" and data.window_contains_pre_baseline_data(now, hours):
+        st.markdown(
+            '<div class="simple-card" style="border-color:#f59e0b;"><div class="simple-card-sub warn">'
+            "⚠️ Cette fenêtre remonte avant la correction de l'audit Reality "
+            f"({data.REALITY_BASELINE_AT.strftime('%Y-%m-%d %H:%M')} UTC) — elle peut contenir des données "
+            "DEX contaminées par le double comptage atomic/séquentiel corrigé depuis. "
+            "Utilisez « Depuis l'audit » pour les chiffres audités propres.</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    # --- Part N: Reality Engine Status ---
+    status_label, status_class = _reality_engine_status()
+    robot = data.get_robot_status_cached()
+    dq = data.get_data_quality_report_cached()
+    st.markdown(
+        f'<div class="simple-status-pill {status_class}" style="display:inline-block;margin-bottom:10px;">{status_label}</div>',
+        unsafe_allow_html=True,
+    )
+    render_stat_cards(
+        [
+            {"label": "CEX", "value": "🟢 LIVE" if robot.health.value == "running" else robot.health.value.upper()},
+            {"label": "DEX chains live", "value": f"{sum(1 for s in dq.dex_chains.values() if s.value == 'live')}/{len(dq.dex_chains)}"},
+        ]
+    )
+
+    # --- Part AP: kill switch banner ---
+    if robot.health.value == "down":
+        st.markdown(
+            '<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">'
+            "🔴 EXÉCUTION EN PAUSE — vérification de la santé du moteur en échec. Aucune nouvelle capitale n'est allouée.</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    # --- Part O: Global Capital Card ---
+    capital_state = data.get_global_capital_state_cached()
+    if capital_state is not None:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Capital global</div>', unsafe_allow_html=True)
+        render_stat_cards(
+            [
+                {"label": "Total", "value": _money(capital_state.total_capital_usd)},
+                {"label": "Disponible", "value": _money(capital_state.available_usd)},
+                {"label": "Réservé CEX", "value": _money(capital_state.reserved_cex_usd)},
+                {"label": "Réservé DEX", "value": _money(capital_state.reserved_dex_usd)},
+                {"label": "Total réservé", "value": _money(capital_state.total_reserved_usd)},
+                {"label": "Utilisation", "value": f"{capital_state.capital_utilization_pct:.1f} %"},
+                {"label": "CEX (portefeuille 5K)", "value": _money(capital_state.cex_total_capital_usd), "sub": f"dispo {_money(capital_state.cex_available_usd)}"},
+                {"label": "DEX (pool)", "value": _money(capital_state.dex_total_capital_usd), "sub": f"dispo {_money(capital_state.dex_available_usd)}"},
+            ]
+        )
+        st.caption(
+            "✓ Réconcilié : total = disponible + réservé" if capital_state.reconciled else "⚠️ NON RÉCONCILIÉ — total ≠ disponible + réservé"
+        )
+
+    # --- Part Q: Audited P&L ---
+    dex_funnels_baseline = data.get_dex_execution_funnel_cached(hours=baseline_hours)
+    dex_profit_baseline = sum(f.total_net_profit_usd for f in dex_funnels_baseline)
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">P&L simulé audité <span class="simple-sim-badge">PAPER TRADING</span></div>', unsafe_allow_html=True)
+    render_stat_cards(
+        [
+            {"label": "DEX — depuis l'audit", "value": f"{dex_profit_baseline:+.2f} $", "sub": f"{baseline_hours:.1f} h de données propres"},
+        ]
+    )
+
+    # --- Part R: Master Opportunity Funnel ---
+    with st.expander("Entonnoir global (détection → profit)", expanded=True):
+        master = data.get_master_frequency_report_cached(hours=hours)
+        render_stat_cards(
+            [
+                {"label": "Détections brutes", "value": f"{master.total_detected:,}".replace(",", " ")},
+                {"label": "Exécutables", "value": f"{master.total_executable:,}".replace(",", " ")},
+                {"label": "Exécutées (CEX)", "value": f"{master.total_executed:,}".replace(",", " ")},
+            ]
+        )
+        dup = data.get_duplicate_monitor_report_cached()
+        render_stat_cards(
+            [
+                {"label": "Détections DEX brutes (depuis audit)", "value": f"{dup.raw_detections:,}".replace(",", " ")},
+                {"label": "Doublons économiques éliminés", "value": f"{dup.duplicate_economic_events_eliminated:,}".replace(",", " ")},
+                {"label": "Opportunités économiques uniques", "value": f"{dup.unique_economic_opportunities:,}".replace(",", " ")},
+                {
+                    "label": "Faux P&L évité (estimation)",
+                    "value": f"{dup.estimated_fake_pnl_prevented_usd:+.2f} $" if dup.estimated_fake_pnl_prevented_usd is not None else "N/A",
+                    "sub": "projection sur expected_profit_usd — le doublon n'a jamais été exécuté",
+                },
+            ]
+        )
+
+    # --- Part S: rejection reasons ---
+    with st.expander("Pourquoi les opportunités ne deviennent pas des trades"):
+        rejections = data.get_global_rejection_breakdown_cached(hours=hours)
+        tracked = [r for r in rejections if r.tracked]
+        untracked = [r for r in rejections if not r.tracked]
+        for r in tracked:
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{r.reason} <span style="color:{INK_MUTED};">({r.engine})</span></span>'
+                f'<span class="v">{r.count:,}</span></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+        if untracked:
+            st.caption("Non suivies séparément (repliées dans le calcul de l'edge net à la détection) : " + ", ".join(r.reason for r in untracked))
+
+    # --- Part U: CEX vs DEX ---
+    with st.expander("CEX vs DEX"):
+        benchmark = data.get_benchmark_report_cached(hours=hours)
+        for label, eb in [("CEX", benchmark.cex_only), ("DEX", benchmark.dex_only), ("Combiné", benchmark.combined)]:
+            render_stat_cards(
+                [
+                    {"label": f"{label} — exécutables/h", "value": f"{eb.executable_per_hour:.2f}"},
+                    {"label": f"{label} — exécutées", "value": f"{eb.executed_opportunities:,}".replace(",", " ")},
+                    {"label": f"{label} — P&L net", "value": f"{eb.net_pnl_usd:+.2f} $"},
+                    {"label": f"{label} — durée moy.", "value": format_duration(eb.avg_holding_seconds)},
+                ]
+            )
+
+    # --- Part V/W/X/Y: strategy ranking, capital velocity, trades/hour, capture rate ---
+    with st.expander("Classement des stratégies (CEX + DEX)"):
+        ranking = data.get_master_strategy_ranking_cached(hours=hours)
+        for r in ranking:
+            velocity_str = f"{r.capital_velocity_usd_per_minute:+.4f} $/cap-min" if r.capital_velocity_usd_per_minute is not None else "—"
+            capture_str = f"{r.capture_rate_pct:.0f} %" if r.capture_rate_pct is not None else "—"
+            st.markdown(
+                f'<div class="simple-card"><div class="simple-card-label">{STRATEGY_LABELS.get(r.strategy, r.strategy)} '
+                f'<span style="color:{INK_MUTED};">({r.engine})</span></div>'
+                f'<div class="simple-card-sub">Profit net: <b>{r.net_profit_usd:+.2f} $</b> · Trades: {r.attempts:,} · Filled: {r.filled:,} '
+                f'· Capture: {capture_str} · Capital utilisé: {r.capital_used_usd:,.0f} $ · Vélocité: {velocity_str}</div></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+
+    # --- Part AC: capital tier replay ---
+    with st.expander("Réplication par palier de capital (audit historique)"):
+        st.caption("HISTORIQUE / SIMULATION DE RÉPLICATION — ce ne sont pas des rendements futurs garantis.")
+        tier_results = data.get_capital_tier_replay_results_cached()
+        if not tier_results:
+            st.caption("Pas assez de données depuis l'audit pour une réplication significative.")
+        for t in tier_results:
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{t.capital_tier_usd:,.0f} $ '
+                f'<span style="color:{INK_MUTED};">({t.n_filled} filled, {t.n_no_capital_available} sans capital)</span></span>'
+                f'<span class="v">{t.total_net_profit_usd:+.2f} $</span></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+
+    # --- Part AD: stress tests ---
+    with st.expander("Tests de stress"):
+        stress_results = data.get_stress_test_results_cached()
+        if not stress_results:
+            st.caption("Pas de données dex_cross avec instantané de prix depuis l'audit pour un test de stress.")
+        for s in stress_results:
+            capture_str = f"{s.capture_ratio_pct:.0f} %" if s.capture_ratio_pct is not None else "—"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{s.scenario}</span>'
+                f'<span class="v">{s.total_net_profit_usd:+.2f} $ · {capture_str} capture</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    # --- Part AE: data quality ---
+    with st.expander("Qualité des données"):
+        render_stat_cards(
+            [{"label": name.capitalize(), "value": "🟢 LIVE" if ok else "🔴 DOWN"} for name, ok in dq.cex_exchanges.items()]
+        )
+        render_stat_cards(
+            [{"label": chain, "value": status.value.upper()} for chain, status in dq.dex_chains.items()]
+        )
+
+    # --- Part AF: reliability ---
+    with st.expander("Fiabilité de la simulation"):
+        reliability = data.get_reality_reliability_report_cached()
+        render_stat_cards(
+            [
+                {"label": "Couverture replay (dex_cross)", "value": f"{reliability.replay_coverage_pct:.0f} %" if reliability.replay_coverage_pct is not None else "N/A", "sub": reliability.replay_coverage_note},
+                {"label": "Complétude des données DEX", "value": f"{reliability.dex_data_completeness_pct:.0f} %" if reliability.dex_data_completeness_pct is not None else "N/A"},
+                {"label": "Taux d'échec DEX", "value": f"{reliability.dex_attempt_failure_rate_pct:.0f} %" if reliability.dex_attempt_failure_rate_pct is not None else "N/A"},
+                {"label": "Score composite", "value": "N/A", "sub": reliability.composite_score_reason},
+            ]
+        )
+
+
 def render_simple_mode() -> None:
     page = st.session_state.get("simple_page", "accueil")
     render_header(page)
@@ -794,5 +1030,7 @@ def render_simple_mode() -> None:
         render_performance_page()
     elif page == "parametres":
         render_parametres_page()
+    elif page == "reality":
+        render_reality_page()
     else:
         render_accueil()

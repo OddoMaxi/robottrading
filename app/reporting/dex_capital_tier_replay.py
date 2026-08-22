@@ -19,8 +19,14 @@ silently.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from app.onchain.dex_paper_trader import DexCapitalPool, DexTradeStatus, attempt_dex_trade
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config.constants import Strategy
+from app.database.models import OpportunityRecord
+from app.onchain.dex_paper_trader import DEX_ATTEMPTABLE_STRATEGIES, DexCapitalPool, DexTradeStatus, attempt_dex_trade
 from app.opportunity.models import Opportunity
 
 CAPITAL_TIERS_USD = [1_000.0, 2_500.0, 5_000.0, 10_000.0, 25_000.0]
@@ -92,3 +98,47 @@ def replay_across_tiers(
     the SAME random draws (fill-probability rolls, revalidation drift) —
     isolating capital-tier effects from run-to-run randomness."""
     return [replay_at_capital_tier(opportunities, tier, gas_cost_usd_by_chain, default_gas_cost_usd, rng_factory()) for tier in tiers_usd]
+
+
+_STRATEGY_BY_VALUE = {s.value: s for s in Strategy}
+
+
+async def fetch_deduplicated_opportunities_since(session: AsyncSession, since: datetime) -> list[Opportunity]:
+    """Live-data source for the dashboard's Capital-Tier Replay panel
+    (spec Part AC) — never hardcode a past manual run's numbers. Since
+    main.py's duplicate_economic_event fix (app.reporting.reality_baseline.
+    REALITY_BASELINE_AT) now marks the lower-EV twin of every duplicate
+    pair live at detection time, deduplication here is just excluding that
+    rejection_reason — no self-join reconstruction needed, unlike the
+    audit's original one-off historical analysis of PRE-fix data."""
+    rows = (
+        await session.execute(
+            select(
+                OpportunityRecord.id, OpportunityRecord.strategy, OpportunityRecord.symbol, OpportunityRecord.legs,
+                OpportunityRecord.capital_usd, OpportunityRecord.realistic_executable_edge_pct,
+                OpportunityRecord.execution_fill_probability, OpportunityRecord.detected_at,
+            ).where(
+                OpportunityRecord.strategy.in_(DEX_ATTEMPTABLE_STRATEGIES),
+                OpportunityRecord.detected_at >= since,
+                OpportunityRecord.capital_usd.is_not(None),
+                OpportunityRecord.realistic_executable_edge_pct.is_not(None),
+                OpportunityRecord.rejection_reason.is_distinct_from("duplicate_economic_event"),
+            )
+        )
+    ).all()
+    opportunities = []
+    for id_, strategy, symbol, legs, capital_usd, edge_pct, fill_prob, detected_at in rows:
+        opportunities.append(
+            Opportunity(
+                strategy=_STRATEGY_BY_VALUE.get(strategy, strategy),
+                symbol=symbol,
+                legs=legs or [],
+                gross_spread_pct=0.0,
+                capital_usd=float(capital_usd),
+                realistic_executable_edge_pct=float(edge_pct),
+                execution_fill_probability=float(fill_prob) if fill_prob is not None else 1.0,
+                detected_at=detected_at.timestamp(),
+                id=id_,
+            )
+        )
+    return opportunities

@@ -7,6 +7,7 @@ the FastAPI app's long-lived engine).
 """
 
 import asyncio
+import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +31,15 @@ from app.reporting.holding_time_performance import (
     build_holding_time_distribution,
     build_holding_time_performance,
 )
+from app.reporting.data_quality import DataQualityReport, build_data_quality_report
+from app.reporting.dex_capital_tier_replay import CapitalTierReplayResult, fetch_deduplicated_opportunities_since, replay_across_tiers
+from app.reporting.dex_stress_test import ALL_SCENARIOS, StressScenarioResult, fetch_dex_cross_opportunities_with_price_snapshot, simulate_stress_scenario
+from app.reporting.duplicate_monitor import DuplicateMonitorReport, build_duplicate_monitor_report
+from app.reporting.global_capital import GlobalCapitalState, build_global_capital_state
+from app.reporting.global_rejection_breakdown import RejectionReasonRow, build_global_rejection_breakdown
+from app.reporting.master_strategy_ranking import StrategyPerformance, build_master_strategy_ranking
+from app.reporting.reality_baseline import REALITY_BASELINE_AT, hours_since_baseline, window_contains_pre_baseline_data
+from app.reporting.reality_reliability import RealityReliabilityReport, build_reality_reliability_report
 from app.reporting.rotation import RotationReport, build_rotation_report
 from app.reporting.simple_summary import (
     CapitalUtilization,
@@ -622,3 +632,146 @@ async def fetch_dex_execution_funnel(hours: float = 24.0) -> list[DexStrategyFun
 @st.cache_data(ttl=15, show_spinner=False)
 def get_dex_execution_funnel_cached(hours: float = 24.0) -> list[DexStrategyFunnel]:
     return asyncio.run(fetch_dex_execution_funnel(hours))
+
+
+# --- Reality Dashboard (V5/V5.5 Master Orchestration, user directive, 2026-08-22) ---
+
+DEX_PAPER_TRADING_CAPITAL_USD = 5_000.0  # mirrors main.py / app.reporting.global_capital — see that module's docstring
+
+
+async def fetch_global_capital_state() -> GlobalCapitalState | None:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            portfolio = await _get_reference_portfolio(session)
+            if portfolio is None:
+                return None
+            return await build_global_capital_state(session, portfolio.id, float(portfolio.initial_capital_usd), DEX_PAPER_TRADING_CAPITAL_USD)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_global_capital_state_cached() -> GlobalCapitalState | None:
+    return asyncio.run(fetch_global_capital_state())
+
+
+async def fetch_master_strategy_ranking(hours: float = 24.0) -> list[StrategyPerformance]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_master_strategy_ranking(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_master_strategy_ranking_cached(hours: float = 24.0) -> list[StrategyPerformance]:
+    return asyncio.run(fetch_master_strategy_ranking(hours))
+
+
+async def fetch_duplicate_monitor_report() -> DuplicateMonitorReport:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_duplicate_monitor_report(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_duplicate_monitor_report_cached() -> DuplicateMonitorReport:
+    return asyncio.run(fetch_duplicate_monitor_report())
+
+
+async def fetch_global_rejection_breakdown(hours: float = 24.0) -> list[RejectionReasonRow]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_global_rejection_breakdown(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_global_rejection_breakdown_cached(hours: float = 24.0) -> list[RejectionReasonRow]:
+    return asyncio.run(fetch_global_rejection_breakdown(hours))
+
+
+async def fetch_data_quality_report() -> DataQualityReport:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_data_quality_report(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_data_quality_report_cached() -> DataQualityReport:
+    return asyncio.run(fetch_data_quality_report())
+
+
+async def fetch_reality_reliability_report() -> RealityReliabilityReport:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_reality_reliability_report(session)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_reality_reliability_report_cached() -> RealityReliabilityReport:
+    return asyncio.run(fetch_reality_reliability_report())
+
+
+DEX_GAS_BY_CHAIN_USD = {"solana": 0.005, "eth": 5.0, "bsc": 0.30}
+
+
+async def fetch_stress_test_results() -> list[StressScenarioResult]:
+    """Live-computed against whatever dex_cross opportunities exist since
+    the Reality Baseline — never the audit's original one-off manual run
+    hardcoded (spec Part AD's own rule)."""
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            opps = await fetch_dex_cross_opportunities_with_price_snapshot(session, REALITY_BASELINE_AT)
+            if not opps:
+                return []
+            return [simulate_stress_scenario(opps, scenario, base_gas_cost_usd=0.005, rng=random.Random(2026)) for scenario in ALL_SCENARIOS]
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_stress_test_results_cached() -> list[StressScenarioResult]:
+    return asyncio.run(fetch_stress_test_results())
+
+
+async def fetch_capital_tier_replay_results() -> list[CapitalTierReplayResult]:
+    """Live-computed against every deduplicated opportunity since the
+    Reality Baseline, replayed through the real, fixed attempt_dex_trade
+    pipeline — never hardcoded (spec Part AC's own rule)."""
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            opps = await fetch_deduplicated_opportunities_since(session, REALITY_BASELINE_AT)
+            if not opps:
+                return []
+            return replay_across_tiers(opps, DEX_GAS_BY_CHAIN_USD, default_gas_cost_usd=1.0, rng_factory=lambda: random.Random(2026))
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_capital_tier_replay_results_cached() -> list[CapitalTierReplayResult]:
+    return asyncio.run(fetch_capital_tier_replay_results())

@@ -24,7 +24,12 @@ module fabricating a number silently.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database.models import OpportunityRecord
 from app.onchain.constants import SLIPPAGE_BUFFER_PCT
 from app.onchain.cross_dex_arbitrage import evaluate_dex_capital_tier
 from app.onchain.dex_paper_trader import PRICE_DRIFT_STD_PCT_PER_SQRT_SECOND
@@ -149,3 +154,21 @@ def simulate_stress_scenario(
         avg_net_pct=(sum(net_pcts) / len(net_pcts)) if net_pcts else None,
         capture_ratio_pct=(n_profitable / considered * 100) if considered else None,
     )
+
+
+async def fetch_dex_cross_opportunities_with_price_snapshot(session: AsyncSession, since: datetime) -> list[dict]:
+    """Live-data source for the dashboard's Stress Test panel (spec Part
+    AD) — never hardcode a past manual run's numbers; this always reflects
+    whatever dex_cross opportunities actually exist in the ledger right
+    now. Same 2-leg, price/tvl/fee-snapshot scope limit as the rest of
+    this module."""
+    rows = (
+        await session.execute(
+            select(OpportunityRecord.legs, OpportunityRecord.capital_usd).where(
+                OpportunityRecord.strategy == "dex_cross",
+                OpportunityRecord.detected_at >= since,
+                OpportunityRecord.capital_usd.is_not(None),
+            )
+        )
+    ).all()
+    return [{"legs": legs, "capital_usd": float(capital_usd)} for legs, capital_usd in rows if legs and len(legs) == 2 and "price" in legs[0]]
