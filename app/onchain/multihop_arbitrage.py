@@ -40,7 +40,12 @@ import uuid
 from dataclasses import dataclass, field
 
 from app.config.constants import Strategy
-from app.onchain.constants import MEV_BUFFER_PCT, MIN_NET_EDGE_PCT, NOMINAL_DEX_HOLDING_SECONDS, SLIPPAGE_BUFFER_PCT
+from app.onchain.constants import (
+    DEX_CAPITAL_TEST_TIERS_USD,
+    MIN_NET_EDGE_PCT,
+    NOMINAL_DEX_HOLDING_SECONDS,
+    SLIPPAGE_BUFFER_PCT,
+)
 from app.onchain.cross_dex_arbitrage import estimate_amm_output_usd
 from app.onchain.execution_model import build_execution_model
 from app.onchain.mev_risk import compute_mev_risk_score, mev_buffer_pct_for_risk
@@ -158,6 +163,50 @@ def simulate_route(
     return RouteResult(hops=hops, input_usd=input_usd, output_usd=output_usd, net_profit_usd=net_profit_usd, net_return_pct=net_return_pct)
 
 
+@dataclass(slots=True)
+class RouteDepthAdjustedEdge:
+    """Smart Position Sizing for a multi-hop route (spec section 16) — same
+    shape as app.onchain.cross_dex_arbitrage.DexDepthAdjustedEdge: walk a
+    spread of capital tiers, find the size that maximizes real dollar
+    profit (not the best %), and the size where profit crosses back to
+    zero. This was the piece flagged incomplete in the prior V5.5 report
+    (multi-hop used a single fixed size); completed here rather than left
+    as a known gap."""
+
+    tiers: list[RouteResult]
+    optimal_result: RouteResult | None
+    max_profitable_capital_usd: float | None
+
+
+def _interpolate_route_zero_crossing(last_profitable: RouteResult, first_unprofitable: RouteResult) -> float:
+    profit_delta = first_unprofitable.net_profit_usd - last_profitable.net_profit_usd
+    if profit_delta == 0:
+        return last_profitable.input_usd
+    capital_delta = first_unprofitable.input_usd - last_profitable.input_usd
+    fraction = -last_profitable.net_profit_usd / profit_delta
+    return last_profitable.input_usd + fraction * capital_delta
+
+
+def compute_route_depth_adjusted_edge(
+    hops: list[RouteHop], gas_cost_usd: float, chain: str, min_pool_tvl_usd_in_route: float, test_tiers_usd: list[float] = DEX_CAPITAL_TEST_TIERS_USD
+) -> RouteDepthAdjustedEdge:
+    tiers = [r for size in test_tiers_usd if (r := simulate_route(hops, size, gas_cost_usd, chain, min_pool_tvl_usd_in_route)) is not None]
+
+    profitable_tiers = [t for t in tiers if t.net_profit_usd > 0]
+    optimal = max(profitable_tiers, key=lambda t: t.net_profit_usd, default=None)
+
+    max_profitable_capital_usd: float | None = None
+    if optimal is not None:
+        larger_tiers = sorted((t for t in tiers if t.input_usd > optimal.input_usd), key=lambda t: t.input_usd)
+        first_unprofitable = next((t for t in larger_tiers if t.net_profit_usd <= 0), None)
+        if first_unprofitable is not None:
+            max_profitable_capital_usd = _interpolate_route_zero_crossing(optimal, first_unprofitable)
+        else:
+            max_profitable_capital_usd = larger_tiers[-1].input_usd if larger_tiers else optimal.input_usd
+
+    return RouteDepthAdjustedEdge(tiers=tiers, optimal_result=optimal, max_profitable_capital_usd=max_profitable_capital_usd)
+
+
 def detect_multihop_opportunity(
     graph: dict[str, list[tuple[str, DexPool]]],
     base_asset: str,
@@ -166,27 +215,33 @@ def detect_multihop_opportunity(
     chain: str,
     max_hops: int = MAX_ROUTE_LENGTH,
 ) -> Opportunity | None:
-    """Searches every cycle up to max_hops from base_asset and returns the
-    single best one, if any clears MIN_NET_EDGE_PCT — same "not a real
-    opportunity otherwise" rejection semantics as cross_dex_arbitrage.
-    Rejects outright (before pricing) on Block Latency (spec section 14) —
-    a multi-hop transaction needs the WHOLE chain of swaps included
-    together, so it's at least as latency-sensitive as a single cross-DEX
-    swap, never less.
+    """Searches every cycle up to max_hops from base_asset. For each cycle,
+    runs the full Smart Position Sizing tiered sweep (spec section 16) to
+    find ITS OWN optimal size — a cycle that's mediocre at the naive
+    `input_usd` default can still be the best real opportunity at a
+    different size, so cycles are compared by their own best result, not
+    all priced at one fixed size. Rejects if nothing clears MIN_NET_EDGE_PCT
+    at any tested size for any cycle — same "not a real opportunity
+    otherwise" rejection semantics as cross_dex_arbitrage. Rejects outright
+    (before pricing) on Block Latency (spec section 14) — a multi-hop
+    transaction needs the WHOLE chain of swaps included together, so it's
+    at least as latency-sensitive as a single cross-DEX swap, never less.
     """
     if not build_execution_model(chain).is_capturable():
         return None
 
     cycles = find_cycles(graph, base_asset, max_hops=max_hops)
     best: RouteResult | None = None
+    best_max_profitable_capital_usd: float | None = None
     for hops in cycles:
         min_pool_tvl = min(hop.pool.tvl_usd for hop in hops)
         gas_cost_usd = gas_cost_usd_per_hop * len(hops)
-        result = simulate_route(hops, input_usd, gas_cost_usd, chain, min_pool_tvl)
-        if result is None:
+        edge = compute_route_depth_adjusted_edge(hops, gas_cost_usd, chain, min_pool_tvl)
+        if edge.optimal_result is None:
             continue
-        if best is None or result.net_profit_usd > best.net_profit_usd:
-            best = result
+        if best is None or edge.optimal_result.net_profit_usd > best.net_profit_usd:
+            best = edge.optimal_result
+            best_max_profitable_capital_usd = edge.max_profitable_capital_usd
 
     if best is None or best.net_return_pct < MIN_NET_EDGE_PCT:
         return None
@@ -213,7 +268,7 @@ def detect_multihop_opportunity(
         depth_adjusted_edge_pct=best.net_return_pct,
         realistic_executable_edge_pct=best.net_return_pct,
         optimal_capital_usd=best.input_usd,
-        max_profitable_capital_usd=None,  # a full tiered sweep across N-hop routes is a larger follow-up (see report) — not fabricated here
+        max_profitable_capital_usd=best_max_profitable_capital_usd,
         capital_is_liquidity_capped=True,
         detected_at=time.time(),
         id=uuid.uuid4(),

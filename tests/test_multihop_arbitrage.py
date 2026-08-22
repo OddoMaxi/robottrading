@@ -108,8 +108,31 @@ def test_detect_multihop_opportunity_selects_the_profitable_direction_and_tags_t
     assert opp is not None
     assert opp.strategy == Strategy.DEX_TRIANGULAR
     assert opp.symbol == "USDC->ETH->SOL->USDC"
-    assert opp.capital_usd == 1000.0
+    # Smart Position Sizing (spec section 16, completed for multi-hop) — this
+    # fixture's pools are deep ($50M) relative to the tested tiers, so
+    # nothing degrades within the tested range and the optimal size
+    # correctly lands on the largest tested tier, not the naive $1,000
+    # `input_usd` argument (which is now only a starting-point default, not
+    # the final priced size).
+    assert opp.capital_usd == 10_000.0
+    assert opp.optimal_capital_usd == 10_000.0
+    assert opp.max_profitable_capital_usd is not None
     assert opp.expected_profit_usd > 0
+
+
+def test_detect_multihop_opportunity_sizing_finds_an_interior_optimum_when_depth_is_limited():
+    """The exact scenario from the user's own worked example: profit rises
+    then falls with size, so the optimal size must be interior, not the
+    largest or smallest tested tier."""
+    p1 = _pool("uniswap_v3", "ETH", "USDC", 2500.00, tvl=200_000.0, pid="thin1")
+    p2 = _pool("uniswap_v3", "ETH", "SOL", 27.0, tvl=200_000.0, pid="thin2")
+    p3 = _pool("uniswap_v3", "SOL", "USDC", 95.00, tvl=200_000.0, pid="thin3")
+    graph = build_token_graph([p1, p2, p3])
+    opp = detect_multihop_opportunity(graph, "USDC", 1000.0, gas_cost_usd_per_hop=0.5, chain="eth")
+    assert opp is not None
+    assert opp.capital_usd < 10_000.0  # not the largest tier — thin pools degrade before that
+    assert opp.capital_usd > 10.0  # not the smallest tier either — real profit exists at meaningful size
+    assert opp.max_profitable_capital_usd is not None
 
 
 def test_detect_multihop_opportunity_no_cycle_found_returns_none():
