@@ -111,6 +111,36 @@ def test_evaluate_shadow_decision_different_symbol_does_not_collide():
     assert other_symbol_decision.outcome == MasterOutcome.ALLOCATE
 
 
+def test_evaluate_shadow_decision_never_position_gates_dex_opportunities():
+    """Regression: found via direct verification against the safety-
+    critical "OLD approved, MASTER rejected" metric during the second
+    Shadow Mode validation — DEX opportunities also carry a non-None
+    holding_period_seconds (their own DexCapitalPool lock duration, an
+    unrelated concept), but app.execution.validator.validate() (the real
+    position_already_open gate) is exclusively called from main.py's CEX
+    detection_loop. DEX has no such gate in the real system — applying it
+    incorrectly rejected two `dex_cross` allocations the real DEX engine
+    had actually filled."""
+    ledger = ShadowCapitalLedger(total_capital_usd=10_000.0)
+    tracker = ShadowOpenPositionTracker()
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    dex_opp_1 = _opp(engine=Engine.DEX, strategy="dex_cross", symbol="SOL/USDC", legs=[{"chain": "solana", "exchange": "raydium"}], holding_period_seconds=20.0)
+    first = evaluate_shadow_decision(dex_opp_1, ledger, tracker, now)
+    assert first.outcome == MasterOutcome.ALLOCATE
+
+    from datetime import timedelta
+
+    dex_opp_2 = _opp(
+        engine=Engine.DEX, strategy="dex_cross", symbol="SOL/USDC", legs=[{"chain": "solana", "exchange": "raydium"}],
+        holding_period_seconds=20.0, detected_at=now + timedelta(seconds=1),
+    )
+    second = evaluate_shadow_decision(dex_opp_2, ledger, tracker, now + timedelta(seconds=1))
+    # Must NOT be rejected for position_already_open — DEX has no such
+    # concept; it may still be capped by capital, but never by this gate.
+    assert second.outcome != MasterOutcome.REJECT_POSITION_ALREADY_OPEN
+
+
 def test_evaluate_shadow_decision_no_holding_period_skips_position_gating():
     """An opportunity with holding_period_seconds=None (shouldn't exist
     in practice for CEX, but defensively) must not crash the position

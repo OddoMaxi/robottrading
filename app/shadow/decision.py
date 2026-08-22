@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime
 
 from app.shadow.ledger import ShadowCapitalLedger
-from app.shadow.models import MasterDecision, MasterOutcome, ShadowOpportunitySummary
+from app.shadow.models import Engine, MasterDecision, MasterOutcome, ShadowOpportunitySummary
 from app.shadow.positions import ShadowOpenPositionTracker, position_key_for
 from app.shadow.ranker import compute_expected_value_usd, compute_master_rank_score
 
@@ -57,8 +57,15 @@ def evaluate_shadow_decision(
     # app.execution.validator.validate()'s own position_already_open gate
     # — checked BEFORE capital, matching the real gate's own early exit,
     # since an already-open position is rejected regardless of how much
-    # capital happens to be free.
-    if opp.holding_period_seconds is not None:
+    # capital happens to be free. CEX ONLY: found via direct verification
+    # against the "OLD approved, MASTER rejected" safety metric — DEX
+    # opportunities also carry a non-None holding_period_seconds (their
+    # own capital-lock duration for DexCapitalPool, an unrelated concept),
+    # but app.execution.validator.validate() is exclusively called from
+    # main.py's CEX detection_loop — DEX has no position_already_open gate
+    # in the real system at all, so applying this to DEX rejected
+    # allocations the real engine would have approved.
+    if opp.engine == Engine.CEX and opp.holding_period_seconds is not None:
         position_key = position_key_for(opp.strategy, opp.legs, opp.symbol)
         if position_key is not None and position_tracker.is_open(position_key, now_epoch):
             return MasterDecision(
@@ -125,7 +132,7 @@ def evaluate_shadow_decision(
     ev_scaled = ev * (capital_requested / opp.capital_usd)
     ledger.resolve_pnl(ev_scaled)
 
-    if opp.holding_period_seconds is not None:
+    if opp.engine == Engine.CEX and opp.holding_period_seconds is not None:
         position_key = position_key_for(opp.strategy, opp.legs, opp.symbol)
         if position_key is not None:
             position_tracker.open_position(position_key, now_epoch, opp.holding_period_seconds)
