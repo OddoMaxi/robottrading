@@ -9,6 +9,7 @@ words for exactly this gate.
 from app.onchain.constants import MIN_POOL_AGE_HOURS, MIN_POOL_TVL_USD, WHITELISTED_SYMBOLS
 from app.onchain.market_data_provider import DEXMarketDataProvider
 from app.onchain.models import DexPool
+from app.onchain.token_safety import is_token_safety_acceptable
 
 
 def _is_eligible(pool: DexPool) -> bool:
@@ -22,6 +23,13 @@ def _is_eligible(pool: DexPool) -> bool:
     # extreme-spread pools (spec section 4) — a pool priced at literally
     # zero or an absurd outlier is a data artifact, not a real market.
     if pool.price <= 0:
+        return False
+    # Token Safety Filter (spec section 31) — the checks above are already
+    # a hard whitelist gate; this additionally scores liquidity/age/activity
+    # together rather than trusting any single one alone (a pool can clear
+    # every individual floor above by a hair and still be a weak overall
+    # market).
+    if not is_token_safety_acceptable(pool):
         return False
     return True
 

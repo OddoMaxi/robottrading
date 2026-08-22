@@ -49,6 +49,7 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
+from app.onchain.chain_risk import ChainHealth, check_chain_health
 from app.onchain.constants import CROSS_DEX_CHAINS, DEX_VENUES
 from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity
 from app.onchain.gas_engine import RpcGasProvider
@@ -224,6 +225,18 @@ async def dex_detection_loop() -> None:
                     venues_on_chain = [v for v in DEX_VENUES if v.chain == chain]
                     if len(venues_on_chain) < 2:
                         continue
+
+                    # Chain Risk (spec section 30) — "If chain is degraded:
+                    # increase risk buffer or stop new opportunities."
+                    # Chosen here: stop new opportunities outright on this
+                    # chain for this cycle rather than trade against a gas
+                    # assumption that's already stale, or against a
+                    # network too congested to trust the RPC-fetched price.
+                    chain_health = await check_chain_health(chain)
+                    if chain_health in (ChainHealth.DEGRADED, ChainHealth.UNAVAILABLE):
+                        logger.warning("dex detection: chain=%s health=%s — stopping new opportunities on it this cycle", chain, chain_health.value)
+                        continue
+
                     chain_pools = [p for v in venues_on_chain for p in pools_by_venue[(v.chain, v.dex)]]
 
                     native_price_usd = _find_native_token_price_usd(chain_pools, chain)
