@@ -20,6 +20,7 @@ from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.benchmark import BenchmarkReport, build_benchmark_report
 from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.dex_execution_funnel import DexStrategyFunnel, build_dex_execution_funnel
 from app.reporting.dex_reality import DexRealityCaptureReport, build_dex_reality_capture
 from app.reporting.execution_funnel import ExecutionFunnelReport, build_execution_funnel
 from app.reporting.master_funnel import MasterFrequencyReport, build_master_frequency_report
@@ -606,3 +607,18 @@ async def fetch_benchmark_report(hours: float = 24.0) -> BenchmarkReport:
 @st.cache_data(ttl=60, show_spinner=False)
 def get_benchmark_report_cached(hours: float = 24.0) -> BenchmarkReport:
     return asyncio.run(fetch_benchmark_report(hours))
+
+
+async def fetch_dex_execution_funnel(hours: float = 24.0) -> list[DexStrategyFunnel]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_dex_execution_funnel(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_dex_execution_funnel_cached(hours: float = 24.0) -> list[DexStrategyFunnel]:
+    return asyncio.run(fetch_dex_execution_funnel(hours))

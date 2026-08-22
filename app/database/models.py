@@ -212,6 +212,36 @@ class SimulatedTradeRecord(Base):
     executed_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class DexSimulatedTradeRecord(Base):
+    """DEX-specific execution attempts (Multi-Market Opportunity Engine,
+    V5.5 continuation, user directive, 2026-08-22) — deliberately its own
+    table, not simulated_trades: that table is FK'd to virtual_portfolios
+    (CEX's real capital ledger), and DEX must never touch it (spec section
+    39). Own capital pool (app.onchain.dex_paper_trader.DexCapitalPool),
+    own ledger here, same isolation guarantee proven for detection now
+    extended to execution."""
+
+    __tablename__ = "dex_simulated_trades"
+    __table_args__ = (Index("ix_dex_simulated_trades_execution_complete_at", "execution_complete_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("opportunities.id"), index=True)
+    strategy: Mapped[str] = mapped_column(index=True)
+    symbol: Mapped[str]
+    chain: Mapped[str]
+    status: Mapped[str]
+    capital_usd: Mapped[float] = mapped_column(Numeric(20, 2))
+    net_profit_usd: Mapped[float] = mapped_column(Numeric(20, 4))
+    revalidated_net_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    detection_at: Mapped[datetime]
+    validation_at: Mapped[datetime]
+    execution_attempt_at: Mapped[datetime]
+    execution_complete_at: Mapped[datetime]
+    detection_to_validation_ms: Mapped[float] = mapped_column(Numeric(12, 3))
+    validation_to_execution_ms: Mapped[float] = mapped_column(Numeric(12, 3))
+    total_execution_ms: Mapped[float] = mapped_column(Numeric(12, 3))
+
+
 class Balance(Base):
     __tablename__ = "balances"
     __table_args__ = (UniqueConstraint("portfolio_id", "exchange_id", "asset_id"),)

@@ -4,6 +4,7 @@ pollers, and the detection/paper-trading loop as background asyncio tasks.
 
 import asyncio
 import logging
+import random
 import time
 from contextlib import asynccontextmanager
 
@@ -36,6 +37,7 @@ from app.database.repository import (
     create_all_tables,
     get_or_create_exchange,
     get_or_create_portfolio,
+    save_dex_trade_attempt,
     save_opportunity,
     save_price_snapshots,
     save_simulated_trade,
@@ -53,6 +55,7 @@ from app.onchain.atomic_arbitrage import as_atomic_opportunity, simulate_atomic_
 from app.onchain.chain_risk import ChainHealth, check_chain_health
 from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES, MIN_NET_EDGE_PCT
 from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity, order_buy_sell_pools
+from app.onchain.dex_paper_trader import DEX_ATTEMPTABLE_STRATEGIES, DexCapitalPool, attempt_dex_trade
 from app.onchain.flash_loan_research import FLASH_LOAN_EVM_CHAINS, build_flash_loan_opportunity, find_best_flash_loan_size
 from app.onchain.gas_engine import RpcGasProvider
 from app.onchain.market_data_provider import GeckoTerminalProvider
@@ -189,6 +192,14 @@ DEX_POLL_INTERVAL_SECONDS = 45.0
 dex_opportunity_tracker = OpportunityTracker()
 _dex_market_data_provider = GeckoTerminalProvider()
 _dex_gas_provider = RpcGasProvider()
+
+# DEX Paper Trading (user directive, 2026-08-22) — a dedicated, isolated
+# shadow capital pool, same size tier as CEX's own "5K" reference
+# portfolio for comparability, entirely separate money/ledger (spec
+# section 39). flash_loan_research never touches this (spec section 35).
+DEX_PAPER_TRADING_CAPITAL_USD = 5_000.0
+dex_capital_pool = DexCapitalPool(total_capital_usd=DEX_PAPER_TRADING_CAPITAL_USD)
+_dex_paper_trading_rng = random.Random()
 
 _NATIVE_TOKEN_SYMBOL_BY_CHAIN = {"eth": "WETH", "bsc": "WBNB", "solana": "SOL"}
 
@@ -348,6 +359,19 @@ async def dex_detection_loop() -> None:
                             await save_opportunity(session, opp)
                         else:
                             await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=None)
+                            continue  # a continuation of an already-attempted signal — never re-attempt it every cycle
+
+                        # DEX Paper Trading (user directive, 2026-08-22) —
+                        # every GENUINELY NEW executable opportunity gets a
+                        # real attempt against the shared DEX capital pool.
+                        # flash_loan_research is deliberately excluded
+                        # (spec section 35: never reduce available own
+                        # capital — that pool represents real own capital
+                        # shadow trading, borrowed amounts are a separate
+                        # research question).
+                        if opp.strategy in DEX_ATTEMPTABLE_STRATEGIES:
+                            attempt = attempt_dex_trade(opp, dex_capital_pool, gas_estimate.gas_cost_usd, _dex_paper_trading_rng, now=scan_time)
+                            await save_dex_trade_attempt(session, attempt)
 
                 for tracked in dex_opportunity_tracker.expire_stale(now=scan_time):
                     await close_opportunity_tracking(session, tracked, closed_at=scan_time)

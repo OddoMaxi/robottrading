@@ -6,7 +6,16 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import Base, Exchange, OpportunityRecord, PriceSnapshot, SimulatedTradeRecord, SystemEvent, VirtualPortfolioRecord
+from app.database.models import (
+    Base,
+    DexSimulatedTradeRecord,
+    Exchange,
+    OpportunityRecord,
+    PriceSnapshot,
+    SimulatedTradeRecord,
+    SystemEvent,
+    VirtualPortfolioRecord,
+)
 from app.database.session import engine
 from app.market_data.normalizer import NormalizedQuote
 from app.opportunity.models import Opportunity
@@ -190,6 +199,32 @@ async def save_simulated_trade(
         fees_usd=trade.fees_usd,
         slippage_usd=0.0,
         net_profit_usd=trade.net_profit_usd,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_dex_trade_attempt(session: AsyncSession, attempt) -> DexSimulatedTradeRecord:
+    """attempt: app.onchain.dex_paper_trader.DexTradeAttempt. Own table
+    (dex_simulated_trades), never simulated_trades — see that model's own
+    docstring for why."""
+    record = DexSimulatedTradeRecord(
+        opportunity_id=attempt.opportunity_id,
+        strategy=attempt.strategy,
+        symbol=attempt.symbol,
+        chain=attempt.chain,
+        status=attempt.status.value,
+        capital_usd=attempt.capital_usd,
+        net_profit_usd=attempt.net_profit_usd,
+        revalidated_net_pct=attempt.revalidated_net_pct,
+        detection_at=datetime.fromtimestamp(attempt.detection_timestamp, tz=UTC).replace(tzinfo=None),
+        validation_at=datetime.fromtimestamp(attempt.validation_timestamp, tz=UTC).replace(tzinfo=None),
+        execution_attempt_at=datetime.fromtimestamp(attempt.execution_attempt_timestamp, tz=UTC).replace(tzinfo=None),
+        execution_complete_at=datetime.fromtimestamp(attempt.execution_complete_timestamp, tz=UTC).replace(tzinfo=None),
+        detection_to_validation_ms=attempt.detection_to_validation_ms,
+        validation_to_execution_ms=attempt.validation_to_execution_ms,
+        total_execution_ms=attempt.total_execution_ms,
     )
     session.add(record)
     await session.flush()

@@ -868,6 +868,59 @@ def render_expert_mode() -> None:
         )
         st.markdown(f'<div class="simple-card">{dex_rows_html}</div>', unsafe_allow_html=True)
 
+        # DEX Execution Funnel — Detected -> ... -> Profitable/Losing (user
+        # directive, 2026-08-22) — every DEX opportunity classed
+        # "executable" now actually gets attempted against a real,
+        # isolated shadow capital pool (app.onchain.dex_paper_trader),
+        # never simulated_trades/VirtualPortfolio (spec section 39).
+        exec_funnels = data.get_dex_execution_funnel_cached(hours=24.0)
+        attemptable_funnels = [f for f in exec_funnels if f.strategy != "flash_loan_research"]
+        if attemptable_funnels:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Entonnoir d\'exécution DEX — du signal au profit réalisé (24h)</div>', unsafe_allow_html=True)
+            headers = ["Stratégie", "Détectées", "Net+", "Exéc.", "Tentées", "Filled", "Edge disparu", "Échoués", "Rentables", "Perdants", "Capital $", "Profit net $", "$/cap-min"]
+            rows_html = []
+            for f in sorted(attemptable_funnels, key=lambda f: f.attempts, reverse=True):
+                capital_minute_cell = (
+                    f'{f.net_profit_per_capital_minute_usd:+.6f}'
+                    if f.net_profit_per_capital_minute_usd is not None
+                    else "—"
+                )
+                total_profit_color = STATUS_GOOD if f.total_net_profit_usd >= 0 else STATUS_CRITICAL
+                row_html = (
+                    "<tr>"
+                    f'<td style="padding:8px 10px;color:{INK_PRIMARY};">{STRATEGY_LABELS.get(f.strategy, f.strategy)}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.detected:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.net_positive:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.executable:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.attempts:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{STATUS_GOOD};">{f.filled:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_MUTED};">{f.edge_disappeared:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{STATUS_CRITICAL};">{f.failed:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{STATUS_GOOD};">{f.profitable:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{STATUS_CRITICAL};">{f.losing:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.capital_used_usd:,.0f}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{total_profit_color};">{f.total_net_profit_usd:+.4f}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{capital_minute_cell}</td>'
+                    "</tr>"
+                ).replace(",", " ")
+                rows_html.append(row_html)
+            table_html = f"""
+            <div style="background:{SURFACE};border:1px solid {BORDER};border-radius:14px;overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.82rem;white-space:nowrap;">
+            <thead><tr style="border-bottom:1px solid {GRIDLINE};">
+                {"".join(f'<th style="padding:8px 10px;text-align:right;color:{INK_MUTED};font-weight:600;">{h}</th>' if i > 0 else f'<th style="padding:8px 10px;text-align:left;color:{INK_MUTED};font-weight:600;">{h}</th>' for i, h in enumerate(headers))}
+            </tr></thead>
+            <tbody>{"".join(rows_html)}</tbody>
+            </table>
+            </div>
+            """
+            st.markdown(table_html, unsafe_allow_html=True)
+            st.caption(
+                "Filled = exécution simulée réussie · Edge disparu = revalidation juste avant exécution a détecté un edge devenu ≤ 0 "
+                "(jamais compté comme un échec) · Échoués = tentative avec un vrai coût de gas, sans profit. "
+                "flash_loan_research n'apparaît jamais ici : capital emprunté simulé, jamais de capital propre engagé (spec section 35)."
+            )
+
         # DEX Reality Capture (spec section 22) — same philosophy as the
         # CEX Reality Capture Ratio above: how much of the raw, size-blind
         # edge actually survives real swap fees, gas, AMM price impact,
