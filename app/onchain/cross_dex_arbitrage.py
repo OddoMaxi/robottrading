@@ -177,14 +177,14 @@ def _price_of_a_in_b(pool: DexPool, asset_a: str, asset_b: str) -> float | None:
     return None
 
 
-def detect_cross_dex_opportunity(
-    pool_a: DexPool, pool_b: DexPool, gas_cost_usd_a: float, gas_cost_usd_b: float
-) -> Opportunity | None:
-    """Compares two same-chain pools for the same asset pair. Returns None
-    if they're not actually the same pair, if the raw spread isn't even
-    positive, or if depth-adjusted sizing never clears MIN_NET_EDGE_PCT at
-    any tested size — same "not a real opportunity" rejection semantics
-    app.engines._shared uses for CEX."""
+def order_buy_sell_pools(pool_a: DexPool, pool_b: DexPool) -> tuple[DexPool, DexPool, float, float, float] | None:
+    """Determines which of two same-chain, same-pair pools is cheaper (buy
+    there) and which is richer (sell there), and the resulting theoretical
+    (top-of-book, cost-blind) edge. Returns None if they're not actually
+    the same pair or there's no real price difference. Factored out of
+    detect_cross_dex_opportunity so app.onchain.flash_loan_research can
+    reuse the exact same ordering/pricing logic rather than re-deriving it
+    (and risking the two silently drifting apart)."""
     if pool_a.chain != pool_b.chain:
         return None
     asset_a, asset_b = sorted([pool_a.token0_symbol.upper(), pool_a.token1_symbol.upper()])
@@ -194,18 +194,32 @@ def detect_cross_dex_opportunity(
         return None
 
     if price_a_on_pool_a < price_a_on_pool_b:
-        buy_pool, sell_pool, buy_gas, sell_gas = pool_a, pool_b, gas_cost_usd_a, gas_cost_usd_b
-        buy_price, sell_price = price_a_on_pool_a, price_a_on_pool_b
         theoretical_edge_pct = (price_a_on_pool_b - price_a_on_pool_a) / price_a_on_pool_a * 100
-    elif price_a_on_pool_b < price_a_on_pool_a:
-        buy_pool, sell_pool, buy_gas, sell_gas = pool_b, pool_a, gas_cost_usd_b, gas_cost_usd_a
-        buy_price, sell_price = price_a_on_pool_b, price_a_on_pool_a
+        if theoretical_edge_pct <= 0:
+            return None
+        return pool_a, pool_b, price_a_on_pool_a, price_a_on_pool_b, theoretical_edge_pct
+    if price_a_on_pool_b < price_a_on_pool_a:
         theoretical_edge_pct = (price_a_on_pool_a - price_a_on_pool_b) / price_a_on_pool_b * 100
-    else:
-        return None
+        if theoretical_edge_pct <= 0:
+            return None
+        return pool_b, pool_a, price_a_on_pool_b, price_a_on_pool_a, theoretical_edge_pct
+    return None
 
-    if theoretical_edge_pct <= 0:
+
+def detect_cross_dex_opportunity(
+    pool_a: DexPool, pool_b: DexPool, gas_cost_usd_a: float, gas_cost_usd_b: float
+) -> Opportunity | None:
+    """Compares two same-chain pools for the same asset pair. Returns None
+    if they're not actually the same pair, if the raw spread isn't even
+    positive, or if depth-adjusted sizing never clears MIN_NET_EDGE_PCT at
+    any tested size — same "not a real opportunity" rejection semantics
+    app.engines._shared uses for CEX."""
+    ordered = order_buy_sell_pools(pool_a, pool_b)
+    if ordered is None:
         return None
+    buy_pool, sell_pool, buy_price, sell_price, theoretical_edge_pct = ordered
+    buy_gas, sell_gas = (gas_cost_usd_a, gas_cost_usd_b) if buy_pool is pool_a else (gas_cost_usd_b, gas_cost_usd_a)
+    asset_a, asset_b = sorted([pool_a.token0_symbol.upper(), pool_a.token1_symbol.upper()])
 
     # Block Latency (spec section 14) — "A DEX opportunity that exists for
     # 100ms may be impossible to capture on-chain." Rejected here, before

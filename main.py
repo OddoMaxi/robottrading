@@ -52,7 +52,8 @@ from app.execution.binance_testnet_client import BinanceTestnetClient
 from app.onchain.atomic_arbitrage import as_atomic_opportunity, simulate_atomic_bundle
 from app.onchain.chain_risk import ChainHealth, check_chain_health
 from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES, MIN_NET_EDGE_PCT
-from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity
+from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity, order_buy_sell_pools
+from app.onchain.flash_loan_research import FLASH_LOAN_EVM_CHAINS, build_flash_loan_opportunity, find_best_flash_loan_size
 from app.onchain.gas_engine import RpcGasProvider
 from app.onchain.market_data_provider import GeckoTerminalProvider
 from app.onchain.models import DexPool
@@ -271,6 +272,31 @@ async def dex_detection_loop() -> None:
                                     )
                                     if opp is not None:
                                         new_opportunities.append(opp)
+
+                                    # Flash Loan Research (spec sections
+                                    # 9-11) — EVM-only (Aave v3's flash
+                                    # loan is a real, documented EVM
+                                    # protocol; Solana has no comparably
+                                    # standardized equivalent, so this
+                                    # isn't fabricated there). PAPER ONLY —
+                                    # never borrows, never repays, never
+                                    # touches a lending protocol. Reuses
+                                    # the exact same pool ordering
+                                    # detect_cross_dex_opportunity just
+                                    # used, at flash-loan-sized amounts far
+                                    # beyond what any own-capital portfolio
+                                    # here could deploy.
+                                    if chain in FLASH_LOAN_EVM_CHAINS:
+                                        ordered = order_buy_sell_pools(pools[i], pools[j])
+                                        if ordered is not None:
+                                            buy_pool, sell_pool, buy_price, sell_price, theoretical_edge_pct = ordered
+                                            best = find_best_flash_loan_size(
+                                                buy_pool, sell_pool, buy_price, sell_price, gas_estimate.gas_cost_usd * 2
+                                            )
+                                            if best is not None:
+                                                new_opportunities.append(
+                                                    build_flash_loan_opportunity(buy_pool, sell_pool, best, theoretical_edge_pct)
+                                                )
 
                     # Multi-Hop / DEX Triangular Arbitrage (spec sections 6,
                     # 7) — a token graph over EVERY pool on this chain,

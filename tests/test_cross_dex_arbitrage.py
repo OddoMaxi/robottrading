@@ -6,6 +6,7 @@ from app.onchain.cross_dex_arbitrage import (
     detect_cross_dex_opportunity,
     estimate_amm_output_usd,
     evaluate_dex_capital_tier,
+    order_buy_sell_pools,
 )
 from app.onchain.mev_risk import compute_mev_risk_score, mev_buffer_pct_for_risk
 from app.onchain.models import DexPool
@@ -128,6 +129,23 @@ def test_a_non_capturable_chain_rejects_even_a_genuinely_profitable_gap(monkeypa
     pool_a = _pool("raydium", "SOL", "USDC", price=100.0, fee_pct=0.25)
     pool_b = _pool("orca", "SOL", "USDC", price=101.0, fee_pct=0.30)
     assert detect_cross_dex_opportunity(pool_a, pool_b, gas_cost_usd_a=0.002, gas_cost_usd_b=0.002) is None
+
+
+def test_order_buy_sell_pools_identifies_the_cheaper_venue_as_buy():
+    pool_a = _pool("raydium", "SOL", "USDC", price=100.0)
+    pool_b = _pool("orca", "SOL", "USDC", price=101.0)
+    ordered = order_buy_sell_pools(pool_a, pool_b)
+    assert ordered is not None
+    buy_pool, sell_pool, buy_price, sell_price, theoretical_edge_pct = ordered
+    assert buy_pool.dex == "raydium"
+    assert sell_pool.dex == "orca"
+    assert theoretical_edge_pct == pytest.approx(1.0)
+
+
+def test_order_buy_sell_pools_returns_none_for_no_real_difference():
+    pool_a = _pool("raydium", "SOL", "USDC", price=100.0)
+    pool_b = _pool("orca", "SOL", "USDC", price=100.0)
+    assert order_buy_sell_pools(pool_a, pool_b) is None
 
 
 def test_zero_capital_tier_never_divides_by_zero():
