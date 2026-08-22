@@ -189,7 +189,20 @@ _last_ledger_check_at = 0.0
 # a DEX price gap doesn't need sub-second detection the way a CEX order
 # book does — the underlying pools only update once per block anyway.
 DEX_POLL_INTERVAL_SECONDS = 45.0
-dex_opportunity_tracker = OpportunityTracker()
+# Bug found live, 2026-08-22: OpportunityTracker's default liveness
+# (DEFAULT_LIVENESS_SECONDS=5.0) was calibrated for CEX's sub-second scan
+# cadence — with DEX polling every ~45-53s, the SAME real, persisting
+# mispricing was expiring and re-registering as "brand new" on every
+# single cycle (confirmed live: a 3+ hour persisting BSC triangular
+# mispricing produced 48 separate "new" opportunity rows, every one with
+# updates_count=1, never a single continuation). This never caused a
+# correctness bug in paper trading (every "new" row still got exactly one
+# real, capital-tracked attempt — confirmed 100% 1:1 match in production
+# data) but it did inflate "opportunities detected" well above the number
+# of genuinely distinct real-world price gaps. 2x the poll interval gives
+# real margin over normal cycle-to-cycle jitter without over-merging two
+# genuinely different, back-to-back economic events.
+dex_opportunity_tracker = OpportunityTracker(liveness_seconds=DEX_POLL_INTERVAL_SECONDS * 2)
 _dex_market_data_provider = GeckoTerminalProvider()
 _dex_gas_provider = RpcGasProvider()
 
