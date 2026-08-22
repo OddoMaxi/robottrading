@@ -836,4 +836,55 @@ def render_expert_mode() -> None:
         st.markdown(table_html, unsafe_allow_html=True)
 
     st.divider()
+
+    # --- Multi-Market Opportunity Engine, V5.5 (user directive, 2026-08-21) ---
+    st.subheader("🔗 On-Chain / DEX — Mode Simulation")
+    st.caption(
+        "Uniswap V3 (Ethereum), PancakeSwap V3 (BSC), Raydium et Orca (Solana) — données live, aucune transaction "
+        "réelle. Moteur totalement isolé du CEX : un bug ici ne peut jamais arrêter ni corrompre le trading CEX."
+    )
+    freq = data.get_master_frequency_report_cached(hours=24.0)
+    dex_freq = [s for s in freq.by_strategy if s.strategy in ("dex_cross", "dex_triangular", "dex_multihop", "atomic", "flash_loan_research")]
+    if not dex_freq:
+        st.info("Aucune opportunité on-chain détectée sur la période — le marché est peut-être simplement efficient (pas un bug).")
+    else:
+        total_detected = sum(s.detected_count for s in dex_freq)
+        total_executable = sum(s.executable_count for s in dex_freq)
+        render_stat_cards(
+            [
+                {"label": "Opportunités détectées (24h)", "value": f"{total_detected:,}".replace(",", " ")},
+                {"label": "Réellement exécutables", "value": f"{total_executable:,}".replace(",", " "), "sub": "positives après TOUS les coûts"},
+                {"label": "Détectées / heure", "value": f"{sum(s.detected_per_hour for s in dex_freq):.2f} /h"},
+                {"label": "Exécutables / heure", "value": f"{sum(s.executable_per_hour for s in dex_freq):.2f} /h"},
+            ]
+        )
+
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Répartition par stratégie on-chain</div>', unsafe_allow_html=True)
+        dex_rows_html = "".join(
+            f'<div class="simple-perf-row"><span class="k">{STRATEGY_LABELS.get(s.strategy, s.strategy)}</span>'
+            f'<span class="v">{s.detected_count:,} détectées · {s.executable_count:,} exécutables · {s.executed_count:,} exécutées'
+            f'</span></div>'.replace(",", " ")
+            for s in sorted(dex_freq, key=lambda s: s.detected_count, reverse=True)
+        )
+        st.markdown(f'<div class="simple-card">{dex_rows_html}</div>', unsafe_allow_html=True)
+
+        # DEX Reality Capture (spec section 22) — same philosophy as the
+        # CEX Reality Capture Ratio above: how much of the raw, size-blind
+        # edge actually survives real swap fees, gas, AMM price impact,
+        # slippage, and MEV buffers.
+        reality = data.get_dex_reality_capture_cached(hours=24.0)
+        combined_reality = next((r for r in reality if r.strategy is None), None)
+        if combined_reality is not None and combined_reality.capture_ratio_pct is not None:
+            st.markdown('<div class="simple-card-label" style="margin-top:14px;">Fiabilité de la simulation on-chain</div>', unsafe_allow_html=True)
+            render_stat_cards(
+                [
+                    {
+                        "label": "Capture réelle",
+                        "value": f"{combined_reality.capture_ratio_pct:.0f} %",
+                        "sub": f"écart théorique moyen {combined_reality.avg_theoretical_edge_pct:.3f} % → réellement exécutable {combined_reality.avg_realistic_executable_edge_pct:.3f} %",
+                    },
+                ]
+            )
+
+    st.divider()
     st.caption(f"Plateformes surveillées : {', '.join(e.capitalize() for e in PRIORITY_EXCHANGES)}")

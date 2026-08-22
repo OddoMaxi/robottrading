@@ -19,7 +19,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.reporting.daily import DailySummary, build_daily_summary
+from app.reporting.dex_reality import DexRealityCaptureReport, build_dex_reality_capture
 from app.reporting.execution_funnel import ExecutionFunnelReport, build_execution_funnel
+from app.reporting.master_funnel import MasterFrequencyReport, build_master_frequency_report
 from app.reporting.holding_time_performance import (
     HoldingTimeBucketStats,
     HoldingTimeDistribution,
@@ -558,3 +560,33 @@ async def fetch_why_no_trade() -> WhyNoTradeReport | None:
 @st.cache_data(ttl=10, show_spinner=False)
 def get_why_no_trade_cached() -> WhyNoTradeReport | None:
     return asyncio.run(fetch_why_no_trade())
+
+
+async def fetch_master_frequency_report(hours: float = 24.0) -> MasterFrequencyReport:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_master_frequency_report(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_master_frequency_report_cached(hours: float = 24.0) -> MasterFrequencyReport:
+    return asyncio.run(fetch_master_frequency_report(hours))
+
+
+async def fetch_dex_reality_capture(hours: float = 24.0) -> list[DexRealityCaptureReport]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_dex_reality_capture(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_dex_reality_capture_cached(hours: float = 24.0) -> list[DexRealityCaptureReport]:
+    return asyncio.run(fetch_dex_reality_capture(hours))

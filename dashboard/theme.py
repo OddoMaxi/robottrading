@@ -33,6 +33,13 @@ STRATEGY_LABELS = {
     "triangular": "Triangulaire (boucle sur 1 plateforme)",
     "funding": "Financement (spot vs perpetual)",
     "basis": "Basis (spot vs future à échéance)",
+    # Multi-Market Opportunity Engine, V5.5 (user directive, 2026-08-21) —
+    # on-chain/DEX strategies, shadow mode only.
+    "dex_cross": "DEX — entre venues (même chaîne)",
+    "dex_triangular": "DEX — triangulaire (3 swaps)",
+    "dex_multihop": "DEX — multi-hop (4+ swaps)",
+    "atomic": "DEX — atomique (bundle 1 transaction)",
+    "flash_loan_research": "DEX — recherche flash loan (simulation)",
 }
 
 # Simple Mode's plain-language names for the same strategies (spec section 17
