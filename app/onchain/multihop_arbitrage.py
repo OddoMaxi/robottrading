@@ -248,8 +248,16 @@ def detect_multihop_opportunity(
 
     strategy = Strategy.DEX_TRIANGULAR if len(best.hops) == 3 else Strategy.DEX_MULTIHOP
     route_symbol = "->".join([base_asset] + [hop.to_token for hop in best.hops])
+    # price/tvl_usd/fee_pct snapshotted here — Replay/Audit (user directive,
+    # 2026-08-22): "no black box" means a historical opportunity must be
+    # re-derivable from what was actually observed, not just its
+    # already-computed output numbers.
     legs = [
-        {"chain": chain, "exchange": hop.pool.dex, "side": "swap", "market": "dex", "pool_id": hop.pool.pool_id, "from": hop.from_token, "to": hop.to_token}
+        {
+            "chain": chain, "exchange": hop.pool.dex, "side": "swap", "market": "dex", "pool_id": hop.pool.pool_id,
+            "from": hop.from_token, "to": hop.to_token,
+            "price": _price_of_from_to(hop.pool, hop.from_token, hop.to_token), "tvl_usd": hop.pool.tvl_usd, "fee_pct": hop.pool.fee_pct,
+        }
         for hop in best.hops
     ]
 

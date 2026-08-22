@@ -238,8 +238,18 @@ def detect_cross_dex_opportunity(
         strategy=Strategy.DEX_CROSS,
         symbol=f"{asset_a}/{asset_b}",
         legs=[
-            {"chain": buy_pool.chain, "exchange": buy_pool.dex, "side": "buy", "market": "dex", "pool_id": buy_pool.pool_id},
-            {"chain": sell_pool.chain, "exchange": sell_pool.dex, "side": "sell", "market": "dex", "pool_id": sell_pool.pool_id},
+            # price/tvl_usd/fee_pct snapshotted here — Replay/Audit (user
+            # directive, 2026-08-22): "no black box" means a historical
+            # opportunity must be re-derivable from what was actually
+            # observed, not just its already-computed output numbers.
+            {
+                "chain": buy_pool.chain, "exchange": buy_pool.dex, "side": "buy", "market": "dex", "pool_id": buy_pool.pool_id,
+                "price": buy_price, "tvl_usd": buy_pool.tvl_usd, "fee_pct": buy_pool.fee_pct,
+            },
+            {
+                "chain": sell_pool.chain, "exchange": sell_pool.dex, "side": "sell", "market": "dex", "pool_id": sell_pool.pool_id,
+                "price": sell_price, "tvl_usd": sell_pool.tvl_usd, "fee_pct": sell_pool.fee_pct,
+            },
         ],
         gross_spread_pct=theoretical_edge_pct,
         net_spread_pct=edge.optimal_net_pct,

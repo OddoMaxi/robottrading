@@ -307,7 +307,7 @@ async def dex_detection_loop() -> None:
                                             )
                                             if best is not None:
                                                 new_opportunities.append(
-                                                    build_flash_loan_opportunity(buy_pool, sell_pool, best, theoretical_edge_pct)
+                                                    build_flash_loan_opportunity(buy_pool, sell_pool, best, theoretical_edge_pct, buy_price, sell_price)
                                                 )
 
                     # Multi-Hop / DEX Triangular Arbitrage (spec sections 6,

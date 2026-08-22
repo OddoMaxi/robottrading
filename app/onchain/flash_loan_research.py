@@ -118,7 +118,7 @@ class FlashLoanComparisonResult:
 
 
 def build_flash_loan_opportunity(
-    buy_pool: DexPool, sell_pool: DexPool, result: FlashLoanResult, theoretical_edge_pct: float
+    buy_pool: DexPool, sell_pool: DexPool, result: FlashLoanResult, theoretical_edge_pct: float, buy_price: float | None = None, sell_price: float | None = None
 ) -> Opportunity:
     """Mirrors app.onchain.cross_dex_arbitrage.detect_cross_dex_opportunity's
     own Opportunity construction — same shared type (spec section 1's
@@ -129,8 +129,17 @@ def build_flash_loan_opportunity(
         strategy=Strategy.FLASH_LOAN_RESEARCH,
         symbol=f"{buy_pool.token0_symbol.upper()}/{buy_pool.token1_symbol.upper()}",
         legs=[
-            {"chain": buy_pool.chain, "exchange": buy_pool.dex, "side": "buy", "market": "dex", "pool_id": buy_pool.pool_id},
-            {"chain": sell_pool.chain, "exchange": sell_pool.dex, "side": "sell", "market": "dex", "pool_id": sell_pool.pool_id},
+            # price/tvl_usd/fee_pct snapshotted here — Replay/Audit (user
+            # directive, 2026-08-22), same reasoning as
+            # app.onchain.cross_dex_arbitrage.detect_cross_dex_opportunity.
+            {
+                "chain": buy_pool.chain, "exchange": buy_pool.dex, "side": "buy", "market": "dex", "pool_id": buy_pool.pool_id,
+                "price": buy_price, "tvl_usd": buy_pool.tvl_usd, "fee_pct": buy_pool.fee_pct,
+            },
+            {
+                "chain": sell_pool.chain, "exchange": sell_pool.dex, "side": "sell", "market": "dex", "pool_id": sell_pool.pool_id,
+                "price": sell_price, "tvl_usd": sell_pool.tvl_usd, "fee_pct": sell_pool.fee_pct,
+            },
         ],
         gross_spread_pct=theoretical_edge_pct,
         net_spread_pct=net_pct,
