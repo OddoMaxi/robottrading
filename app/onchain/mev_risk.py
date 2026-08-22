@@ -29,6 +29,13 @@ _CHAIN_MEV_COMPETITIVENESS_SCORE = {"eth": 0.9, "bsc": 0.6, "solana": 0.5}
 _MEV_BUFFER_MAX_MULTIPLIER = 3.0
 
 
+def chain_mev_competitiveness_score(chain: str) -> float:
+    """The chain-only component of the risk score, exposed separately for
+    callers (e.g. app.onchain.atomic_arbitrage) that don't have a specific
+    pool's TVL to weigh trade size against."""
+    return _CHAIN_MEV_COMPETITIVENESS_SCORE.get(chain, 0.7)
+
+
 def compute_mev_risk_score(chain: str, trade_size_usd: float, pool_tvl_usd: float) -> float:
     """0-1, higher = more MEV risk. Combines how large this trade is
     relative to the pool it trades against (bigger relative size both

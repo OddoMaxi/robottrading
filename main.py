@@ -49,8 +49,9 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
+from app.onchain.atomic_arbitrage import as_atomic_opportunity, simulate_atomic_bundle
 from app.onchain.chain_risk import ChainHealth, check_chain_health
-from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES
+from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES, MIN_NET_EDGE_PCT
 from app.onchain.cross_dex_arbitrage import detect_cross_dex_opportunity
 from app.onchain.gas_engine import RpcGasProvider
 from app.onchain.market_data_provider import GeckoTerminalProvider
@@ -285,6 +286,24 @@ async def dex_detection_loop() -> None:
                         opp = detect_multihop_opportunity(graph, base_asset, DEFAULT_DEX_TRADE_SIZE_USD, gas_estimate.gas_cost_usd, chain)
                         if opp is not None:
                             new_opportunities.append(opp)
+
+                    # Atomic Arbitrage Research (spec section 8) — for every
+                    # cross-DEX/multi-hop opportunity just found, also price
+                    # what bundling it into one atomic transaction would be
+                    # worth: no unhedged-leg risk, but gas is paid even on a
+                    # revert and the naive "assume it always lands" profit
+                    # is replaced by a probability-weighted expected value.
+                    # Only added alongside the sequential-execution version
+                    # (never replacing it — they're different strategies
+                    # with different risk profiles) when the atomic pricing
+                    # still clears the same minimum edge.
+                    for opp in list(new_opportunities):
+                        atomic_result = simulate_atomic_bundle(opp, gas_estimate.gas_cost_usd)
+                        if atomic_result is None:
+                            continue
+                        atomic_opp = as_atomic_opportunity(opp, atomic_result)
+                        if atomic_opp.net_spread_pct is not None and atomic_opp.net_spread_pct >= MIN_NET_EDGE_PCT:
+                            new_opportunities.append(atomic_opp)
 
                     for opp in new_opportunities:
                         observation = dex_opportunity_tracker.observe(opp, now=scan_time)
