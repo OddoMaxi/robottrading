@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
     Base,
+    CexScanEventRecord,
     DexSimulatedTradeRecord,
     Exchange,
     OpportunityRecord,
@@ -225,6 +226,55 @@ async def save_dex_trade_attempt(session: AsyncSession, attempt) -> DexSimulated
         detection_to_validation_ms=attempt.detection_to_validation_ms,
         validation_to_execution_ms=attempt.validation_to_execution_ms,
         total_execution_ms=attempt.total_execution_ms,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_cex_scan_event(
+    session: AsyncSession,
+    scan_id: str,
+    scanned_at: datetime,
+    opportunity_id: uuid.UUID,
+    is_new_detection: bool,
+    strategy: str,
+    symbol: str,
+    legs: list[dict],
+    expected_profit_usd: float | None,
+    capital_usd: float | None,
+    net_spread_pct: float | None,
+    execution_fill_probability: float | None,
+    holding_period_seconds: float | None,
+    capital_velocity_score: float | None,
+    position_already_open: bool,
+    old_approved: bool,
+    old_rejection_reason: str | None,
+) -> CexScanEventRecord:
+    """PHASE 2B (user directive, 2026-08-22) — pure telemetry write, called
+    from main.py's CEX detection_loop wrapped in its own try/except (see
+    that call site) so a failure here can never interrupt OLD's real
+    trade processing. Takes plain values, not the live Opportunity/
+    ValidationResult/OpenPositionTracker objects themselves — this
+    function has no way to mutate anything OLD uses, only to copy
+    already-decided values into a new, dedicated row."""
+    record = CexScanEventRecord(
+        scan_id=scan_id,
+        scanned_at=scanned_at,
+        opportunity_id=opportunity_id,
+        is_new_detection=is_new_detection,
+        strategy=strategy,
+        symbol=symbol,
+        legs=legs,
+        expected_profit_usd=expected_profit_usd,
+        capital_usd=capital_usd,
+        net_spread_pct=net_spread_pct,
+        execution_fill_probability=execution_fill_probability,
+        holding_period_seconds=holding_period_seconds,
+        capital_velocity_score=capital_velocity_score,
+        position_already_open=position_already_open,
+        old_approved=old_approved,
+        old_rejection_reason=old_rejection_reason,
     )
     session.add(record)
     await session.flush()

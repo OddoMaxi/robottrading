@@ -1107,6 +1107,34 @@ def render_phase2_shadow_section() -> None:
         "P&L MASTER est une projection sur expected_profit_usd déjà calculé par les moteurs réels, pas un résultat rejoué au hasard."
     )
 
+    # --- PHASE 2B — CEX Scan-Level Shadow (user directive, 2026-08-22) ---
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">PHASE 2B — CEX au niveau du cycle de scan</div>', unsafe_allow_html=True)
+    scan_summary = data.get_cex_scan_agreement_breakdown_cached(hours=24.0)
+    if scan_summary.global_total == 0:
+        st.caption("En attente des premiers événements de télémétrie (le moteur CEX doit tourner avec l'instrumentation Phase 2B active).")
+    else:
+        render_stat_cards(
+            [
+                {"label": "Accord — nouvelles détections", "value": f"{scan_summary.new_detection_agreement_pct:.1f} %" if scan_summary.new_detection_agreement_pct is not None else "—", "sub": f"{scan_summary.new_detection_agree:,}/{scan_summary.new_detection_total:,}".replace(",", " ")},
+                {"label": "Accord — continuations", "value": f"{scan_summary.continuation_agreement_pct:.1f} %" if scan_summary.continuation_agreement_pct is not None else "—", "sub": f"{scan_summary.continuation_agree:,}/{scan_summary.continuation_total:,}".replace(",", " ")},
+                {"label": "Accord global (niveau scan)", "value": f"{scan_summary.global_agreement_pct:.1f} %" if scan_summary.global_agreement_pct is not None else "—", "sub": f"{scan_summary.global_agree:,}/{scan_summary.global_total:,}".replace(",", " ")},
+                {"label": "OLD accepté, MASTER aurait rejeté", "value": f"{scan_summary.old_accepted_master_rejected:,}".replace(",", " ")},
+                {"label": "MASTER accepté, OLD avait rejeté", "value": f"{scan_summary.master_accepted_old_rejected:,}".replace(",", " ")},
+            ]
+        )
+        with st.expander("Désaccords par cause (niveau scan)"):
+            for d in data.get_cex_scan_disagreement_breakdown_cached(hours=24.0):
+                old_str = "OLD approuvé" if d.old_approved else f"OLD rejeté ({d.old_rejection_reason})"
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{old_str} → MASTER {d.master_outcome}</span>'
+                    f'<span class="v">{d.count:,}</span></div>'.replace(",", " "),
+                    unsafe_allow_html=True,
+                )
+        st.caption(
+            "Remplace la comparaison au niveau opportunité pour CEX, qui ne voyait que les nouvelles détections — "
+            "ici chaque cycle de scan (continuations incluses) est comparé 1:1, exactement comme OLD le vit en direct."
+        )
+
 
 def render_simple_mode() -> None:
     page = st.session_state.get("simple_page", "accueil")

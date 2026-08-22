@@ -15,7 +15,15 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import DexSimulatedTradeRecord, OpportunityRecord, ShadowDecisionRecord, SimulatedTradeRecord, VirtualPortfolioRecord
+from app.database.models import (
+    CexScanEventRecord,
+    CexScanShadowDecisionRecord,
+    DexSimulatedTradeRecord,
+    OpportunityRecord,
+    ShadowDecisionRecord,
+    SimulatedTradeRecord,
+    VirtualPortfolioRecord,
+)
 from app.shadow.ledger import ShadowCapitalLedger
 from app.shadow.models import Engine, MasterDecision, MasterOutcome, OldEngineDecision, OldEngineOutcome, ShadowDecisionResult, ShadowOpportunitySummary
 
@@ -193,3 +201,74 @@ async def rebuild_shadow_ledger_from_history(session: AsyncSession) -> ShadowCap
         )
     ).scalar() or 0.0
     return ShadowCapitalLedger(realized_pnl_usd=float(realized_pnl))
+
+
+# --- PHASE 2B — CEX Scan-Level Shadow (user directive, 2026-08-22) ---
+#
+# Genuine 1:1 replay of OLD's real per-scan-cycle decisions (continuations
+# included), reading app.database.models.CexScanEventRecord — the
+# telemetry main.py's detection_loop now writes at the SAME point OLD
+# itself decides (see main.py's own instrumentation comment). This is a
+# READ of that table plus a WRITE to cex_scan_shadow_decisions only —
+# still never touches simulated_trades/dex_simulated_trades/
+# virtual_portfolios, still never calls a real executor.
+
+CEX_SCAN_BATCH_SIZE = 500
+
+
+async def fetch_unevaluated_cex_scan_events(session: AsyncSession, limit: int = CEX_SCAN_BATCH_SIZE) -> list[tuple[CexScanEventRecord, ShadowOpportunitySummary]]:
+    """Every telemetry row without a cex_scan_shadow_decisions row yet,
+    oldest first — chronological order matters here even more than for
+    the opportunity-level path, since MASTER's own position tracker must
+    see the SAME dense sequence of re-approvals OLD's real
+    position_tracker did, to have any chance of reproducing the same
+    continuously-refreshed lock behavior."""
+    already_evaluated = select(CexScanShadowDecisionRecord.scan_event_id)
+    rows = (
+        await session.execute(
+            select(CexScanEventRecord)
+            .where(CexScanEventRecord.id.not_in(already_evaluated))
+            .order_by(CexScanEventRecord.id.asc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    pairs = []
+    for row in rows:
+        summary = ShadowOpportunitySummary(
+            opportunity_id=row.opportunity_id,
+            engine=Engine.CEX,
+            strategy=row.strategy,
+            symbol=row.symbol,
+            legs=row.legs or [],
+            chain=None,
+            expected_profit_usd=float(row.expected_profit_usd) if row.expected_profit_usd is not None else None,
+            capital_usd=float(row.capital_usd) if row.capital_usd is not None else None,
+            execution_fill_probability=float(row.execution_fill_probability) if row.execution_fill_probability is not None else None,
+            capital_velocity_score=float(row.capital_velocity_score) if row.capital_velocity_score is not None else None,
+            holding_period_seconds=float(row.holding_period_seconds) if row.holding_period_seconds is not None else None,
+            detected_at=row.scanned_at,
+            detection_time_rejection_reason=None,  # irrelevant here — old_approved/old_rejection_reason (below) already carry OLD's real decision for THIS exact scan
+        )
+        pairs.append((row, summary))
+    return pairs
+
+
+async def persist_cex_scan_shadow_decision(
+    session: AsyncSession, scan_event: CexScanEventRecord, master: MasterDecision, decided_at: datetime
+) -> None:
+    old_approved = scan_event.old_approved
+    agree = old_approved == (master.outcome == MasterOutcome.ALLOCATE)
+    stmt = pg_insert(CexScanShadowDecisionRecord).values(
+        scan_event_id=scan_event.id,
+        opportunity_id=scan_event.opportunity_id,
+        scanned_at=scan_event.scanned_at,
+        is_new_detection=scan_event.is_new_detection,
+        decided_at=decided_at,
+        old_approved=old_approved,
+        old_rejection_reason=scan_event.old_rejection_reason,
+        master_outcome=master.outcome.value,
+        master_reason=master.reason,
+        agree=agree,
+    ).on_conflict_do_nothing(index_elements=["scan_event_id"])
+    await session.execute(stmt)

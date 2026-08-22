@@ -70,7 +70,8 @@ def test_shadow_reconstruct_only_writes_to_the_shadow_decisions_table():
     module allowed to touch the database (reconstruct.py) must never
     construct a SimulatedTradeRecord or DexSimulatedTradeRecord (the real
     ledgers) — only read them via select(), and only ever write
-    ShadowDecisionRecord."""
+    ShadowDecisionRecord / CexScanShadowDecisionRecord (PHASE 2B's own
+    dedicated result table, added 2026-08-22 — still not a real ledger)."""
     source = (SHADOW_PACKAGE_DIR / "reconstruct.py").read_text()
     tree = ast.parse(source)
     constructed_record_types = {
@@ -78,8 +79,8 @@ def test_shadow_reconstruct_only_writes_to_the_shadow_decisions_table():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.endswith("Record")
     }
-    assert constructed_record_types <= {"ShadowDecisionRecord"}, (
-        f"app/shadow/reconstruct.py constructs {constructed_record_types} — only ShadowDecisionRecord is allowed"
+    assert constructed_record_types <= {"ShadowDecisionRecord", "CexScanShadowDecisionRecord"}, (
+        f"app/shadow/reconstruct.py constructs {constructed_record_types} — only ShadowDecisionRecord/CexScanShadowDecisionRecord are allowed"
     )
 
 
@@ -108,3 +109,92 @@ def test_shadow_position_tracker_is_a_standalone_class_not_a_reference_to_the_re
 
     assert ShadowOpenPositionTracker is not real_position_module.OpenPositionTracker
     assert not issubclass(ShadowOpenPositionTracker, real_position_module.OpenPositionTracker)
+
+
+# --- PHASE 2B — CEX Scan-Level Shadow telemetry isolation (user directive, 2026-08-22) ---
+#
+# The new telemetry tap in main.py's real detection_loop is the one place
+# THIS session ever writes shadow-related code directly into the live
+# engine process — these tests specifically prove that tap cannot affect
+# OLD's own execution path.
+
+REPOSITORY_MODULE = REPO_ROOT / "app" / "database" / "repository.py"
+MAIN_ENTRYPOINT = REPO_ROOT / "main.py"
+
+
+def test_save_cex_scan_event_only_constructs_the_telemetry_record():
+    """app.database.repository.save_cex_scan_event (called from main.py's
+    telemetry tap) must construct exactly one record type
+    (CexScanEventRecord) and nothing else — it cannot, by construction,
+    touch a real trade/balance table."""
+    source = REPOSITORY_MODULE.read_text()
+    tree = ast.parse(source)
+    func_def = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "save_cex_scan_event")
+    constructed_record_types = {
+        node.func.id for node in ast.walk(func_def) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id.endswith("Record")
+    }
+    assert constructed_record_types == {"CexScanEventRecord"}, (
+        f"save_cex_scan_event constructs {constructed_record_types} — must construct only CexScanEventRecord"
+    )
+
+
+def _innermost_try_containing(tree: ast.AST, target: ast.AST) -> ast.Try:
+    """main.py's detection_loop nests the telemetry try/except INSIDE the
+    loop's own outer try/except (CancelledError re-raise + a catch-all) —
+    a plain ast.walk() BFS can surface that outer try first, which does
+    legitimately bare-reraise for CancelledError and would produce a
+    false positive here. The innermost (most tightly-scoped) try around
+    the call is the one whose line span is smallest."""
+
+    def _contains(container: ast.AST) -> bool:
+        return any(node is target for node in ast.walk(container))
+
+    candidates = [n for n in ast.walk(tree) if isinstance(n, ast.Try) and any(_contains(stmt) for stmt in n.body)]
+    assert candidates, "no try block contains the target call at all"
+    return min(candidates, key=lambda n: (n.end_lineno or n.lineno) - n.lineno)
+
+
+def test_main_py_telemetry_call_site_is_wrapped_in_its_own_try_except():
+    """Structural proof that a telemetry failure cannot propagate and
+    interrupt OLD's real trade processing for this or any other
+    opportunity in the same scan cycle — the save_cex_scan_event call
+    must live inside a try block whose except clause does not re-raise."""
+    source = MAIN_ENTRYPOINT.read_text()
+    tree = ast.parse(source)
+
+    call_sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "save_cex_scan_event"
+    ]
+    assert call_sites, "expected a save_cex_scan_event(...) call in main.py"
+
+    try_node = _innermost_try_containing(tree, call_sites[0])
+    for handler in try_node.handlers:
+        reraises = any(isinstance(n, ast.Raise) and n.exc is None for n in ast.walk(handler))
+        assert not reraises, "the innermost except handler around save_cex_scan_event must not bare-reraise"
+
+
+def test_main_py_telemetry_never_calls_paper_trader_simulate_or_attempt_dex_trade():
+    """The telemetry tap itself (the innermost try block containing
+    save_cex_scan_event) must not call any real execution function — it
+    only reads already-decided values (validation.approved,
+    opp.rejection_reason, position_tracker.is_open) and persists them."""
+    source = MAIN_ENTRYPOINT.read_text()
+    tree = ast.parse(source)
+    call_sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "save_cex_scan_event"
+    ]
+    assert call_sites
+
+    try_node = _innermost_try_containing(tree, call_sites[0])
+    forbidden_calls = {"simulate", "attempt_dex_trade", "open_position"}
+    called_names = {
+        n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", None)
+        for n in ast.walk(try_node)
+        if isinstance(n, ast.Call)
+    }
+    violations = called_names & forbidden_calls
+    assert not violations, f"telemetry try block calls forbidden execution function(s): {violations}"

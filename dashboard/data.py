@@ -41,6 +41,12 @@ from app.reporting.master_strategy_ranking import StrategyPerformance, build_mas
 from app.reporting.reality_baseline import PRE_PHASE_2_VALIDATION_BASELINE_AT, REALITY_BASELINE_AT, hours_since_baseline, window_contains_pre_baseline_data
 from app.reporting.reality_reliability import RealityReliabilityReport, build_reality_reliability_report
 from app.reporting.rotation import RotationReport, build_rotation_report
+from app.reporting.cex_scan_shadow_report import (
+    CexScanAgreementBreakdown,
+    CexScanDisagreementRow,
+    build_cex_scan_agreement_breakdown,
+    build_cex_scan_disagreement_breakdown,
+)
 from app.reporting.shadow_report import (
     ShadowEngineBreakdown,
     ShadowRecentDecision,
@@ -848,3 +854,36 @@ async def fetch_recent_shadow_decisions(limit: int = 15) -> list[ShadowRecentDec
 @st.cache_data(ttl=10, show_spinner=False)
 def get_recent_shadow_decisions_cached(limit: int = 15) -> list[ShadowRecentDecision]:
     return asyncio.run(fetch_recent_shadow_decisions(limit))
+
+
+# --- PHASE 2B — CEX Scan-Level Shadow (user directive, 2026-08-22) ---
+
+
+async def fetch_cex_scan_agreement_breakdown(hours: float = 24.0) -> CexScanAgreementBreakdown:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_cex_scan_agreement_breakdown(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_cex_scan_agreement_breakdown_cached(hours: float = 24.0) -> CexScanAgreementBreakdown:
+    return asyncio.run(fetch_cex_scan_agreement_breakdown(hours))
+
+
+async def fetch_cex_scan_disagreement_breakdown(hours: float = 24.0) -> list[CexScanDisagreementRow]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_cex_scan_disagreement_breakdown(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_cex_scan_disagreement_breakdown_cached(hours: float = 24.0) -> list[CexScanDisagreementRow]:
+    return asyncio.run(fetch_cex_scan_disagreement_breakdown(hours))

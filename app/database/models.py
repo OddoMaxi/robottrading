@@ -285,6 +285,79 @@ class ShadowDecisionRecord(Base):
     agree: Mapped[bool]
 
 
+class CexScanEventRecord(Base):
+    """PHASE 2B — CEX Scan-Level Shadow telemetry (user directive,
+    2026-08-22). Read-only observability tap on main.py's real CEX
+    detection_loop: one row per (opportunity, scan cycle) — including
+    every continuation, not just "new" detections — capturing exactly
+    what OLD decided at that instant. This closes the observability gap
+    the Phase 2 final validation found: MASTER previously only ever saw
+    "new" opportunities rows, while OLD's real loop re-validates (and can
+    re-approve) a persisting opportunity every single scan cycle,
+    continuously refreshing app.simulation.position_tracker's lock —
+    invisible to any evaluation based on the opportunities table alone.
+
+    Written by main.py's detection_loop via
+    app.database.repository.save_cex_scan_event, wrapped in its own
+    try/except (see main.py's own instrumentation site) so a telemetry
+    failure can NEVER interrupt OLD's real trade processing for this or
+    any other opportunity in the same cycle — purely additive, changes
+    nothing about what OLD decides or does. Never read by main.py itself
+    after being written; only shadow_orchestrator.py reads this table."""
+
+    __tablename__ = "cex_scan_events"
+    __table_args__ = (Index("ix_cex_scan_events_scanned_at", "scanned_at"), Index("ix_cex_scan_events_opportunity_id", "opportunity_id"))
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[str] = mapped_column(index=True)
+    scanned_at: Mapped[datetime]
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    is_new_detection: Mapped[bool]
+    strategy: Mapped[str]
+    symbol: Mapped[str]
+    legs: Mapped[list] = mapped_column(JSON)
+    expected_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    capital_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    net_spread_pct: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    execution_fill_probability: Mapped[float | None] = mapped_column(Numeric(6, 4))
+    holding_period_seconds: Mapped[float | None]
+    capital_velocity_score: Mapped[float | None]
+    position_already_open: Mapped[bool]  # independently checked at telemetry time, regardless of whether validate() short-circuited on an earlier gate
+    old_approved: Mapped[bool]
+    old_rejection_reason: Mapped[str | None]
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class CexScanShadowDecisionRecord(Base):
+    """PHASE 2B (user directive, 2026-08-22) — MASTER's shadow decision
+    replayed at the SAME scan-cycle granularity as OLD's real decision
+    captured in CexScanEventRecord, evaluated against a DEDICATED,
+    separate ShadowCapitalLedger/ShadowOpenPositionTracker instance (not
+    shared with the opportunity-level shadow_decisions comparison, which
+    remains the DEX-focused, already-validated 98.4-100% agreement
+    track) — keeping this genuinely 1:1-comparable analysis internally
+    consistent rather than conflating two different granularities of
+    simulated capital state."""
+
+    __tablename__ = "cex_scan_shadow_decisions"
+    __table_args__ = (Index("ix_cex_scan_shadow_decisions_decided_at", "decided_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_event_id: Mapped[int] = mapped_column(ForeignKey("cex_scan_events.id"), unique=True, index=True)
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    scanned_at: Mapped[datetime]
+    is_new_detection: Mapped[bool]
+    decided_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    old_approved: Mapped[bool]
+    old_rejection_reason: Mapped[str | None]
+
+    master_outcome: Mapped[str]
+    master_reason: Mapped[str | None]
+
+    agree: Mapped[bool]
+
+
 class Balance(Base):
     __tablename__ = "balances"
     __table_args__ = (UniqueConstraint("portfolio_id", "exchange_id", "asset_id"),)

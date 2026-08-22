@@ -6,7 +6,9 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import uvicorn
 from fastapi import FastAPI
@@ -37,6 +39,7 @@ from app.database.repository import (
     create_all_tables,
     get_or_create_exchange,
     get_or_create_portfolio,
+    save_cex_scan_event,
     save_dex_trade_attempt,
     save_opportunity,
     save_price_snapshots,
@@ -443,6 +446,7 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                 if (q := market_data_store.get_quote(exchange, MarketType.SPOT, symbol)) is not None
             ]
             scan_time = time.time()
+            scan_id = str(uuid.uuid4())  # PHASE 2B (user directive, 2026-08-22) — groups this cycle's telemetry rows, see below
             async with async_session_factory() as session:
                 if quotes:
                     await save_price_snapshots(session, quotes)
@@ -459,6 +463,54 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         await save_opportunity(session, opp)
                     else:
                         await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=opp.rejection_reason)
+
+                    # PHASE 2B — CEX SCAN-LEVEL SHADOW TELEMETRY (user
+                    # directive, 2026-08-22). Read-only observability tap:
+                    # records exactly what OLD decided THIS scan cycle —
+                    # continuations included, not just "new" detections —
+                    # closing the gap the Phase 2 final validation found
+                    # (MASTER only ever saw "new" opportunities rows, while
+                    # OLD re-validates, and can re-approve, a persisting
+                    # opportunity every single cycle, continuously
+                    # refreshing position_tracker's lock in a way that's
+                    # invisible to any evaluation based on the
+                    # opportunities table alone). position_already_open is
+                    # independently re-derived here (position_tracker.is_open
+                    # is a pure read, mutates nothing) using the SAME key
+                    # app.execution.validator.validate() itself just used,
+                    # so the telemetry row carries this fact even when
+                    # validate() short-circuited on an earlier gate before
+                    # ever reaching its own position check. Wrapped in its
+                    # own try/except — a telemetry failure must NEVER
+                    # interrupt OLD's real trade processing for this or any
+                    # other opportunity this cycle; it changes nothing
+                    # about what OLD decides or does, purely additive.
+                    try:
+                        position_already_open = False
+                        if opp.holding_period_seconds is not None and opp.legs:
+                            scan_position_key = (opp.strategy, opp.legs[0].get("exchange"), opp.symbol)
+                            position_already_open = position_tracker.is_open(scan_position_key, scan_time)
+                        await save_cex_scan_event(
+                            session,
+                            scan_id=scan_id,
+                            scanned_at=datetime.fromtimestamp(scan_time, tz=UTC).replace(tzinfo=None),
+                            opportunity_id=opp.id,
+                            is_new_detection=observation.is_new,
+                            strategy=opp.strategy,
+                            symbol=opp.symbol,
+                            legs=opp.legs,
+                            expected_profit_usd=opp.expected_profit_usd,
+                            capital_usd=opp.capital_usd,
+                            net_spread_pct=opp.net_spread_pct,
+                            execution_fill_probability=opp.execution_fill_probability,
+                            holding_period_seconds=opp.holding_period_seconds,
+                            capital_velocity_score=opp.capital_velocity_score,
+                            position_already_open=position_already_open,
+                            old_approved=validation.approved,
+                            old_rejection_reason=opp.rejection_reason,
+                        )
+                    except Exception:
+                        logger.exception("CEX scan telemetry write failed (Phase 2B) — OLD engine unaffected, continuing")
 
                     # Kill switch (spec section 61) — stops new executions
                     # immediately, in simulation too. Detection, tracking,

@@ -28,9 +28,11 @@ from app.shadow.models import ShadowDecisionResult
 from app.shadow.positions import ShadowOpenPositionTracker
 from app.shadow.ranker import compute_master_rank_score
 from app.shadow.reconstruct import (
+    fetch_unevaluated_cex_scan_events,
     fetch_unevaluated_opportunities,
     master_approved,
     old_engine_approved,
+    persist_cex_scan_shadow_decision,
     persist_shadow_decision,
     rebuild_shadow_ledger_from_history,
     reconstruct_old_engine_decision,
@@ -85,12 +87,39 @@ async def run_one_batch(ledger: ShadowCapitalLedger, position_tracker: ShadowOpe
         return len(opportunities)
 
 
+async def run_one_cex_scan_batch(scan_ledger: ShadowCapitalLedger, scan_position_tracker: ShadowOpenPositionTracker) -> int:
+    """PHASE 2B (user directive, 2026-08-22) — replays OLD's real CEX
+    scan-cycle decisions (app.database.models.CexScanEventRecord, written
+    by main.py's telemetry tap) at the SAME granularity OLD operates at:
+    every scan, continuations included. Uses a DEDICATED ledger/tracker,
+    never the opportunity-level ones above — keeps this genuinely
+    1:1-comparable analysis internally consistent rather than conflating
+    two different granularities of simulated capital state."""
+    async with async_session_factory() as session:
+        pairs = await fetch_unevaluated_cex_scan_events(session)
+        if not pairs:
+            return 0
+
+        for scan_event, summary in pairs:
+            master = evaluate_shadow_decision(summary, scan_ledger, scan_position_tracker, summary.detected_at)
+            await persist_cex_scan_shadow_decision(session, scan_event, master, decided_at=datetime.now(UTC).replace(tzinfo=None))
+
+        await session.commit()
+        return len(pairs)
+
+
 async def main() -> None:
     logger.info("shadow_orchestrator starting — SHADOW MODE ONLY, no executor ever called, real_orders_placed stays false")
     async with async_session_factory() as session:
         ledger = await rebuild_shadow_ledger_from_history(session)
     logger.info("shadow ledger rebuilt from history: realized_pnl_usd=%.4f", ledger.realized_pnl_usd)
     position_tracker = ShadowOpenPositionTracker()
+
+    # PHASE 2B: a SEPARATE ledger/tracker pair for the CEX scan-level
+    # replay — dedicated, not shared with the opportunity-level state
+    # above (see run_one_cex_scan_batch's own docstring).
+    cex_scan_ledger = ShadowCapitalLedger()
+    cex_scan_position_tracker = ShadowOpenPositionTracker()
 
     while True:
         try:
@@ -101,6 +130,16 @@ async def main() -> None:
             raise
         except Exception:
             logger.exception("shadow_orchestrator batch failed — will retry next poll, real engines are unaffected")
+
+        try:
+            cex_scan_processed = await run_one_cex_scan_batch(cex_scan_ledger, cex_scan_position_tracker)
+            if cex_scan_processed:
+                logger.info("evaluated %d CEX scan-level events", cex_scan_processed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("shadow_orchestrator CEX scan-level batch failed — will retry next poll, real engines are unaffected")
+
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
