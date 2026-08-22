@@ -29,9 +29,11 @@ from dashboard.theme import (
     STATUS_CRITICAL,
     STATUS_GOOD,
     STATUS_WARNING,
+    STRATEGY_LABELS,
     STRATEGY_LABELS_SIMPLE,
     humanize_delta,
     render_live_number_card,
+    render_stat_cards,
     style_fig,
 )
 
