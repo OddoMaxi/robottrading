@@ -37,6 +37,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import DexSimulatedTradeRecord
+from app.reporting.reality_baseline import REALITY_BASELINE_AT
 from app.reporting.simple_summary import CapitalUtilization, build_capital_utilization, build_portfolio_capital
 
 DEX_PAPER_TRADING_CAPITAL_USD = 5_000.0  # mirrors main.py's own constant — see module docstring
@@ -53,11 +54,29 @@ class DexCapitalSnapshot:
     utilization_pct: float
 
 
-async def build_dex_capital_snapshot(session: AsyncSession, total_capital_usd: float, now: datetime | None = None) -> DexCapitalSnapshot:
+async def build_dex_capital_snapshot(
+    session: AsyncSession, total_capital_usd: float, now: datetime | None = None, since: datetime = REALITY_BASELINE_AT
+) -> DexCapitalSnapshot:
+    """REALITY AUDIT FIX (found building this exact function, 2026-08-22):
+    realized_pnl_usd must only sum trades SINCE the Reality Baseline — the
+    live in-memory DexCapitalPool itself was freshly re-instantiated at
+    $5,000 + $0 realized P&L on the post-fix restart (main.py module
+    reload), so it only ever accumulates P&L from trades it has resolved
+    since then. Summing ALL-TIME dex_simulated_trades rows here (the first
+    version of this function did) would silently blend in the pre-fix
+    double-counted P&L this whole audit exists to exclude — caught before
+    ever reaching the dashboard, via live smoke-testing against production
+    data (DEX equity read back as ~$9,997 instead of the correct ~$5,120,
+    a dead giveaway once compared against app.reporting.benchmark's own
+    baseline-scoped net_pnl_usd for the same window)."""
     now = now or datetime.now(UTC).replace(tzinfo=None)
 
     realized_pnl = (
-        await session.execute(select(func.coalesce(func.sum(DexSimulatedTradeRecord.net_profit_usd), 0)))
+        await session.execute(
+            select(func.coalesce(func.sum(DexSimulatedTradeRecord.net_profit_usd), 0)).where(
+                DexSimulatedTradeRecord.execution_complete_at >= since
+            )
+        )
     ).scalar() or 0.0
     equity_usd = total_capital_usd + float(realized_pnl)
 
@@ -116,7 +135,7 @@ async def build_global_capital_state(
     cex_util: CapitalUtilization = await build_capital_utilization(session, cex_portfolio_id, cex_equity_usd, now)
     cex_available_usd = max(cex_equity_usd - cex_util.engaged_usd, 0.0)
 
-    dex_snapshot = await build_dex_capital_snapshot(session, dex_total_capital_usd, now)
+    dex_snapshot = await build_dex_capital_snapshot(session, dex_total_capital_usd, now, since=REALITY_BASELINE_AT)
 
     total_capital_usd = cex_equity_usd + dex_snapshot.equity_usd
     reserved_cex_usd = cex_util.engaged_usd
