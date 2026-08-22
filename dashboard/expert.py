@@ -877,7 +877,11 @@ def render_expert_mode() -> None:
         attemptable_funnels = [f for f in exec_funnels if f.strategy != "flash_loan_research"]
         if attemptable_funnels:
             st.markdown('<div class="simple-card-label" style="margin-top:14px;">Entonnoir d\'exécution DEX — du signal au profit réalisé (24h)</div>', unsafe_allow_html=True)
-            headers = ["Stratégie", "Détectées", "Net+", "Exéc.", "Tentées", "Filled", "Edge disparu", "Échoués", "Rentables", "Perdants", "Capital $", "Profit net $", "$/cap-min"]
+            headers = [
+                "Stratégie", "Détectées", "Dont doublons", "Événements uniques", "Net+", "Exéc.", "Tentées",
+                "Filled", "Edge disparu", "Non rentable à la taille", "Échoués", "Rentables", "Perdants",
+                "Capital $", "Profit net $", "$/cap-min",
+            ]
             rows_html = []
             for f in sorted(attemptable_funnels, key=lambda f: f.attempts, reverse=True):
                 capital_minute_cell = (
@@ -890,11 +894,14 @@ def render_expert_mode() -> None:
                     "<tr>"
                     f'<td style="padding:8px 10px;color:{INK_PRIMARY};">{STRATEGY_LABELS.get(f.strategy, f.strategy)}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.detected:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{STATUS_CRITICAL};">{f.duplicate_economic_event:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.unique_economic_opportunities:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.net_positive:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.executable:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{INK_SECONDARY};">{f.attempts:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{STATUS_GOOD};">{f.filled:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{INK_MUTED};">{f.edge_disappeared:,}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;color:{INK_MUTED};">{f.not_profitable_at_size:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{STATUS_CRITICAL};">{f.failed:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{STATUS_GOOD};">{f.profitable:,}</td>'
                     f'<td style="padding:8px 10px;text-align:right;color:{STATUS_CRITICAL};">{f.losing:,}</td>'
@@ -916,8 +923,14 @@ def render_expert_mode() -> None:
             """
             st.markdown(table_html, unsafe_allow_html=True)
             st.caption(
+                "Audit du 2026-08-22 : \"Dont doublons\" = opportunité atomic/séquentielle décrivant le MÊME événement "
+                "économique réel (mêmes pools, même detected_at) — seule la méthode d'exécution à plus forte valeur "
+                "attendue est tentée, l'autre est marquée duplicate_economic_event et jamais exécutée. "
+                "\"Événements uniques\" = Détectées − doublons, la mesure honnête du nombre réel d'opportunités. "
                 "Filled = exécution simulée réussie · Edge disparu = revalidation juste avant exécution a détecté un edge devenu ≤ 0 "
-                "(jamais compté comme un échec) · Échoués = tentative avec un vrai coût de gas, sans profit. "
+                "(jamais compté comme un échec) · Non rentable à la taille = l'edge a survécu à la revalidation mais aucune taille "
+                "compatible avec le capital réellement disponible n'était rentable (jamais exécuté) · "
+                "Échoués = tentative avec un vrai coût de gas, sans profit. "
                 "flash_loan_research n'apparaît jamais ici : capital emprunté simulé, jamais de capital propre engagé (spec section 35)."
             )
 

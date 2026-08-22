@@ -1,12 +1,30 @@
 """DEX Execution Funnel (Multi-Market Opportunity Engine, V5.5 continuation,
 user directive, 2026-08-22).
 
-The complete per-strategy funnel: Detected -> Gross positive -> Net
-positive after ALL costs -> Executable -> Attempted -> Filled -> Failed ->
-Edge disappeared -> Profitable -> Losing, with counts AND conversion rates
-between stages, exactly as requested. Reads app.onchain.dex_paper_trader's
+The complete per-strategy funnel: Detected -> Duplicate economic event ->
+Unique economic opportunities -> Gross positive -> Net positive after ALL
+costs -> Executable -> Attempted -> Filled -> Failed -> Edge disappeared ->
+Not profitable at size -> Profitable -> Losing, with counts AND conversion
+rates between stages, exactly as requested. Reads app.onchain.dex_paper_trader's
 own dex_simulated_trades table (never simulated_trades — see that model's
 docstring) joined back to opportunities for the pre-attempt stages.
+
+REALITY AUDIT FIX (spec sections 2/9, user directive, 2026-08-22):
+duplicate_economic_event and unique_economic_opportunities were added
+after live evidence showed nearly every sequential DEX opportunity also
+spawns an "atomic" sibling describing the SAME real-world price gap
+(identical legs/pools/detected_at) — both used to be independently
+attempted, double-booking one real economic event as two profitable
+trades (confirmed: 714 duplicate pairs, 179 simultaneously "filled", a
+combined $6,555.05 in duplicate-counted profit). main.py now marks the
+lower-expected-value twin's rejection_reason='duplicate_economic_event'
+and never attempts it — detected still counts both (an honest raw-
+detection number), unique_economic_opportunities is what actually
+represents distinct real-world events. not_profitable_at_size is a new
+DexTradeStatus (spec section 4): the edge survived revalidation but no
+achievable size against currently-available capital was worth executing
+— distinct from edge_disappeared (where the edge itself failed
+revalidation).
 """
 
 from dataclasses import dataclass
@@ -25,12 +43,14 @@ DEX_ATTEMPTABLE_STRATEGIES = ("dex_cross", "dex_triangular", "dex_multihop", "at
 class DexStrategyFunnel:
     strategy: str
     detected: int
+    duplicate_economic_event: int
     gross_positive: int
     net_positive: int
     executable: int
     attempts: int
     filled: int
     edge_disappeared: int
+    not_profitable_at_size: int
     failed: int
     no_capital_available: int
     profitable: int
@@ -41,13 +61,17 @@ class DexStrategyFunnel:
     total_net_profit_usd: float
     net_profit_per_capital_minute_usd: float | None
 
+    @property
+    def unique_economic_opportunities(self) -> int:
+        return self.detected - self.duplicate_economic_event
+
     def conversion_pct(self, numerator: int, denominator: int) -> float | None:
         return round(numerator / denominator * 100, 1) if denominator else None
 
 
 def _build_funnel(strategy: str, detection_row, attempt_row) -> DexStrategyFunnel:
-    detected, gross_positive, net_positive, executable = (int(x or 0) for x in detection_row)
-    attempts, filled, edge_disappeared, failed, no_capital, profitable, losing, capital_used, total_net_profit, avg_lock_ms = attempt_row
+    detected, duplicate_economic_event, gross_positive, net_positive, executable = (int(x or 0) for x in detection_row)
+    attempts, filled, edge_disappeared, not_profitable_at_size, failed, no_capital, profitable, losing, capital_used, total_net_profit, avg_lock_ms = attempt_row
 
     attempts = int(attempts or 0)
     filled = int(filled or 0)
@@ -57,12 +81,14 @@ def _build_funnel(strategy: str, detection_row, attempt_row) -> DexStrategyFunne
     return DexStrategyFunnel(
         strategy=strategy,
         detected=detected,
+        duplicate_economic_event=duplicate_economic_event,
         gross_positive=gross_positive,
         net_positive=net_positive,
         executable=executable,
         attempts=attempts,
         filled=filled,
         edge_disappeared=int(edge_disappeared or 0),
+        not_profitable_at_size=int(not_profitable_at_size or 0),
         failed=int(failed or 0),
         no_capital_available=int(no_capital or 0),
         profitable=int(profitable or 0),
@@ -81,6 +107,7 @@ async def build_dex_execution_funnel(session: AsyncSession, hours: float = 24.0,
     now = now or datetime.now(UTC).replace(tzinfo=None)
     cutoff = now - timedelta(hours=hours)
 
+    duplicate_case = case((OpportunityRecord.rejection_reason == "duplicate_economic_event", 1), else_=0)
     gross_positive_case = case((OpportunityRecord.gross_spread_pct > 0, 1), else_=0)
     net_positive_case = case((OpportunityRecord.net_spread_pct > 0, 1), else_=0)
     executable_case = case((OpportunityRecord.rejection_reason.is_(None), 1), else_=0)
@@ -89,6 +116,7 @@ async def build_dex_execution_funnel(session: AsyncSession, hours: float = 24.0,
             select(
                 OpportunityRecord.strategy,
                 func.count(),
+                func.coalesce(func.sum(duplicate_case), 0),
                 func.coalesce(func.sum(gross_positive_case), 0),
                 func.coalesce(func.sum(net_positive_case), 0),
                 func.coalesce(func.sum(executable_case), 0),
@@ -101,6 +129,7 @@ async def build_dex_execution_funnel(session: AsyncSession, hours: float = 24.0,
 
     filled_case = case((DexSimulatedTradeRecord.status == "dex_filled", 1), else_=0)
     edge_disappeared_case = case((DexSimulatedTradeRecord.status == "dex_edge_disappeared", 1), else_=0)
+    not_profitable_at_size_case = case((DexSimulatedTradeRecord.status == "dex_not_profitable_at_size", 1), else_=0)
     failed_case = case((DexSimulatedTradeRecord.status == "dex_failed", 1), else_=0)
     no_capital_case = case((DexSimulatedTradeRecord.status == "dex_no_capital_available", 1), else_=0)
     profitable_case = case((DexSimulatedTradeRecord.net_profit_usd > 0, 1), else_=0)
@@ -112,6 +141,7 @@ async def build_dex_execution_funnel(session: AsyncSession, hours: float = 24.0,
                 func.count(),
                 func.coalesce(func.sum(filled_case), 0),
                 func.coalesce(func.sum(edge_disappeared_case), 0),
+                func.coalesce(func.sum(not_profitable_at_size_case), 0),
                 func.coalesce(func.sum(failed_case), 0),
                 func.coalesce(func.sum(no_capital_case), 0),
                 func.coalesce(func.sum(profitable_case), 0),
@@ -127,8 +157,8 @@ async def build_dex_execution_funnel(session: AsyncSession, hours: float = 24.0,
     attempt_by_strategy = {row[0]: row[1:] for row in attempt_rows}
 
     all_strategies = sorted(set(detection_by_strategy) | set(attempt_by_strategy))
-    zero_detection = (0, 0, 0, 0)
-    zero_attempt = (0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, None)
+    zero_detection = (0, 0, 0, 0, 0)
+    zero_attempt = (0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, None)
     return [
         _build_funnel(strategy, detection_by_strategy.get(strategy, zero_detection), attempt_by_strategy.get(strategy, zero_attempt))
         for strategy in all_strategies

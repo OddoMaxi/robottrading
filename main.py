@@ -344,10 +344,22 @@ async def dex_detection_loop() -> None:
                     # worth: no unhedged-leg risk, but gas is paid even on a
                     # revert and the naive "assume it always lands" profit
                     # is replaced by a probability-weighted expected value.
-                    # Only added alongside the sequential-execution version
-                    # (never replacing it — they're different strategies
-                    # with different risk profiles) when the atomic pricing
-                    # still clears the same minimum edge.
+                    #
+                    # REALITY AUDIT FIX (spec sections 2/9, user directive,
+                    # 2026-08-22): atomic_opp and opp describe the SAME
+                    # real-world price gap (identical legs/pools/detected_at
+                    # — just two different execution METHODS for it), so
+                    # both were previously appended and both independently
+                    # attempted against the shared capital pool, double-
+                    # booking one real economic event as two profitable
+                    # trades. Confirmed live: 714 duplicate pairs, 179
+                    # simultaneously "filled" for a combined $6,555.05 in
+                    # duplicate-counted profit. Both are still persisted as
+                    # detected opportunities (so the funnel keeps an honest
+                    # raw-detection count and records which were duplicates
+                    # of one underlying event), but only the
+                    # higher-expected-value execution method for a given
+                    # real event is ever attempted.
                     for opp in list(new_opportunities):
                         atomic_result = simulate_atomic_bundle(opp, gas_estimate.gas_cost_usd)
                         if atomic_result is None:
@@ -355,6 +367,10 @@ async def dex_detection_loop() -> None:
                         atomic_opp = as_atomic_opportunity(opp, atomic_result)
                         if atomic_opp.net_spread_pct is not None and atomic_opp.net_spread_pct >= MIN_NET_EDGE_PCT:
                             new_opportunities.append(atomic_opp)
+                            opp_ev = opp.expected_profit_usd or 0.0
+                            atomic_ev = atomic_opp.expected_profit_usd or 0.0
+                            loser = atomic_opp if atomic_ev <= opp_ev else opp
+                            loser.rejection_reason = "duplicate_economic_event"
 
                     # Master Opportunity Ranker (spec sections 17-18) —
                     # every DEX opportunity, regardless of which of the 4
@@ -381,8 +397,12 @@ async def dex_detection_loop() -> None:
                         # (spec section 35: never reduce available own
                         # capital — that pool represents real own capital
                         # shadow trading, borrowed amounts are a separate
-                        # research question).
-                        if opp.strategy in DEX_ATTEMPTABLE_STRATEGIES:
+                        # research question). duplicate_economic_event is
+                        # also excluded (reality audit fix, above) — it's
+                        # the lower-EV twin of an opportunity already being
+                        # attempted this same cycle under a different
+                        # execution method, not a second real opportunity.
+                        if opp.strategy in DEX_ATTEMPTABLE_STRATEGIES and opp.rejection_reason != "duplicate_economic_event":
                             attempt = attempt_dex_trade(opp, dex_capital_pool, gas_estimate.gas_cost_usd, _dex_paper_trading_rng, now=scan_time)
                             await save_dex_trade_attempt(session, attempt)
 
