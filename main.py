@@ -387,7 +387,22 @@ async def dex_detection_loop() -> None:
                         if observation.is_new:
                             await save_opportunity(session, opp)
                         else:
-                            await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=None)
+                            # PRE-PHASE-2 CORRECTIVE MAINTENANCE (2026-08-22):
+                            # was hardcoded rejection_reason=None, which
+                            # ERASED the duplicate_economic_event marking
+                            # (set on `opp` earlier this same cycle by the
+                            # atomic-dedup loop above) on every single
+                            # continuation update — found live during the
+                            # Reality Audit's Mission 3 verification (the
+                            # persisted duplicate count was ~50% of the true,
+                            # directly-verified count). Passing opp's own
+                            # freshly-recomputed rejection_reason instead
+                            # exactly matches the CEX continuation call site's
+                            # already-correct pattern just below (line ~446)
+                            # — the dedup decision is re-evaluated fresh
+                            # every cycle and persisted as-is, never silently
+                            # overwritten with a stale None.
+                            await update_opportunity_tracking(session, observation.tracked, opp, rejection_reason=opp.rejection_reason)
                             continue  # a continuation of an already-attempted signal — never re-attempt it every cycle
 
                         # DEX Paper Trading (user directive, 2026-08-22) —

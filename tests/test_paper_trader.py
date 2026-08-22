@@ -5,6 +5,7 @@ import pytest
 from app.config.constants import DEFAULT_OPPORTUNITY_CAPITAL_USD, Strategy
 from app.opportunity.models import Opportunity
 from app.risk.limits import RiskLimits
+from app.simulation.money import round_usd
 from app.simulation.paper_trader import EMERGENCY_UNWIND_COST_PCT, EXECUTION_SLIPPAGE_MEAN_PCT, PaperTrader, TradeStatus
 from app.simulation.portfolios import VirtualPortfolio
 
@@ -250,7 +251,7 @@ def test_executed_trade_books_profit_and_updates_balance():
 
     trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED)
 
-    expected_profit = 3.0 + 1_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)
+    expected_profit = round_usd(3.0 + 1_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100))
     assert trade.net_profit_usd == pytest.approx(expected_profit)
     assert portfolio.balances["USDT"] == pytest.approx(1_000.0 + expected_profit)
 
@@ -276,7 +277,7 @@ def test_hold_based_trade_scales_up_to_risk_limit_for_a_large_portfolio():
     trade = trader.simulate(opp, portfolio, TradeStatus.SIMULATED_EXECUTED, now=1_000.0)
 
     assert trade.capital_usd == pytest.approx(5_000.0)  # capped by the risk limit, not the portfolio's full $10k
-    expected_profit = 15.0 + 5_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)  # 5x the $1,000-priced profit, scaled linearly, minus slippage
+    expected_profit = round_usd(15.0 + 5_000.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100))  # 5x the $1,000-priced profit, scaled linearly, minus slippage
     assert trade.net_profit_usd == pytest.approx(expected_profit)
 
 
@@ -311,7 +312,14 @@ def test_hold_based_trade_respects_a_small_portfolio():
 
     assert trade.capital_usd == pytest.approx(300.0)
     expected_profit = 0.9 + 300.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)  # 0.3% of $300, minus slippage
-    assert trade.net_profit_usd == pytest.approx(expected_profit)
+    # Within a cent, not exact-to-the-cent: this raw value (0.855) sits
+    # exactly on a rounding boundary, and app.simulation.money.round_usd
+    # quantizes app.simulation.paper_trader's own float computation (a
+    # different intermediate operation order than this test's
+    # independent recomputation) — float noise this close to X.XX5 can
+    # legitimately round either direction depending on which of two
+    # mathematically-equivalent expressions produced it.
+    assert trade.net_profit_usd == pytest.approx(expected_profit, abs=0.01)
 
 
 def test_hold_based_trade_locks_capital_on_the_portfolio():

@@ -920,10 +920,16 @@ def render_reality_page() -> None:
             ]
         )
         dup = data.get_duplicate_monitor_report_cached()
+        if not dup.reliable:
+            st.markdown(
+                f'<div class="simple-card" style="border-color:#f59e0b;"><div class="simple-card-sub warn">'
+                f'⚠️ LEGACY / NOT RELIABLE — {dup.legacy_note}</div></div>',
+                unsafe_allow_html=True,
+            )
         render_stat_cards(
             [
-                {"label": "Détections DEX brutes (depuis audit)", "value": f"{dup.raw_detections:,}".replace(",", " ")},
-                {"label": "Doublons économiques éliminés", "value": f"{dup.duplicate_economic_events_eliminated:,}".replace(",", " ")},
+                {"label": "Détections DEX brutes (depuis baseline)", "value": f"{dup.raw_detections:,}".replace(",", " ")},
+                {"label": "Doublons économiques éliminés", "value": f"{dup.duplicate_economic_events_eliminated:,}".replace(",", " "), "sub": None if dup.reliable else "compteur non fiable pour cette fenêtre"},
                 {"label": "Opportunités économiques uniques", "value": f"{dup.unique_economic_opportunities:,}".replace(",", " ")},
                 {
                     "label": "Faux P&L évité (estimation)",

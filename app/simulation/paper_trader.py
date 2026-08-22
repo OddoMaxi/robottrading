@@ -19,6 +19,7 @@ from app.execution.latency_engine import DEFAULT_PROFILE, LatencyProfile, revali
 from app.opportunity.false_opportunity_filter import MAX_QUOTE_AGE_SECONDS
 from app.opportunity.models import Opportunity
 from app.risk.limits import RiskLimits
+from app.simulation.money import round_usd
 from app.simulation.portfolios import VirtualPortfolio
 
 # capital_usd coming in below this fraction of the standard order size means
@@ -196,6 +197,21 @@ class PaperTrader:
             slippage_usd = capital * (slippage_pct / 100)
             net_profit += slippage_usd
             fees = gross_profit - net_profit
+
+        # PRE-PHASE-2 CORRECTIVE MAINTENANCE (2026-08-22): net_profit is
+        # quantized to the cent HERE — the one point the trade's outcome
+        # becomes final — before it's credited to the live balance or
+        # persisted. Without this, the live balance accumulated the
+        # full-precision value (this rng.gauss() slippage draw is never a
+        # round number of cents) while SimulatedTradeRecord.net_profit_usd
+        # (Numeric(20,2)) silently rounded to cents on write; the two
+        # diverged by more than a cent after enough trade volume — see
+        # app.simulation.money's own docstring for the full root-cause
+        # trace (the 2026-08-22 "25K" ledger integrity violation). fees is
+        # recomputed from the now-rounded net_profit so gross - fees ==
+        # net stays exact in the persisted record, not just close.
+        net_profit = round_usd(net_profit)
+        fees = gross_profit - net_profit
 
         # Profit is credited immediately (V1 simplification — full deferred
         # settlement at close isn't built yet), so both the principal *and*

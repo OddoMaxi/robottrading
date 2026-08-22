@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import OpportunityRecord, SimulatedTradeRecord
 from app.reporting.rotation import EXECUTED_STATUSES
+from app.simulation.money import round_usd
 from app.simulation.paper_trader import EMERGENCY_UNWIND_COST_PCT, TradeStatus
 from app.simulation.portfolios import VirtualPortfolio
 
@@ -107,7 +108,12 @@ async def force_exit_overdue_positions(
 
         _trade_id, opportunity_id, capital_usd, original_net_profit_usd = match
         exit_cost_usd = capital_usd * (EMERGENCY_UNWIND_COST_PCT / 100)
-        adjustment_usd = -original_net_profit_usd - exit_cost_usd
+        # PRE-PHASE-2 CORRECTIVE MAINTENANCE (2026-08-22): rounded to the
+        # cent for the same reason app.simulation.paper_trader.simulate
+        # now rounds net_profit — this value is credited to the live
+        # balance AND persisted verbatim; without rounding here, the two
+        # can silently diverge the same way the "25K" ledger violation did.
+        adjustment_usd = round_usd(-original_net_profit_usd - exit_cost_usd)
 
         portfolio.balances["USDT"] = portfolio.balances.get("USDT", 0.0) + adjustment_usd
         portfolio.force_release_lock(position_key)

@@ -9,6 +9,7 @@ from app.engines.cross_exchange import CrossExchangeArbitrageEngine
 from app.market_data.normalizer import NormalizedQuote
 from app.market_data.store import MarketDataStore
 from app.opportunity.detector import OpportunityDetector
+from app.simulation.money import round_usd
 from app.simulation.paper_trader import EXECUTION_SLIPPAGE_MEAN_PCT, PaperTrader, TradeStatus
 from app.simulation.portfolios import build_default_portfolios
 
@@ -61,6 +62,6 @@ async def test_full_pipeline_detect_score_and_paper_trade():
     # 31) — well under the $1,000 the opportunity itself was priced/liquidity-capped at.
     assert trade.capital_usd == pytest.approx(200.0)
     expected_scale = 200.0 / opp.capital_usd
-    expected_profit = opp.expected_profit_usd * expected_scale + 200.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100)
+    expected_profit = round_usd(opp.expected_profit_usd * expected_scale + 200.0 * (EXECUTION_SLIPPAGE_MEAN_PCT / 100))
     assert trade.net_profit_usd == pytest.approx(expected_profit)
     assert portfolio.balances["USDT"] == pytest.approx(1_000 + trade.net_profit_usd)
