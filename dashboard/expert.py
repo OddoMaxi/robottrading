@@ -886,5 +886,22 @@ def render_expert_mode() -> None:
                 ]
             )
 
+        # Benchmark: CEX-only vs Multi-Market (spec section 38) — no
+        # separate "before" run exists to replay (V5.5 was built and
+        # deployed progressively, not toggled on wholesale at one instant)
+        # — this compares CEX-only activity against combined CEX+DEX
+        # activity within the SAME live window instead.
+        benchmark = data.get_benchmark_report_cached(hours=24.0)
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Benchmark — CEX seul vs Multi-Market (24h)</div>', unsafe_allow_html=True)
+        uplift_display = f"{benchmark.executable_per_hour_uplift_pct:+.0f} %" if benchmark.executable_per_hour_uplift_pct is not None else "—"
+        render_stat_cards(
+            [
+                {"label": "CEX seul — exécutables/h", "value": f"{benchmark.cex_only.executable_per_hour:.2f} /h"},
+                {"label": "DEX seul — exécutables/h", "value": f"{benchmark.dex_only.executable_per_hour:.2f} /h"},
+                {"label": "Multi-Market combiné — exécutables/h", "value": f"{benchmark.combined.executable_per_hour:.2f} /h"},
+                {"label": "Gain apporté par le DEX", "value": uplift_display, "sub": "opportunités exécutables/heure, CEX seul vs combiné"},
+            ]
+        )
+
     st.divider()
     st.caption(f"Plateformes surveillées : {', '.join(e.capitalize() for e in PRIORITY_EXCHANGES)}")
