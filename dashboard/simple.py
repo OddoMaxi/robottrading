@@ -1028,6 +1028,83 @@ def render_reality_page() -> None:
             ]
         )
 
+    render_phase2_shadow_section()
+
+
+# --- PHASE 2 — GLOBAL ORCHESTRATION / SHADOW MODE (user directive, 2026-08-22) ---
+#
+# Strictly observational: every number below comes from shadow_decisions,
+# written ONLY by shadow_orchestrator.py — a separate process that never
+# imports the real executors (tests/test_shadow_isolation.py proves this
+# mechanically). Nothing on this page can ever reflect a real order, a
+# real balance change, or a decision that influenced V5/V5.5.
+
+
+def render_phase2_shadow_section() -> None:
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #6366f1;border-radius:14px;background:rgba(99,102,241,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#6366f1;">PHASE 2 — GLOBAL ORCHESTRATION / SHADOW MODE</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">Observation uniquement — aucun capital réel, aucune position, '
+        "aucun ordre. L'ancien moteur (V5/V5.5) reste l'unique autorité d'exécution.</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    summary = data.get_shadow_summary_cached(hours=24.0)
+    if summary.total_decisions == 0:
+        st.caption("SHADOW MODE — en attente de la première évaluation (shadow_orchestrator.py doit être en cours d'exécution).")
+        return
+
+    st.markdown('<span class="simple-status-pill simple-status-running" style="display:inline-block;margin:10px 0;">🟢 SHADOW MODE ACTIVE</span>', unsafe_allow_html=True)
+
+    render_stat_cards(
+        [
+            {"label": "Décisions comparées (24h)", "value": f"{summary.total_decisions:,}".replace(",", " ")},
+            {"label": "Accord OLD vs MASTER", "value": f"{summary.agreement_pct:.1f} %" if summary.agreement_pct is not None else "—"},
+            {"label": "Désaccord", "value": f"{summary.disagree_count:,}".replace(",", " ")},
+            {"label": "OLD accepté, MASTER aurait rejeté", "value": f"{summary.old_approved_master_rejected:,}".replace(",", " ")},
+            {"label": "OLD rejeté, MASTER aurait accepté", "value": f"{summary.old_rejected_master_approved:,}".replace(",", " ")},
+            {"label": "Conflits de capital détectés", "value": f"{summary.capital_conflicts_detected:,}".replace(",", " "), "sub": "doubles allocations théoriques empêchées"},
+            {"label": "Capital théorique réservé (cumul)", "value": f"{summary.theoretical_capital_reserved_usd:,.2f} $".replace(",", " ")},
+            {"label": "P&L OLD simulé", "value": f"{summary.old_pnl_usd:+.2f} $"},
+            {"label": "P&L MASTER simulé (projection)", "value": f"{summary.master_pnl_usd:+.2f} $"},
+            {"label": "Différence P&L", "value": f"{summary.pnl_difference_usd:+.2f} $"},
+        ]
+    )
+
+    with st.expander("Répartition par moteur"):
+        for eb in data.get_shadow_engine_breakdown_cached(hours=24.0):
+            agree_str = f"{eb.agreement_pct:.1f} %" if eb.agreement_pct is not None else "—"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{eb.engine} — {eb.total_decisions:,} décisions, {agree_str} accord</span>'
+                f'<span class="v">OLD {eb.old_pnl_usd:+.2f} $ · MASTER {eb.master_pnl_usd:+.2f} $</span></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("Répartition par stratégie"):
+        for sb in data.get_shadow_strategy_breakdown_cached(hours=24.0):
+            agree_str = f"{sb.agreement_pct:.1f} %" if sb.agreement_pct is not None else "—"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{STRATEGY_LABELS.get(sb.strategy, sb.strategy)} '
+                f'<span style="color:{INK_MUTED};">({sb.engine})</span> — {sb.total_decisions:,}, {agree_str}</span>'
+                f'<span class="v">OLD {sb.old_pnl_usd:+.2f} $ · MASTER {sb.master_pnl_usd:+.2f} $</span></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("Décisions récentes"):
+        for d in data.get_recent_shadow_decisions_cached(limit=15):
+            agree_icon = "✓" if d.agree else "⚠️"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{agree_icon} {STRATEGY_LABELS.get(d.strategy, d.strategy)} '
+                f'<span style="color:{INK_MUTED};">({d.engine}, {d.symbol})</span></span>'
+                f'<span class="v">OLD: {d.old_outcome} · MASTER: {d.master_outcome} (rang {d.master_rank_score:.1f})</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "real_orders_placed reste false. Aucune décision ci-dessus n'a jamais été transmise à un exécuteur réel. "
+        "P&L MASTER est une projection sur expected_profit_usd déjà calculé par les moteurs réels, pas un résultat rejoué au hasard."
+    )
+
 
 def render_simple_mode() -> None:
     page = st.session_state.get("simple_page", "accueil")

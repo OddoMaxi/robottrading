@@ -38,9 +38,19 @@ from app.reporting.duplicate_monitor import DuplicateMonitorReport, build_duplic
 from app.reporting.global_capital import GlobalCapitalState, build_global_capital_state
 from app.reporting.global_rejection_breakdown import RejectionReasonRow, build_global_rejection_breakdown
 from app.reporting.master_strategy_ranking import StrategyPerformance, build_master_strategy_ranking
-from app.reporting.reality_baseline import REALITY_BASELINE_AT, hours_since_baseline, window_contains_pre_baseline_data
+from app.reporting.reality_baseline import PRE_PHASE_2_VALIDATION_BASELINE_AT, REALITY_BASELINE_AT, hours_since_baseline, window_contains_pre_baseline_data
 from app.reporting.reality_reliability import RealityReliabilityReport, build_reality_reliability_report
 from app.reporting.rotation import RotationReport, build_rotation_report
+from app.reporting.shadow_report import (
+    ShadowEngineBreakdown,
+    ShadowRecentDecision,
+    ShadowStrategyBreakdown,
+    ShadowSummary,
+    build_shadow_engine_breakdown,
+    build_shadow_strategy_breakdown,
+    build_shadow_summary,
+    list_recent_shadow_decisions,
+)
 from app.reporting.simple_summary import (
     CapitalUtilization,
     EquityPoint,
@@ -775,3 +785,66 @@ async def fetch_capital_tier_replay_results() -> list[CapitalTierReplayResult]:
 @st.cache_data(ttl=300, show_spinner=False)
 def get_capital_tier_replay_results_cached() -> list[CapitalTierReplayResult]:
     return asyncio.run(fetch_capital_tier_replay_results())
+
+
+# --- Phase 2 — Global Orchestration, SHADOW MODE ONLY (user directive, 2026-08-22) ---
+
+
+async def fetch_shadow_summary(hours: float = 24.0) -> ShadowSummary:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_shadow_summary(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_shadow_summary_cached(hours: float = 24.0) -> ShadowSummary:
+    return asyncio.run(fetch_shadow_summary(hours))
+
+
+async def fetch_shadow_engine_breakdown(hours: float = 24.0) -> list[ShadowEngineBreakdown]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_shadow_engine_breakdown(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_shadow_engine_breakdown_cached(hours: float = 24.0) -> list[ShadowEngineBreakdown]:
+    return asyncio.run(fetch_shadow_engine_breakdown(hours))
+
+
+async def fetch_shadow_strategy_breakdown(hours: float = 24.0) -> list[ShadowStrategyBreakdown]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await build_shadow_strategy_breakdown(session, hours=hours)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_shadow_strategy_breakdown_cached(hours: float = 24.0) -> list[ShadowStrategyBreakdown]:
+    return asyncio.run(fetch_shadow_strategy_breakdown(hours))
+
+
+async def fetch_recent_shadow_decisions(limit: int = 15) -> list[ShadowRecentDecision]:
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            return await list_recent_shadow_decisions(session, limit=limit)
+    finally:
+        await engine.dispose()
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def get_recent_shadow_decisions_cached(limit: int = 15) -> list[ShadowRecentDecision]:
+    return asyncio.run(fetch_recent_shadow_decisions(limit))

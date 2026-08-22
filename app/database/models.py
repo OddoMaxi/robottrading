@@ -242,6 +242,49 @@ class DexSimulatedTradeRecord(Base):
     total_execution_ms: Mapped[float] = mapped_column(Numeric(12, 3))
 
 
+class ShadowDecisionRecord(Base):
+    """Phase 2 — Global Orchestration, SHADOW MODE ONLY (user directive,
+    2026-08-22). One row per already-detected opportunity (CEX or DEX),
+    comparing what the real engine actually did (old_engine_*, read from
+    the real, already-persisted simulated_trades/dex_simulated_trades —
+    never written to) against what app.shadow's own Master Ranker +
+    Global Capital Allocator SIMULATION would have decided, against its
+    own entirely separate ShadowCapitalLedger (app.shadow.ledger).
+
+    Deliberately NOT foreign-keyed to virtual_portfolios or anything the
+    real executors write to — this table is written to by
+    shadow_orchestrator.py ONLY, a process that never imports
+    app.simulation.paper_trader or app.onchain.dex_paper_trader (see
+    app/shadow/__init__.py and tests/test_shadow_isolation.py). Reading
+    or deleting rows here can never affect real capital, positions, or
+    the real engines' own decisions — this table is pure observation."""
+
+    __tablename__ = "shadow_decisions"
+    __table_args__ = (Index("ix_shadow_decisions_decided_at", "decided_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True, unique=True)
+    engine: Mapped[str]  # "CEX" or "DEX"
+    strategy: Mapped[str] = mapped_column(index=True)
+    symbol: Mapped[str]
+    detected_at: Mapped[datetime]
+    decided_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+    old_engine_outcome: Mapped[str]
+    old_engine_reason: Mapped[str | None]
+    old_engine_net_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    old_engine_capital_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
+
+    master_outcome: Mapped[str]
+    master_reason: Mapped[str | None]
+    master_rank_score: Mapped[float]
+    master_capital_reserved_usd: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    master_projected_net_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    master_capital_available_global_usd: Mapped[float] = mapped_column(Numeric(20, 2))
+
+    agree: Mapped[bool]
+
+
 class Balance(Base):
     __tablename__ = "balances"
     __table_args__ = (UniqueConstraint("portfolio_id", "exchange_id", "asset_id"),)
