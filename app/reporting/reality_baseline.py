@@ -40,10 +40,10 @@ from datetime import datetime
 
 REALITY_BASELINE_AT = datetime(2026, 8, 22, 10, 24, 34)  # UTC, naive — matches this codebase's datetime.now(UTC).replace(tzinfo=None) convention
 
-# Set to the exact post-corrective-maintenance restart timestamp once that
-# restart actually happens (spec Part 6) — read from the VPS clock, same
-# discipline as REALITY_BASELINE_AT itself. None means "not yet restarted".
-PRE_PHASE_2_VALIDATION_BASELINE_AT: datetime | None = None
+# The controlled restart (spec Part 6) happened at this exact timestamp —
+# read from the VPS clock (systemctl show -p ActiveEnterTimestamp) right
+# after the restart, same discipline as REALITY_BASELINE_AT itself.
+PRE_PHASE_2_VALIDATION_BASELINE_AT: datetime | None = datetime(2026, 8, 22, 15, 9, 52)
 
 # The window between the two baselines has a confirmed, disclosed
 # reporting limitation (NOT a capital-safety issue) — see module docstring.
