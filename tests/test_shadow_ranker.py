@@ -11,6 +11,7 @@ def _opp(**overrides) -> ShadowOpportunitySummary:
         engine=Engine.CEX,
         strategy="cross_exchange",
         symbol="BTC/USDT",
+        legs=[{"exchange": "binance"}, {"exchange": "bybit"}],
         chain=None,
         expected_profit_usd=5.0,
         capital_usd=1_000.0,

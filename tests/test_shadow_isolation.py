@@ -23,9 +23,7 @@ ORCHESTRATOR_ENTRYPOINT = REPO_ROOT / "shadow_orchestrator.py"
 # within reach — direct imports of these are forbidden anywhere in
 # app/shadow or the orchestrator entrypoint.
 FORBIDDEN_MODULE_PREFIXES = (
-    "app.simulation.paper_trader",
-    "app.simulation.portfolios",
-    "app.simulation.time_stop",
+    "app.simulation",  # widened from individual submodules (PRE-PHASE-2 CORRECTIVE MAINTENANCE #2): app.shadow.positions deliberately reimplements app.simulation.position_tracker's logic rather than importing it — this blanket rule keeps that guarantee simple to state and enforce, not just the 3 submodules previously listed
     "app.onchain.dex_paper_trader",
     "main",  # the live engine entrypoint — its running dex_capital_pool/portfolios are real, mutable, shared state
 )
@@ -97,3 +95,16 @@ def test_shadow_ledger_is_a_standalone_class_not_a_reference_to_the_real_pools()
 
     assert ShadowCapitalLedger is not real_dex_module.DexCapitalPool
     assert not issubclass(ShadowCapitalLedger, real_cex_module.VirtualPortfolio)
+
+
+def test_shadow_position_tracker_is_a_standalone_class_not_a_reference_to_the_real_one():
+    """Same belt-and-suspenders check for fix 2 (PRE-PHASE-2 CORRECTIVE
+    MAINTENANCE #2): app.shadow.positions.ShadowOpenPositionTracker must
+    be its own class, not app.simulation.position_tracker.OpenPositionTracker
+    imported under a different name."""
+    from app.shadow.positions import ShadowOpenPositionTracker
+
+    import app.simulation.position_tracker as real_position_module
+
+    assert ShadowOpenPositionTracker is not real_position_module.OpenPositionTracker
+    assert not issubclass(ShadowOpenPositionTracker, real_position_module.OpenPositionTracker)

@@ -26,6 +26,8 @@ class ShadowSummary:
     old_rejected_master_approved: int  # OLD rejected/didn't attempt, MASTER would have allocated
     capital_conflicts_detected: int  # MASTER rejections specifically for lack of capital (NO the opportunity wasn't bad, capital was the binding constraint)
     double_allocations_prevented: int  # same as capital_conflicts_detected, from the allocator's own perspective — surfaced under both names per spec
+    duplicate_economic_events_blocked: int  # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2, fix 1
+    position_already_open_reproduced: int  # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2, fix 2
     theoretical_capital_reserved_usd: float
     old_pnl_usd: float
     master_pnl_usd: float
@@ -85,6 +87,8 @@ async def build_shadow_summary(session: AsyncSession, hours: float = 24.0, now: 
         else_=0,
     )
     capital_conflict_case = case((ShadowDecisionRecord.master_outcome == "reject_no_capital", 1), else_=0)
+    duplicate_case = case((ShadowDecisionRecord.master_outcome == "reject_duplicate_economic_event", 1), else_=0)
+    position_open_case = case((ShadowDecisionRecord.master_outcome == "reject_position_already_open", 1), else_=0)
 
     row = (
         await session.execute(
@@ -94,6 +98,8 @@ async def build_shadow_summary(session: AsyncSession, hours: float = 24.0, now: 
                 func.coalesce(func.sum(old_approved_master_rejected_case), 0),
                 func.coalesce(func.sum(old_rejected_master_approved_case), 0),
                 func.coalesce(func.sum(capital_conflict_case), 0),
+                func.coalesce(func.sum(duplicate_case), 0),
+                func.coalesce(func.sum(position_open_case), 0),
                 func.coalesce(func.sum(ShadowDecisionRecord.master_capital_reserved_usd), 0),
                 func.coalesce(func.sum(ShadowDecisionRecord.old_engine_net_profit_usd), 0),
                 func.coalesce(func.sum(ShadowDecisionRecord.master_projected_net_profit_usd), 0),
@@ -101,15 +107,20 @@ async def build_shadow_summary(session: AsyncSession, hours: float = 24.0, now: 
         )
     ).first()
 
-    total, agree_count, old_approved_master_rejected, old_rejected_master_approved, capital_conflicts, capital_reserved, old_pnl, master_pnl = (
+    (
+        total, agree_count, old_approved_master_rejected, old_rejected_master_approved,
+        capital_conflicts, duplicates_blocked, position_open_reproduced, capital_reserved, old_pnl, master_pnl,
+    ) = (
         int(row[0] or 0),
         int(row[1] or 0),
         int(row[2] or 0),
         int(row[3] or 0),
         int(row[4] or 0),
-        float(row[5] or 0.0),
-        float(row[6] or 0.0),
+        int(row[5] or 0),
+        int(row[6] or 0),
         float(row[7] or 0.0),
+        float(row[8] or 0.0),
+        float(row[9] or 0.0),
     )
 
     return ShadowSummary(
@@ -122,6 +133,8 @@ async def build_shadow_summary(session: AsyncSession, hours: float = 24.0, now: 
         old_rejected_master_approved=old_rejected_master_approved,
         capital_conflicts_detected=capital_conflicts,
         double_allocations_prevented=capital_conflicts,
+        duplicate_economic_events_blocked=duplicates_blocked,
+        position_already_open_reproduced=position_open_reproduced,
         theoretical_capital_reserved_usd=capital_reserved,
         old_pnl_usd=old_pnl,
         master_pnl_usd=master_pnl,

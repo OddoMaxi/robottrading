@@ -23,16 +23,52 @@ from datetime import datetime
 
 from app.shadow.ledger import ShadowCapitalLedger
 from app.shadow.models import MasterDecision, MasterOutcome, ShadowOpportunitySummary
+from app.shadow.positions import ShadowOpenPositionTracker, position_key_for
 from app.shadow.ranker import compute_expected_value_usd, compute_master_rank_score
 
 DEFAULT_HOLDING_SECONDS = 60.0  # fallback capital-lock duration when an opportunity carries none
 
 
-def evaluate_shadow_decision(opp: ShadowOpportunitySummary, ledger: ShadowCapitalLedger, now: datetime) -> MasterDecision:
+def duplicate_economic_event_decision(rank_score: float, winner_opportunity_id: uuid.UUID, capital_available_global_usd: float) -> MasterDecision:
+    """PRE-PHASE-2 CORRECTIVE MAINTENANCE #2 (fix 1): built by the caller
+    (app.shadow.dedup has already identified this opportunity as the
+    lower-ranked twin of `winner_opportunity_id`) — never independently
+    evaluated for capital, exactly mirroring how main.py's real dedup fix
+    excludes the loser from ever reaching attempt_dex_trade."""
+    return MasterDecision(
+        outcome=MasterOutcome.REJECT_DUPLICATE_ECONOMIC_EVENT,
+        reason=f"same economic event (legs+detected_at) as opportunity {winner_opportunity_id}, lower rank score",
+        rank_score=rank_score,
+        theoretical_capital_reserved_usd=None,
+        projected_net_profit_usd=None,
+        capital_available_global_usd=capital_available_global_usd,
+    )
+
+
+def evaluate_shadow_decision(
+    opp: ShadowOpportunitySummary, ledger: ShadowCapitalLedger, position_tracker: ShadowOpenPositionTracker, now: datetime
+) -> MasterDecision:
     now_epoch = now.timestamp()
     available_now = ledger.available_capital_usd(now_epoch)
     rank_score = compute_master_rank_score(opp)
     ev = compute_expected_value_usd(opp)
+
+    # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2 (fix 2): reproduces
+    # app.execution.validator.validate()'s own position_already_open gate
+    # — checked BEFORE capital, matching the real gate's own early exit,
+    # since an already-open position is rejected regardless of how much
+    # capital happens to be free.
+    if opp.holding_period_seconds is not None:
+        position_key = position_key_for(opp.strategy, opp.legs, opp.symbol)
+        if position_key is not None and position_tracker.is_open(position_key, now_epoch):
+            return MasterDecision(
+                outcome=MasterOutcome.REJECT_POSITION_ALREADY_OPEN,
+                reason=f"position already open for key {position_key}",
+                rank_score=rank_score if rank_score is not None else 0.0,
+                theoretical_capital_reserved_usd=None,
+                projected_net_profit_usd=None,
+                capital_available_global_usd=available_now,
+            )
 
     if ev is None or opp.capital_usd is None or rank_score is None:
         return MasterDecision(
@@ -88,6 +124,11 @@ def evaluate_shadow_decision(opp: ShadowOpportunitySummary, ledger: ShadowCapita
 
     ev_scaled = ev * (capital_requested / opp.capital_usd)
     ledger.resolve_pnl(ev_scaled)
+
+    if opp.holding_period_seconds is not None:
+        position_key = position_key_for(opp.strategy, opp.legs, opp.symbol)
+        if position_key is not None:
+            position_tracker.open_position(position_key, now_epoch, opp.holding_period_seconds)
 
     return MasterDecision(
         outcome=MasterOutcome.ALLOCATE,

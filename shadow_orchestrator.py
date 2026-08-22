@@ -21,9 +21,12 @@ from datetime import UTC, datetime
 
 from app.database.session import async_session_factory
 from app.reporting.reality_baseline import REALITY_BASELINE_AT
-from app.shadow.decision import evaluate_shadow_decision
+from app.shadow.decision import duplicate_economic_event_decision, evaluate_shadow_decision
+from app.shadow.dedup import partition_duplicate_economic_events
 from app.shadow.ledger import ShadowCapitalLedger
 from app.shadow.models import ShadowDecisionResult
+from app.shadow.positions import ShadowOpenPositionTracker
+from app.shadow.ranker import compute_master_rank_score
 from app.shadow.reconstruct import (
     fetch_unevaluated_opportunities,
     master_approved,
@@ -44,15 +47,30 @@ POLL_INTERVAL_SECONDS = 15.0
 SHADOW_EVALUATION_SINCE = REALITY_BASELINE_AT
 
 
-async def run_one_batch(ledger: ShadowCapitalLedger) -> int:
+async def run_one_batch(ledger: ShadowCapitalLedger, position_tracker: ShadowOpenPositionTracker) -> int:
     async with async_session_factory() as session:
         opportunities = await fetch_unevaluated_opportunities(session, SHADOW_EVALUATION_SINCE)
         if not opportunities:
             return 0
 
+        # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2 (fix 1): resolve economic-
+        # event duplicates for the WHOLE batch before any capital is
+        # evaluated — a duplicate loser is never independently allocated,
+        # exactly mirroring main.py's own dedup fix excluding the loser
+        # from ever reaching attempt_dex_trade.
+        _representatives, duplicate_losers = partition_duplicate_economic_events(opportunities)
+
         for opp in opportunities:
             old = await reconstruct_old_engine_decision(session, opp)
-            master = evaluate_shadow_decision(opp, ledger, opp.detected_at)
+            if opp.opportunity_id in duplicate_losers:
+                winner = duplicate_losers[opp.opportunity_id]
+                master = duplicate_economic_event_decision(
+                    rank_score=compute_master_rank_score(opp) or 0.0,
+                    winner_opportunity_id=winner.opportunity_id,
+                    capital_available_global_usd=ledger.available_capital_usd(opp.detected_at.timestamp()),
+                )
+            else:
+                master = evaluate_shadow_decision(opp, ledger, position_tracker, opp.detected_at)
             agree = old_engine_approved(old) == master_approved(master)
             result = ShadowDecisionResult(
                 opportunity=opp,
@@ -72,10 +90,11 @@ async def main() -> None:
     async with async_session_factory() as session:
         ledger = await rebuild_shadow_ledger_from_history(session)
     logger.info("shadow ledger rebuilt from history: realized_pnl_usd=%.4f", ledger.realized_pnl_usd)
+    position_tracker = ShadowOpenPositionTracker()
 
     while True:
         try:
-            processed = await run_one_batch(ledger)
+            processed = await run_one_batch(ledger, position_tracker)
             if processed:
                 logger.info("evaluated %d opportunities", processed)
         except asyncio.CancelledError:

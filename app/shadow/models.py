@@ -30,6 +30,7 @@ class ShadowOpportunitySummary:
     engine: Engine
     strategy: str
     symbol: str
+    legs: list[dict]  # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2: needed for both economic-event dedup (app.shadow.dedup) and CEX position-key derivation (app.shadow.positions) — copied verbatim from OpportunityRecord.legs, never mutated
     chain: str | None  # DEX only, from legs[0].chain
     expected_profit_usd: float | None
     capital_usd: float | None
@@ -60,6 +61,10 @@ class MasterOutcome(StrEnum):
     REJECT_NO_CAPITAL = "reject_no_capital"
     REJECT_NOT_PROFITABLE = "reject_not_profitable"
     REJECT_MISSING_DATA = "reject_missing_data"
+    # PRE-PHASE-2 CORRECTIVE MAINTENANCE #2 (2026-08-22): the two fixes
+    # this session adds — see app.shadow.dedup and app.shadow.positions.
+    REJECT_DUPLICATE_ECONOMIC_EVENT = "reject_duplicate_economic_event"
+    REJECT_POSITION_ALREADY_OPEN = "reject_position_already_open"
 
 
 @dataclass(slots=True)

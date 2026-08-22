@@ -1064,6 +1064,8 @@ def render_phase2_shadow_section() -> None:
             {"label": "OLD accepté, MASTER aurait rejeté", "value": f"{summary.old_approved_master_rejected:,}".replace(",", " ")},
             {"label": "OLD rejeté, MASTER aurait accepté", "value": f"{summary.old_rejected_master_approved:,}".replace(",", " ")},
             {"label": "Conflits de capital détectés", "value": f"{summary.capital_conflicts_detected:,}".replace(",", " "), "sub": "doubles allocations théoriques empêchées"},
+            {"label": "Doublons économiques bloqués (MASTER)", "value": f"{summary.duplicate_economic_events_blocked:,}".replace(",", " ")},
+            {"label": "position_already_open reproduit", "value": f"{summary.position_already_open_reproduced:,}".replace(",", " ")},
             {"label": "Capital théorique réservé (cumul)", "value": f"{summary.theoretical_capital_reserved_usd:,.2f} $".replace(",", " ")},
             {"label": "P&L OLD simulé", "value": f"{summary.old_pnl_usd:+.2f} $"},
             {"label": "P&L MASTER simulé (projection)", "value": f"{summary.master_pnl_usd:+.2f} $"},

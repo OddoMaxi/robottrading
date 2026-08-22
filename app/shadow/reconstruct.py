@@ -29,7 +29,17 @@ async def fetch_unevaluated_opportunities(session: AsyncSession, since: datetime
     """Every CEX or DEX opportunity detected since `since` that doesn't
     already have a shadow_decisions row — evaluated in detected_at order
     so the shadow ledger's capital contention plays out chronologically,
-    matching how the real engines actually saw it arrive."""
+    matching how the real engines actually saw it arrive.
+
+    PRE-PHASE-2 CORRECTIVE MAINTENANCE #2: an atomic opportunity and its
+    sequential sibling share the EXACT same detected_at timestamp (see
+    app.shadow.dedup) — if a hard LIMIT boundary happened to fall between
+    two rows sharing that timestamp, the dedup grouping in the caller
+    would only ever see one half of the pair in a given batch. Trims any
+    trailing rows that share the last row's detected_at when the batch
+    came back full, leaving them for the next poll instead of risking a
+    split group — a small, deliberate under-fetch, not a correctness gap.
+    """
     already_evaluated = select(ShadowDecisionRecord.opportunity_id)
     rows = (
         await session.execute(
@@ -44,6 +54,14 @@ async def fetch_unevaluated_opportunities(session: AsyncSession, since: datetime
         )
     ).scalars().all()
 
+    if len(rows) == limit:
+        boundary_ts = rows[-1].detected_at
+        trimmed = list(rows)
+        while trimmed and trimmed[-1].detected_at == boundary_ts:
+            trimmed.pop()
+        if trimmed:  # never fully empty the batch (would stall the orchestrator on a pathological all-same-timestamp batch)
+            rows = trimmed
+
     summaries = []
     for row in rows:
         engine = Engine.DEX if row.strategy in DEX_ATTEMPTABLE_STRATEGIES else Engine.CEX
@@ -54,6 +72,7 @@ async def fetch_unevaluated_opportunities(session: AsyncSession, since: datetime
                 engine=engine,
                 strategy=row.strategy,
                 symbol=row.symbol,
+                legs=row.legs or [],
                 chain=chain,
                 expected_profit_usd=float(row.expected_profit_usd) if row.expected_profit_usd is not None else None,
                 capital_usd=float(row.capital_usd) if row.capital_usd is not None else None,
