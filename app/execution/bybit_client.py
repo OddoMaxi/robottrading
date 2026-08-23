@@ -62,6 +62,28 @@ class BybitFeeRate:
     fetched_at: float
 
 
+@dataclass(slots=True)
+class BybitApiKeyInfo:
+    """The CALLING KEY's own configured permission scope, from
+    GET /v5/user/query-api — the equivalent lesson learned from Binance's
+    canWithdraw (an ACCOUNT-level flag, not a key permission): Bybit's
+    read_only flag and permissions block below are what actually reflect
+    this key's own scope, not any account-wide status field."""
+
+    read_only: bool
+    ip_restricted: bool
+    permissions: dict
+    fetched_at: float
+
+    def has_any_trade_or_withdraw_permission(self) -> bool:
+        for category, perms in self.permissions.items():
+            if category.lower() == "wallet" and any(p for p in perms if "withdraw" in str(p).lower()):
+                return True
+            if category.lower() in ("spot", "contracttrade", "derivatives", "options") and perms:
+                return True
+        return False
+
+
 def _parse_book_ticker(data: dict, symbol: str) -> BybitBookTicker | None:
     for entry in data.get("result", {}).get("list", []):
         if entry.get("symbol") == symbol:
@@ -87,6 +109,17 @@ def _parse_symbol_rules(data: dict, symbol: str) -> BybitSymbolRules | None:
                 tick_size=float(price.get("tickSize", 0.0)),
             )
     return None
+
+
+def _parse_api_key_info(data: dict, now: float) -> BybitApiKeyInfo:
+    result = data.get("result", {})
+    ips = result.get("ips", [])
+    return BybitApiKeyInfo(
+        read_only=bool(result.get("readOnly", 0)),
+        ip_restricted=bool(ips) and ips != ["*"],
+        permissions=dict(result.get("permissions", {})),
+        fetched_at=now,
+    )
 
 
 def _parse_fee_rate(data: dict, symbol: str, now: float) -> BybitFeeRate | None:
@@ -174,6 +207,25 @@ class BybitClient(ExchangeClient):
                 response.raise_for_status()
                 data = await response.json()
         return _parse_fee_rate(data, symbol, now=time.time())
+
+    async def get_api_key_info(self) -> BybitApiKeyInfo:
+        """GET /v5/user/query-api — SIGNED, read-only. The authoritative
+        check for this key's own permission scope (readOnly flag +
+        per-category permissions) — the Bybit equivalent of Binance's
+        apiRestrictions, verified for the same reason (item 2's
+        security requirement must be checked against the KEY's scope,
+        not any account-wide status field)."""
+        headers, params = self._signed_headers_and_params()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/v5/user/query-api",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return _parse_api_key_info(data, now=time.time())
 
     async def get_wallet_balance(self, account_type: str = "UNIFIED") -> dict:
         """GET /v5/account/wallet-balance — SIGNED, read-only. Used only

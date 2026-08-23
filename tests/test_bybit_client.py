@@ -1,4 +1,20 @@
-from app.execution.bybit_client import _parse_book_ticker, _parse_fee_rate, _parse_symbol_rules
+from app.execution.bybit_client import _parse_api_key_info, _parse_book_ticker, _parse_fee_rate, _parse_symbol_rules
+
+READ_ONLY_KEY_INFO_FIXTURE = {
+    "result": {
+        "readOnly": 1,
+        "ips": ["147.93.56.10"],
+        "permissions": {"ContractTrade": [], "Spot": [], "Wallet": [], "Options": [], "Derivatives": []},
+    }
+}
+
+TRADE_ENABLED_KEY_INFO_FIXTURE = {
+    "result": {
+        "readOnly": 0,
+        "ips": [],
+        "permissions": {"ContractTrade": [], "Spot": ["SpotTrade"], "Wallet": [], "Options": [], "Derivatives": []},
+    }
+}
 
 TICKER_FIXTURE = {"result": {"list": [{"symbol": "LUNCUSDT", "bid1Price": "0.00005440", "ask1Price": "0.00005461"}]}}
 
@@ -59,3 +75,18 @@ def test_parse_fee_rate():
 
 def test_parse_fee_rate_missing_symbol_returns_none():
     assert _parse_fee_rate(FEE_FIXTURE, "ETHUSDT", now=0.0) is None
+
+
+def test_parse_api_key_info_read_only_key():
+    info = _parse_api_key_info(READ_ONLY_KEY_INFO_FIXTURE, now=0.0)
+    assert info.read_only is True
+    assert info.ip_restricted is True
+    assert info.has_any_trade_or_withdraw_permission() is False
+
+
+def test_parse_api_key_info_flags_trade_enabled_key():
+    """This is the field item 2's safety requirement must actually be
+    checked against — not any account-wide status field."""
+    info = _parse_api_key_info(TRADE_ENABLED_KEY_INFO_FIXTURE, now=0.0)
+    assert info.read_only is False
+    assert info.has_any_trade_or_withdraw_permission() is True
