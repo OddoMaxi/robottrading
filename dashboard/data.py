@@ -876,6 +876,98 @@ def get_live_dashboard_summary_cached() -> RealTradingDashboardSummary:
     return asyncio.run(fetch_live_dashboard_summary())
 
 
+@dataclass(slots=True)
+class InventoryMissingRow:
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    required_base_asset: str
+    required_base_amount: float
+    current_base_inventory: float
+    reason: str | None
+
+
+@dataclass(slots=True)
+class RebalanceCandidateRow:
+    action: str
+    exchange: str
+    asset: str
+    recommended_notional_usdt: float
+    inventory_score: float | None
+    reason: str
+    simulated: bool
+
+
+@dataclass(slots=True)
+class InventoryManagerDashboardSummary:
+    reachable: bool
+    binance_usdt_available: float = 0.0
+    binance_holdings: dict = field(default_factory=dict)
+    bybit_usdt_available: float = 0.0
+    bybit_holdings: dict = field(default_factory=dict)
+    total_usdt_available: float = 0.0
+    capital_locked_in_inventory_usdt: float = 0.0
+    prepositioned_assets: list[str] = field(default_factory=list)
+    inventory_missing: list[InventoryMissingRow] = field(default_factory=list)
+    rebalance_candidates: list[RebalanceCandidateRow] = field(default_factory=list)
+    inventory_pnl_usd: float | None = None
+    inventory_pnl_note: str = ""
+    simulation_only: bool = True
+    real_orders_placed: int = 0
+
+
+async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
+    """Inventory Manager (user directive, 2026-08-23) — SIMULATION/
+    READ-ONLY ONLY. Same HTTP-to-the-engine pattern as every other
+    live-state fetcher here. Never raises — an unreachable engine
+    reports reachable=False."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/live/inventory", timeout=aiohttp.ClientTimeout(total=30)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        missing = [
+            InventoryMissingRow(
+                symbol=m["symbol"], buy_exchange=m["buy_exchange"], sell_exchange=m["sell_exchange"],
+                required_base_asset=m["required_base_asset"], required_base_amount=m["required_base_amount"],
+                current_base_inventory=m["current_base_inventory"], reason=m["reason"],
+            )
+            for m in payload.get("inventory_missing", [])
+        ]
+        candidates = [
+            RebalanceCandidateRow(
+                action=c["action"], exchange=c["exchange"], asset=c["asset"],
+                recommended_notional_usdt=c["recommended_notional_usdt"], inventory_score=c["inventory_score"],
+                reason=c["reason"], simulated=c["simulated"],
+            )
+            for c in payload.get("rebalance_candidates", [])
+        ]
+        return InventoryManagerDashboardSummary(
+            reachable=True,
+            binance_usdt_available=payload["binance"]["usdt_available"],
+            binance_holdings=payload["binance"]["holdings"],
+            bybit_usdt_available=payload["bybit"]["usdt_available"],
+            bybit_holdings=payload["bybit"]["holdings"],
+            total_usdt_available=payload["total_usdt_available"],
+            capital_locked_in_inventory_usdt=payload["capital_locked_in_inventory_usdt"],
+            prepositioned_assets=payload["prepositioned_assets"],
+            inventory_missing=missing,
+            rebalance_candidates=candidates,
+            inventory_pnl_usd=payload["inventory_pnl_usd"],
+            inventory_pnl_note=payload["inventory_pnl_note"],
+            simulation_only=payload["simulation_only"],
+            real_orders_placed=payload["real_orders_placed"],
+        )
+    except Exception:
+        return InventoryManagerDashboardSummary(reachable=False)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_inventory_manager_summary_cached() -> InventoryManagerDashboardSummary:
+    return asyncio.run(fetch_inventory_manager_summary())
+
+
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
     engine = create_async_engine(get_settings().database_url)
     try:

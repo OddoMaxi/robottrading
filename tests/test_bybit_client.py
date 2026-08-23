@@ -1,4 +1,11 @@
-from app.execution.bybit_client import _parse_api_key_info, _parse_book_ticker, _parse_fee_rate, _parse_symbol_rules, parse_wallet_balance
+from app.execution.bybit_client import (
+    _parse_api_key_info,
+    _parse_book_ticker,
+    _parse_fee_rate,
+    _parse_symbol_rules,
+    parse_all_wallet_balances,
+    parse_wallet_balance,
+)
 
 WALLET_BALANCE_FIXTURE = {
     "result": {
@@ -150,6 +157,19 @@ def test_parse_wallet_balance_finds_asset():
 
 def test_parse_wallet_balance_missing_asset_returns_zero():
     assert parse_wallet_balance(WALLET_BALANCE_FIXTURE, "BTC") == 0.0
+
+
+def test_parse_all_wallet_balances_returns_every_nonzero_asset():
+    assert parse_all_wallet_balances(WALLET_BALANCE_FIXTURE) == {"LUNC": 950000.0, "USDT": 5.0}
+
+
+def test_parse_all_wallet_balances_excludes_zero_balances():
+    data = {"result": {"list": [{"coin": [{"coin": "ZRO", "availableToWithdraw": "0"}, {"coin": "USDT", "availableToWithdraw": "5"}]}]}}
+    assert parse_all_wallet_balances(data) == {"USDT": 5.0}
+
+
+def test_parse_all_wallet_balances_empty_when_no_accounts():
+    assert parse_all_wallet_balances({"result": {"list": []}}) == {}
 
 
 def test_withdrawal_permission_is_always_a_real_violation():

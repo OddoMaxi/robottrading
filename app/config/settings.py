@@ -122,6 +122,17 @@ class Settings(BaseSettings):
     binance_target_capital_usdt: float = 100.0
     bybit_target_capital_usdt: float = 60.0
 
+    # AUTOMATIC CROSS-EXCHANGE INVENTORY MANAGER (user directive,
+    # 2026-08-23) — hard limits so pre-positioned inventory can never eat
+    # the capital pool. app.execution.inventory_manager is the only reader
+    # of these; it is SIMULATION/READ-ONLY ONLY in this phase (see that
+    # module's docstring) — it never places an order regardless of these
+    # values or of live_trading_enabled above.
+    max_inventory_per_asset_usdt: float = 10.0
+    max_total_inventory_exposure_usdt: float = 40.0
+    max_rebalance_size_usdt: float = 5.0
+    min_expected_reuse_count: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -10,6 +10,7 @@ from app.config.settings import get_settings
 from app.database.models import OpportunityRecord
 from app.database.repository import log_system_event
 from app.database.session import get_session
+from app.execution.inventory_manager import build_inventory_report
 from app.execution.live_guard import LiveExecutionRefused, live_guard
 from app.execution.live_preflight import build_multi_symbol_preflight_report
 from app.execution.live_ranker import rank_live_opportunities
@@ -595,6 +596,63 @@ async def live_dashboard_summary(session: AsyncSession = Depends(get_session)) -
         "kill_switch_engaged": live_guard.kill_switch_engaged,
         "kill_switch_reason": live_guard.kill_switch_reason,
         "live_trading_enabled": live_guard.live_trading_enabled,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/inventory")
+async def live_inventory(session: AsyncSession = Depends(get_session), max_symbols: int = 30) -> dict:
+    """AUTOMATIC CROSS-EXCHANGE INVENTORY MANAGER (user directive,
+    2026-08-23) — SIMULATION/READ-ONLY ONLY. Every rebalance_candidates
+    entry is a recommendation, never an executed trade — this endpoint
+    contains no order-placement path at all (see
+    tests/test_inventory_manager_isolation.py). real_orders_placed is
+    always 0."""
+    report = await build_inventory_report(session, max_ranker_symbols=max_symbols)
+    return {
+        "generated_at": report.generated_at.isoformat(),
+        "binance": {
+            "usdt_available": report.binance.usdt_available,
+            "holdings": report.binance.holdings,
+            "holdings_usdt_value": report.binance.holdings_usdt_value,
+        },
+        "bybit": {
+            "usdt_available": report.bybit.usdt_available,
+            "holdings": report.bybit.holdings,
+            "holdings_usdt_value": report.bybit.holdings_usdt_value,
+        },
+        "total_usdt_available": report.total_usdt_available,
+        "capital_locked_in_inventory_usdt": report.capital_locked_in_inventory_usdt,
+        "prepositioned_assets": report.prepositioned_assets,
+        "inventory_missing": [
+            {
+                "symbol": c.symbol, "buy_exchange": c.buy_exchange, "sell_exchange": c.sell_exchange,
+                "required_quote_asset": c.required_quote_asset, "required_quote_amount": c.required_quote_amount,
+                "required_base_asset": c.required_base_asset, "required_base_amount": c.required_base_amount,
+                "current_base_inventory": c.current_base_inventory, "status": c.status, "reason": c.reason,
+            }
+            for c in report.inventory_missing
+        ],
+        "inventory_scores": [
+            {
+                "symbol": s.symbol, "base_asset": s.base_asset, "observations": s.observations,
+                "total_score": s.total_score, "expected_reuse_count": s.expected_reuse_count,
+                "eligible_for_prepositioning": s.eligible_for_prepositioning, "reason": s.reason,
+            }
+            for s in report.inventory_scores
+        ],
+        "rebalance_candidates": [
+            {
+                "action": r.action, "exchange": r.exchange, "asset": r.asset,
+                "recommended_notional_usdt": r.recommended_notional_usdt,
+                "current_holding_usdt_equiv": r.current_holding_usdt_equiv,
+                "inventory_score": r.inventory_score, "reason": r.reason, "simulated": r.simulated,
+            }
+            for r in report.rebalance_candidates
+        ],
+        "inventory_pnl_usd": report.inventory_pnl_usd,
+        "inventory_pnl_note": report.inventory_pnl_note,
+        "simulation_only": report.simulation_only,
         "real_orders_placed": 0,
     }
 

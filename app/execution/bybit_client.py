@@ -148,6 +148,24 @@ def parse_wallet_balance(data: dict, asset: str) -> float:
     return 0.0
 
 
+def parse_all_wallet_balances(data: dict) -> dict[str, float]:
+    """Every non-zero available balance from the same raw response —
+    Inventory Manager (user directive, 2026-08-23) needs to enumerate
+    whatever the account already holds, not check one asset at a time.
+    Same availableToWithdraw-first convention as parse_wallet_balance."""
+    balances: dict[str, float] = {}
+    for account in data.get("result", {}).get("list", []):
+        for coin in account.get("coin", []):
+            asset = coin.get("coin")
+            if not asset:
+                continue
+            raw = coin.get("availableToWithdraw") or coin.get("walletBalance") or "0"
+            qty = float(raw) if raw else 0.0
+            if qty > 0:
+                balances[asset] = balances.get(asset, 0.0) + qty
+    return balances
+
+
 def _parse_fee_rate(data: dict, symbol: str, now: float) -> BybitFeeRate | None:
     for entry in data.get("result", {}).get("list", []):
         if entry.get("symbol") == symbol:

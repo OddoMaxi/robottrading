@@ -1033,6 +1033,7 @@ def render_reality_page() -> None:
     render_phase2d_micro_live_section()
     render_phase2e_real_edge_section()
     render_real_trading_section()
+    render_inventory_manager_section()
 
 
 # --- PHASE 2C — CONTROLLED PAPER CUTOVER / MASTER MODE (user directive, 2026-08-23) ---
@@ -1459,6 +1460,69 @@ def render_real_trading_section() -> None:
     st.caption(
         "Les données PAPER (sections ci-dessus) et RÉELLES (cette section) restent strictement séparées — "
         "aucune donnée paper n'alimente jamais ce P&L, et inversement."
+    )
+
+
+def render_inventory_manager_section() -> None:
+    summary = data.get_inventory_manager_summary_cached()
+    if not summary.reachable:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">INVENTORY MANAGER — CROSS-EXCHANGE</div>', unsafe_allow_html=True)
+        st.caption("Moteur injoignable — état de l'inventaire indisponible.")
+        return
+
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #7c3aed;border-radius:14px;background:rgba(124,58,237,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#7c3aed;">INVENTORY MANAGER — CROSS-EXCHANGE (SIMULATION / READ-ONLY)</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">Recommandations de rééquilibrage uniquement — aucun ordre réel n\'est '
+        "jamais envoyé par ce module. Les 160 USDT réels ne sont pas convertis automatiquement tant que ce comportement "
+        "n'a pas été vérifié et explicitement autorisé.</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    pnl_display = f"{summary.inventory_pnl_usd:+.4f} $" if summary.inventory_pnl_usd is not None else "N/A"
+    render_stat_cards(
+        [
+            {"label": "USDT disponible (total)", "value": f"{summary.total_usdt_available:,.2f} $".replace(",", " ")},
+            {"label": "Binance — USDT dispo", "value": f"{summary.binance_usdt_available:,.2f} $".replace(",", " "), "sub": f"{len(summary.binance_holdings)} actif(s) en stock"},
+            {"label": "Bybit — USDT dispo", "value": f"{summary.bybit_usdt_available:,.2f} $".replace(",", " "), "sub": f"{len(summary.bybit_holdings)} actif(s) en stock"},
+            {"label": "Capital verrouillé en inventaire", "value": f"{summary.capital_locked_in_inventory_usdt:,.2f} $".replace(",", " ")},
+            {"label": "Actifs pré-positionnés", "value": f"{len(summary.prepositioned_assets)}"},
+            {"label": "Inventaire manquant", "value": f"{len(summary.inventory_missing)}"},
+            {"label": "Candidats de rééquilibrage", "value": f"{len(summary.rebalance_candidates)}"},
+            {"label": "Inventory P&L", "value": pnl_display, "sub": summary.inventory_pnl_note if summary.inventory_pnl_usd is None else None},
+        ]
+    )
+
+    if summary.prepositioned_assets:
+        st.caption(f"Déjà pré-positionnés et exécutables immédiatement : {', '.join(summary.prepositioned_assets)}")
+
+    if summary.inventory_missing:
+        with st.expander(f"Opportunités bloquées par manque d'inventaire ({len(summary.inventory_missing)})"):
+            for m in summary.inventory_missing:
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{m.symbol} — {m.buy_exchange}→{m.sell_exchange}</span>'
+                    f'<span class="v">besoin {m.required_base_amount:.4f} {m.required_base_asset} sur {m.sell_exchange} '
+                    f"(détenu : {m.current_base_inventory:.4f}) · {m.reason}</span></div>",
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("Aucune opportunité actuellement bloquée par un manque d'inventaire.")
+
+    if summary.rebalance_candidates:
+        with st.expander(f"Candidats de rééquilibrage — SIMULÉ, non exécuté ({len(summary.rebalance_candidates)})"):
+            for r in summary.rebalance_candidates:
+                score_str = f"{r.inventory_score:.0f}/100" if r.inventory_score is not None else "—"
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">[{r.action}] {r.asset} sur {r.exchange}</span>'
+                    f'<span class="v">{r.recommended_notional_usdt:.2f} $ · score {score_str} · {r.reason}</span></div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("Aucune recommandation de rééquilibrage actuellement.")
+
+    st.caption(
+        "Ce module est 100% SIMULATION — il calcule des recommandations à partir des soldes réels et de l'historique "
+        "réel du scanner, mais ne place, ne modifie et n'annule jamais un ordre. real_orders_placed = 0 en permanence."
     )
 
 
