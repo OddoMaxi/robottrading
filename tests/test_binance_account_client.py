@@ -1,4 +1,6 @@
-from app.execution.binance_account_client import _parse_account_snapshot, _parse_api_restrictions
+from app.execution.binance_account_client import _parse_account_snapshot, _parse_api_restrictions, _parse_trade_fee
+
+TRADE_FEE_FIXTURE = [{"symbol": "BTCUSDT", "makerCommission": "0.001000", "takerCommission": "0.001000"}]
 
 ACCOUNT_FIXTURE = {
     "canTrade": True,
@@ -52,3 +54,16 @@ def test_parse_api_restrictions_flags_withdrawal_enabled_key():
     checked against — not BinanceAccountSnapshot.can_withdraw."""
     restrictions = _parse_api_restrictions(RESTRICTIONS_FIXTURE_WITHDRAWAL_ENABLED, now=0.0)
     assert restrictions.enable_withdrawals is True
+
+
+def test_parse_trade_fee_finds_matching_symbol():
+    fee = _parse_trade_fee(TRADE_FEE_FIXTURE, "BTCUSDT", now=0.0)
+    assert fee is not None
+    assert fee.maker_fee_rate == 0.001
+    assert fee.taker_fee_rate == 0.001
+
+
+def test_parse_trade_fee_returns_none_for_missing_symbol():
+    """Never invents a fee for a symbol Binance didn't return — the
+    caller must fall back to the ESTIMATED default, not a fabricated real one."""
+    assert _parse_trade_fee(TRADE_FEE_FIXTURE, "ETHUSDT", now=0.0) is None

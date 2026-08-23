@@ -659,6 +659,137 @@ def get_micro_live_binance_readiness_cached() -> MicroLiveBinanceReadiness:
     return asyncio.run(fetch_micro_live_binance_readiness())
 
 
+@dataclass(slots=True)
+class DistributionSummary:
+    count: int = 0
+    mean: float | None = None
+    median: float | None = None
+    p10: float | None = None
+    p25: float | None = None
+    p50: float | None = None
+    p75: float | None = None
+    p90: float | None = None
+    positive_rate_pct: float | None = None
+    negative_rate_pct: float | None = None
+    worst: float | None = None
+    best: float | None = None
+    stdev: float | None = None
+
+
+@dataclass(slots=True)
+class GroupEdgeSummary:
+    key: str
+    observations: int
+    net_profit: DistributionSummary
+    gross_profit_mean: float | None
+    avg_fees_usd: float | None
+    avg_slippage_pct: float | None
+    positive_net_rate_pct: float | None
+    real_fee_coverage_pct: float | None
+
+
+@dataclass(slots=True)
+class LuncEdgeSummary:
+    observations: int
+    net_profit: DistributionSummary
+    avg_book_spread_pct: float | None
+    avg_available_depth_usd: float | None
+    avg_slippage_pct: float | None
+    min_notional_pass_rate_pct: float | None
+    lot_size_pass_rate_pct: float | None
+    positive_net_rate_pct: float | None
+    real_fee_coverage_pct: float | None
+
+
+@dataclass(slots=True)
+class MicroLiveEdgeSummary:
+    reachable: bool
+    observations: int = 0
+    real_fee_coverage_pct: float | None = None
+    gross_profit: DistributionSummary = field(default_factory=DistributionSummary)
+    net_profit: DistributionSummary = field(default_factory=DistributionSummary)
+    net_return_bps: DistributionSummary = field(default_factory=DistributionSummary)
+    avg_fees_usd: float | None = None
+    avg_slippage_pct: float | None = None
+    rejection_reasons: dict = field(default_factory=dict)
+    top_positive_symbols: list[GroupEdgeSummary] = field(default_factory=list)
+    negative_symbols: list[GroupEdgeSummary] = field(default_factory=list)
+    lunc_usdt: LuncEdgeSummary | None = None
+    recommended_safety_margin_usd: float = 0.0
+    qualifying_after_gate: int = 0
+    real_orders_placed: int = 0
+
+
+def _parse_distribution(payload: dict) -> DistributionSummary:
+    return DistributionSummary(**payload)
+
+
+def _parse_group(payload: dict) -> GroupEdgeSummary:
+    return GroupEdgeSummary(
+        key=payload["key"],
+        observations=payload["observations"],
+        net_profit=_parse_distribution(payload["net_profit"]),
+        gross_profit_mean=payload["gross_profit_mean"],
+        avg_fees_usd=payload["avg_fees_usd"],
+        avg_slippage_pct=payload["avg_slippage_pct"],
+        positive_net_rate_pct=payload["positive_net_rate_pct"],
+        real_fee_coverage_pct=payload["real_fee_coverage_pct"],
+    )
+
+
+async def fetch_micro_live_edge_report(hours: float = 72.0) -> MicroLiveEdgeSummary:
+    """PHASE 2E — REAL EDGE VALIDATION (user directive, 2026-08-23). Same
+    HTTP-to-the-engine pattern as the other Phase 2C/2D fetchers, reading
+    the persisted micro_live_observations analysis. Never raises."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{base_url}/micro-live/edge-report", params={"hours": hours}, timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        lunc_payload = payload.get("lunc_usdt")
+        return MicroLiveEdgeSummary(
+            reachable=True,
+            observations=payload["observations"],
+            real_fee_coverage_pct=payload["real_fee_coverage_pct"],
+            gross_profit=_parse_distribution(payload["gross_profit"]),
+            net_profit=_parse_distribution(payload["net_profit"]),
+            net_return_bps=_parse_distribution(payload["net_return_bps"]),
+            avg_fees_usd=payload["avg_fees_usd"],
+            avg_slippage_pct=payload["avg_slippage_pct"],
+            rejection_reasons=payload["rejection_reasons"],
+            top_positive_symbols=[_parse_group(g) for g in payload["top_positive_symbols"]],
+            negative_symbols=[_parse_group(g) for g in payload["negative_symbols"]],
+            lunc_usdt=(
+                LuncEdgeSummary(
+                    observations=lunc_payload["observations"],
+                    net_profit=_parse_distribution(lunc_payload["net_profit"]),
+                    avg_book_spread_pct=lunc_payload["avg_book_spread_pct"],
+                    avg_available_depth_usd=lunc_payload["avg_available_depth_usd"],
+                    avg_slippage_pct=lunc_payload["avg_slippage_pct"],
+                    min_notional_pass_rate_pct=lunc_payload["min_notional_pass_rate_pct"],
+                    lot_size_pass_rate_pct=lunc_payload["lot_size_pass_rate_pct"],
+                    positive_net_rate_pct=lunc_payload["positive_net_rate_pct"],
+                    real_fee_coverage_pct=lunc_payload["real_fee_coverage_pct"],
+                )
+                if lunc_payload is not None
+                else None
+            ),
+            recommended_safety_margin_usd=payload["recommended_safety_margin_usd"],
+            qualifying_after_gate=payload["qualifying_after_gate"],
+            real_orders_placed=payload["real_orders_placed"],
+        )
+    except Exception:
+        return MicroLiveEdgeSummary(reachable=False)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_micro_live_edge_report_cached(hours: float = 72.0) -> MicroLiveEdgeSummary:
+    return asyncio.run(fetch_micro_live_edge_report(hours=hours))
+
+
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
     engine = create_async_engine(get_settings().database_url)
     try:

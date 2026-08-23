@@ -42,6 +42,7 @@ from app.database.repository import (
     get_or_create_portfolio,
     log_system_event,
     save_cex_scan_event,
+    save_micro_live_observation,
     save_dex_trade_attempt,
     save_opportunity,
     save_price_snapshots,
@@ -628,9 +629,11 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         # affect paper execution below.
                         if opp.strategy in CUTOVER_STRATEGIES:
                             try:
-                                await micro_live_orchestrator.observe_reality_quote(opp, now=now)
+                                quote = await micro_live_orchestrator.observe_reality_quote(opp, now=now)
+                                if quote is not None:
+                                    await save_micro_live_observation(session, quote, opp.strategy)
                             except Exception:
-                                logger.exception("micro-live dry-run observation failed (Phase 2D) — paper engine unaffected, continuing")
+                                logger.exception("micro-live dry-run observation failed (Phase 2D/2E) — paper engine unaffected, continuing")
 
                         for portfolio in portfolios:
                             # PHASE 2C (user directive, 2026-08-23): MASTER

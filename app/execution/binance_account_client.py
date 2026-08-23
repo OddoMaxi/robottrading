@@ -100,6 +100,30 @@ def _parse_api_restrictions(data: dict, now: float) -> BinanceApiKeyRestrictions
     )
 
 
+@dataclass(slots=True)
+class BinanceTradeFee:
+    symbol: str
+    maker_fee_rate: float
+    taker_fee_rate: float
+    fetched_at: float
+
+
+def _parse_trade_fee(data: list, symbol: str, now: float) -> BinanceTradeFee | None:
+    """data is the raw list GET /sapi/v1/asset/tradeFee returns — one
+    entry per symbol requested. None means the symbol wasn't present in
+    the response (never assume a default here; the caller decides the
+    ESTIMATED fallback, see app.execution.reality_quote.DEFAULT_TAKER_FEE_RATE)."""
+    for entry in data:
+        if entry.get("symbol") == symbol:
+            return BinanceTradeFee(
+                symbol=symbol,
+                maker_fee_rate=float(entry["makerCommission"]),
+                taker_fee_rate=float(entry["takerCommission"]),
+                fetched_at=now,
+            )
+    return None
+
+
 def _parse_account_snapshot(data: dict, now: float) -> BinanceAccountSnapshot:
     balances = [
         BinanceBalance(asset=b["asset"], free=float(b["free"]), locked=float(b["locked"]))
@@ -212,11 +236,13 @@ class BinanceAccountClient(ExchangeClient):
                 data = await response.json()
         return _parse_api_restrictions(data, now=time.time())
 
-    async def get_trade_fee(self, symbol: str) -> dict:
+    async def get_trade_fee(self, symbol: str) -> BinanceTradeFee | None:
         """GET /sapi/v1/asset/tradeFee — SIGNED, read-only. Real maker/
-        taker fee for one symbol where Binance makes it determinable this
-        way (item 4: 'fees where determinable'); callers must treat a
-        failure here as ESTIMATED-fee territory, not a hard error."""
+        taker fee for one symbol, account-specific (reflects any VIP tier
+        or BNB fee discount actually applied) — this is the REAL rate
+        Phase 2E's item 1 requires, replacing the flat 0.1% estimate.
+        Returns None (never raises) if the symbol wasn't in the response;
+        callers must treat that as ESTIMATED-fee territory, not an error."""
         headers, params = self._signed_request_params({"symbol": symbol})
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -226,7 +252,8 @@ class BinanceAccountClient(ExchangeClient):
                 timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
                 response.raise_for_status()
-                return await response.json()
+                data = await response.json()
+        return _parse_trade_fee(data, symbol, now=time.time())
 
     async def check_connectivity(self) -> ExchangeConnectivity:
         settings = get_settings()

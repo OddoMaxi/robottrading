@@ -11,6 +11,7 @@ from app.database.models import (
     CexScanEventRecord,
     DexSimulatedTradeRecord,
     Exchange,
+    MicroLiveObservationRecord,
     OpportunityRecord,
     PriceSnapshot,
     SimulatedTradeRecord,
@@ -275,6 +276,44 @@ async def save_cex_scan_event(
         position_already_open=position_already_open,
         old_approved=old_approved,
         old_rejection_reason=old_rejection_reason,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_micro_live_observation(session: AsyncSession, quote, strategy: str) -> MicroLiveObservationRecord:
+    """PHASE 2E (user directive, 2026-08-23) — persists one Binance
+    dry-run reality-quote observation. Takes app.execution.reality_quote.RealityQuote
+    (not type-hinted directly to avoid a database<->execution import
+    cycle) — a plain-value copy, same discipline as save_cex_scan_event.
+    Called from main.py's CEX detection loop in the same try/except as
+    the reality-quote computation itself; a write failure here can never
+    affect paper execution."""
+    record = MicroLiveObservationRecord(
+        opportunity_id=quote.opportunity_id,
+        symbol=quote.symbol,
+        strategy=strategy,
+        observed_at=datetime.fromtimestamp(quote.computed_at, tz=UTC).replace(tzinfo=None),
+        master_requested_size_usd=quote.master_requested_size_usd,
+        exchange_valid_size_usd=quote.exchange_valid_size_usd,
+        best_bid=quote.best_bid,
+        best_ask=quote.best_ask,
+        book_spread_pct=quote.book_spread_pct,
+        available_depth_usd=quote.available_depth_usd,
+        gross_expected_profit_usd=quote.gross_expected_profit_usd,
+        maker_fee_rate=quote.maker_fee_rate,
+        taker_fee_rate=quote.taker_fee_rate,
+        fee_source=quote.fee_source,
+        estimated_fees_usd=quote.estimated_fees_usd,
+        estimated_slippage_pct=quote.estimated_slippage_pct,
+        net_expected_profit_usd=quote.estimated_net_profit_after_real_constraints_usd,
+        net_return_bps=quote.net_return_bps,
+        min_notional_pass=quote.min_notional_pass,
+        lot_size_pass=quote.lot_size_pass,
+        balance_pass=quote.balance_pass,
+        executable=quote.executable,
+        rejection_reason=quote.reason,
     )
     session.add(record)
     await session.flush()

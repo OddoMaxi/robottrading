@@ -30,7 +30,7 @@ from app.execution.binance_account_client import (
     BinanceCredentialsMissing,
 )
 from app.execution.binance_filters import SymbolNotFound, SymbolRules, parse_symbol_rules
-from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE, RealityQuote, compute_reality_quote
+from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE, RealityQuote, compute_reality_quote, rejection_bucket
 from app.opportunity.models import Opportunity
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,12 @@ class MicroLiveState:
         non_executable = [o for o in self.observations if not o.quote.executable]
         rejection_reasons: dict[str, int] = {}
         for obs in non_executable:
-            bucket = _rejection_bucket(obs.quote)
+            bucket = rejection_bucket(
+                obs.quote.min_notional_pass,
+                obs.quote.lot_size_pass,
+                obs.quote.balance_pass,
+                obs.quote.estimated_net_profit_after_real_constraints_usd,
+            )
             rejection_reasons[bucket] = rejection_reasons.get(bucket, 0) + 1
         return {
             "opportunities_observed": total,
@@ -94,18 +99,6 @@ class MicroLiveState:
                 [o.quote.estimated_net_profit_after_real_constraints_usd for o in self.observations]
             ),
         }
-
-
-def _rejection_bucket(quote: RealityQuote) -> str:
-    if not quote.min_notional_pass:
-        return "min_notional"
-    if not quote.lot_size_pass:
-        return "lot_size"
-    if not quote.balance_pass:
-        return "balance"
-    if quote.estimated_net_profit_after_real_constraints_usd <= 0:
-        return "net_profit_leq_zero"
-    return "other"
 
 
 def _avg(values: list[float]) -> float | None:
@@ -123,6 +116,7 @@ class MicroLiveOrchestrator:
         self._api_restrictions: BinanceApiKeyRestrictions | None = None
         self._api_restrictions_fetched_at = 0.0
         self._exchange_info_cache: dict[str, tuple[float, SymbolRules]] = {}
+        self._trade_fee_cache: dict[str, tuple[float, object]] = {}
 
     async def check_connectivity(self):
         return await self._client.check_connectivity()
@@ -190,6 +184,25 @@ class MicroLiveOrchestrator:
         self._exchange_info_cache[symbol] = (now, rules)
         return rules
 
+    async def _get_trade_fee(self, symbol: str, now: float):
+        """PHASE 2E, item 1 — real per-symbol maker/taker fee, replacing
+        the flat 0.1% estimate. Cached like exchange info (fee schedules
+        don't change intraday); a fetch failure or missing symbol falls
+        back to (None, "estimated_default") rather than raising —
+        callers must never assume 0.1% silently passes for "real"."""
+        cached = self._trade_fee_cache.get(symbol)
+        if cached is not None and now - cached[0] < EXCHANGE_INFO_TTL_SECONDS:
+            return cached[1]
+        try:
+            fee = await self._client.get_trade_fee(symbol)
+        except BinanceCredentialsMissing:
+            return None
+        except Exception as exc:
+            logger.warning("micro-live: tradeFee fetch failed for %s: %s", symbol, exc)
+            return None
+        self._trade_fee_cache[symbol] = (now, fee)
+        return fee
+
     async def observe_reality_quote(self, opp: Opportunity, now: float | None = None) -> RealityQuote | None:
         """Best-effort, never raises. Returns None (and records nothing)
         if any prerequisite (credentials, symbol data, live quote) isn't
@@ -222,6 +235,12 @@ class MicroLiveOrchestrator:
             side_levels_key = "asks" if side == "BUY" else "bids"
             depth_levels = [(float(p), float(q)) for p, q in depth.get(side_levels_key, [])]
 
+            trade_fee = await self._get_trade_fee(symbol, now)
+            if trade_fee is not None:
+                taker_fee_rate, maker_fee_rate, fee_source = trade_fee.taker_fee_rate, trade_fee.maker_fee_rate, "real_binance_fee"
+            else:
+                taker_fee_rate, maker_fee_rate, fee_source = DEFAULT_TAKER_FEE_RATE, None, "estimated_default"
+
             quote = compute_reality_quote(
                 opportunity_id=opp.id,
                 symbol=symbol,
@@ -234,8 +253,9 @@ class MicroLiveOrchestrator:
                 depth_levels=depth_levels,
                 account_balance_usdt=balance_usdt,
                 micro_live_cap_usdt=settings.micro_live_cap_usdt,
-                taker_fee_rate=DEFAULT_TAKER_FEE_RATE,
-                fee_source="estimated_default",
+                taker_fee_rate=taker_fee_rate,
+                maker_fee_rate=maker_fee_rate,
+                fee_source=fee_source,
                 now=now,
             )
         except Exception as exc:

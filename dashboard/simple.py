@@ -1031,6 +1031,7 @@ def render_reality_page() -> None:
     render_phase2c_master_mode_section()
     render_phase2_shadow_section()
     render_phase2d_micro_live_section()
+    render_phase2e_real_edge_section()
 
 
 # --- PHASE 2C — CONTROLLED PAPER CUTOVER / MASTER MODE (user directive, 2026-08-23) ---
@@ -1276,6 +1277,105 @@ def render_phase2d_micro_live_section() -> None:
     st.caption(
         "Dry-run limité aux opportunités cross_exchange ayant une jambe Binance (ce périmètre est explicitement Binance-only). "
         "Le cap micro-live (10 USDT par défaut) est appliqué indépendamment du capital PAPER de 10 000 $ — jamais réutilisé pour ce dimensionnement."
+    )
+
+
+# --- PHASE 2E — REAL EDGE VALIDATION (user directive, 2026-08-23) ---
+#
+# Analyse historique de micro_live_observations (persisté par Phase 2E,
+# lu via GET /micro-live/edge-report) — frais Binance RÉELS quand
+# disponibles, distribution complète (pas seulement une moyenne), par
+# symbole/stratégie, section LUNC/USDT dédiée, et un gate de sécurité basé
+# sur les données observées. Toujours en lecture seule.
+
+
+def render_phase2e_real_edge_section() -> None:
+    report = data.get_micro_live_edge_report_cached(hours=72.0)
+    if not report.reachable:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">PHASE 2E — REAL EDGE VALIDATION</div>', unsafe_allow_html=True)
+        st.caption("Moteur injoignable — validation d'edge indisponible.")
+        return
+
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #8b5cf6;border-radius:14px;background:rgba(139,92,246,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#8b5cf6;">PHASE 2E — REAL EDGE VALIDATION</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">Frais Binance réels quand disponibles, distribution complète, '
+        "par symbole/stratégie — dernières 72h. Lecture seule, aucun ordre réel.</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    if report.observations == 0:
+        st.caption("En attente des premières observations persistées (micro_live_observations).")
+        return
+
+    net = report.net_profit
+    bps = report.net_return_bps
+
+    render_stat_cards(
+        [
+            {"label": "Observations", "value": f"{report.observations:,}".replace(",", " ")},
+            {"label": "Couverture frais réels", "value": f"{report.real_fee_coverage_pct:.0f} %" if report.real_fee_coverage_pct is not None else "—"},
+            {"label": "Edge brut (moy.)", "value": f"{report.gross_profit.mean:+.4f} $" if report.gross_profit.mean is not None else "—"},
+            {"label": "Frais réels (moy.)", "value": f"{report.avg_fees_usd:.4f} $" if report.avg_fees_usd is not None else "—"},
+            {"label": "Slippage (moy.)", "value": f"{report.avg_slippage_pct:.3f} %" if report.avg_slippage_pct is not None else "—"},
+            {"label": "Edge net (moy.)", "value": f"{net.mean:+.4f} $" if net.mean is not None else "—"},
+            {"label": "Edge net (médiane)", "value": f"{net.median:+.4f} $" if net.median is not None else "—"},
+            {"label": "Taux edge net positif", "value": f"{net.positive_rate_pct:.1f} %" if net.positive_rate_pct is not None else "—"},
+            {"label": "Net return (bps, moy.)", "value": f"{bps.mean:+.1f}" if bps.mean is not None else "—"},
+            {"label": "Net return (bps, médiane)", "value": f"{bps.median:+.1f}" if bps.median is not None else "—"},
+            {"label": "P10 / P90 edge net", "value": f"{net.p10:+.4f} $ / {net.p90:+.4f} $" if net.p10 is not None else "—"},
+            {"label": "Pire / meilleure observation", "value": f"{net.worst:+.4f} $ / {net.best:+.4f} $" if net.worst is not None else "—"},
+            {"label": "Marge de sécurité recommandée", "value": f"{report.recommended_safety_margin_usd:.4f} $", "sub": "1 écart-type de l'edge net observé"},
+            {"label": "Opportunités qualifiées (gate)", "value": f"{report.qualifying_after_gate:,}".replace(",", " "), "sub": f"sur {report.observations:,}".replace(",", " ")},
+            {"label": "Real orders placed", "value": f"{report.real_orders_placed}"},
+        ]
+    )
+
+    reasons = report.rejection_reasons or {}
+    if reasons:
+        st.caption("Causes de rejet (historique) : " + ", ".join(f"{k}: {v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])))
+
+    with st.expander("Symboles à edge net positif (top)"):
+        if not report.top_positive_symbols:
+            st.caption("Pas assez d'observations par symbole pour ce classement.")
+        for g in report.top_positive_symbols:
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{g.key} ({g.observations} obs.)</span>'
+                f'<span class="v">edge net moy. {g.net_profit.mean:+.4f} $ · positif {g.positive_net_rate_pct:.0f}%</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    with st.expander("Symboles qui détruisent la moyenne (edge net négatif)"):
+        if not report.negative_symbols:
+            st.caption("Aucun symbole avec au moins 5 observations et un edge net moyen négatif.")
+        for g in report.negative_symbols:
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{g.key} ({g.observations} obs.)</span>'
+                f'<span class="v">edge net moy. {g.net_profit.mean:+.4f} $ · positif {g.positive_net_rate_pct:.0f}%</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    if report.lunc_usdt is not None:
+        lunc = report.lunc_usdt
+        with st.expander(f"LUNC/USDT — analyse dédiée ({lunc.observations} obs.)"):
+            render_stat_cards(
+                [
+                    {"label": "Edge net (moy.)", "value": f"{lunc.net_profit.mean:+.4f} $" if lunc.net_profit.mean is not None else "—"},
+                    {"label": "Edge net (médiane)", "value": f"{lunc.net_profit.median:+.4f} $" if lunc.net_profit.median is not None else "—"},
+                    {"label": "Taux positif", "value": f"{lunc.positive_net_rate_pct:.1f} %" if lunc.positive_net_rate_pct is not None else "—"},
+                    {"label": "Spread carnet (moy.)", "value": f"{lunc.avg_book_spread_pct:.3f} %" if lunc.avg_book_spread_pct is not None else "—"},
+                    {"label": "Profondeur dispo (moy.)", "value": f"{lunc.avg_available_depth_usd:,.0f} $".replace(",", " ") if lunc.avg_available_depth_usd is not None else "—"},
+                    {"label": "Slippage (moy.)", "value": f"{lunc.avg_slippage_pct:.3f} %" if lunc.avg_slippage_pct is not None else "—"},
+                    {"label": "Taux passage MIN_NOTIONAL", "value": f"{lunc.min_notional_pass_rate_pct:.0f} %" if lunc.min_notional_pass_rate_pct is not None else "—"},
+                    {"label": "Taux passage LOT_SIZE", "value": f"{lunc.lot_size_pass_rate_pct:.0f} %" if lunc.lot_size_pass_rate_pct is not None else "—"},
+                ]
+            )
+    else:
+        st.caption("LUNC/USDT : aucune observation dans la fenêtre — pas de section dédiée à afficher.")
+
+    st.caption(
+        "Le gate de sécurité (« opportunités qualifiées ») exige net_profit > marge de sécurité, pas seulement > 0 — "
+        "la marge est calculée à partir de l'écart-type de l'edge net réellement observé, jamais choisie pour fabriquer un résultat favorable."
     )
 
 

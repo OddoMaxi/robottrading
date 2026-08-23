@@ -1,5 +1,7 @@
 import uuid
 
+import pytest
+
 from app.execution.binance_filters import parse_symbol_rules
 from app.execution.reality_quote import compute_reality_quote
 
@@ -123,6 +125,34 @@ def test_reality_quote_flags_insufficient_book_depth_as_high_slippage():
     )
     assert quote.estimated_slippage_pct >= 100.0
     assert quote.executable is False
+
+
+def test_reality_quote_carries_real_fee_and_edge_breakdown_fields():
+    """Phase 2E — real-fee wiring and the per-observation edge breakdown
+    the detailed dry-run analysis depends on."""
+    quote = compute_reality_quote(
+        opportunity_id=uuid.uuid4(),
+        symbol="BTCUSDT",
+        side="BUY",
+        master_requested_size_usd=10.0,
+        gross_spread_pct=1.0,
+        rules=RULES,
+        best_bid=50_000.0,
+        best_ask=50_010.0,
+        depth_levels=DEEP_BOOK,
+        account_balance_usdt=100.0,
+        micro_live_cap_usdt=10.0,
+        taker_fee_rate=0.0008,  # a real, non-default rate (e.g. BNB fee discount)
+        maker_fee_rate=0.0006,
+        fee_source="real_binance_fee",
+    )
+    assert quote.fee_source == "real_binance_fee"
+    assert quote.taker_fee_rate == 0.0008
+    assert quote.maker_fee_rate == 0.0006
+    assert quote.book_spread_pct == pytest.approx((50_010.0 - 50_000.0) / 50_005.0 * 100)
+    assert quote.gross_expected_profit_usd == pytest.approx(quote.exchange_valid_size_usd * 0.01)
+    expected_bps = quote.estimated_net_profit_after_real_constraints_usd / quote.exchange_valid_size_usd * 10_000
+    assert quote.net_return_bps == pytest.approx(expected_bps)
 
 
 def test_reality_quote_never_reads_paper_capital_module():

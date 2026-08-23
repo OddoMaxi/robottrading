@@ -406,3 +406,55 @@ class SystemEvent(Base):
     message: Mapped[str]
     event_metadata: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class MicroLiveObservationRecord(Base):
+    """PHASE 2E — REAL EDGE VALIDATION (user directive, 2026-08-23).
+
+    One row per Binance dry-run reality-quote observation (Phase 2D built
+    the in-memory-only version; this phase persists every observation so
+    a much larger, statistically meaningful sample can be analyzed by
+    symbol/strategy/time-slice without depending on the engine process's
+    memory surviving a restart). Written by
+    app.database.repository.save_micro_live_observation, called from
+    main.py's CEX detection loop in the same try/except as the reality
+    quote computation itself — a write failure here can never affect
+    paper execution. Read-only observability: nothing in this table is
+    ever read back by the detection loop, only by
+    app.reporting.micro_live_edge and the dashboard."""
+
+    __tablename__ = "micro_live_observations"
+    __table_args__ = (
+        Index("ix_micro_live_observations_observed_at", "observed_at"),
+        Index("ix_micro_live_observations_symbol", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    symbol: Mapped[str]
+    strategy: Mapped[str]
+    observed_at: Mapped[datetime]
+
+    master_requested_size_usd: Mapped[float] = mapped_column(Numeric(20, 4))
+    exchange_valid_size_usd: Mapped[float] = mapped_column(Numeric(20, 4))
+    best_bid: Mapped[float] = mapped_column(Numeric(24, 10))
+    best_ask: Mapped[float] = mapped_column(Numeric(24, 10))
+    book_spread_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    available_depth_usd: Mapped[float] = mapped_column(Numeric(20, 4))
+
+    gross_expected_profit_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    maker_fee_rate: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    taker_fee_rate: Mapped[float] = mapped_column(Numeric(10, 6))
+    fee_source: Mapped[str]  # "real_binance_fee" | "estimated_default"
+    estimated_fees_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    estimated_slippage_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    net_expected_profit_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    net_return_bps: Mapped[float] = mapped_column(Numeric(14, 4))
+
+    min_notional_pass: Mapped[bool]
+    lot_size_pass: Mapped[bool]
+    balance_pass: Mapped[bool]
+    executable: Mapped[bool]
+    rejection_reason: Mapped[str | None]
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

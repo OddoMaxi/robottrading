@@ -78,6 +78,20 @@ class FakeClient:
     async def get_order_book_depth(self, symbol, limit=20):
         return {"asks": [["50010.0", "1.0"], ["50020.0", "1.0"]], "bids": [["50000.0", "1.0"]]}
 
+    async def get_trade_fee(self, symbol):
+        return type("Fee", (), {"maker_fee_rate": 0.0007, "taker_fee_rate": 0.0009})()
+
+
+async def test_observe_reality_quote_uses_real_fee_when_available():
+    """Phase 2E, item 1 — a real (non-default) taker fee must flow through
+    into the quote with fee_source='real_binance_fee', not the flat 0.1% estimate."""
+    orchestrator = MicroLiveOrchestrator(client=FakeClient())
+    quote = await orchestrator.observe_reality_quote(_opp())
+    assert quote is not None
+    assert quote.fee_source == "real_binance_fee"
+    assert quote.taker_fee_rate == 0.0009
+    assert quote.maker_fee_rate == 0.0007
+
 
 async def test_observe_reality_quote_skips_opportunities_without_binance_leg():
     orchestrator = MicroLiveOrchestrator(client=FakeClient())
@@ -113,9 +127,10 @@ def test_summary_buckets_rejection_reasons():
         RealityQuote(
             opportunity_id=uuid.uuid4(), symbol="BTCUSDT", side="BUY",
             master_requested_size_usd=10.0, exchange_valid_size_usd=3.0,
-            best_bid=50_000.0, best_ask=50_010.0, available_depth_usd=1000.0,
+            best_bid=50_000.0, best_ask=50_010.0, book_spread_pct=0.02, available_depth_usd=1000.0,
+            gross_expected_profit_usd=0.03, maker_fee_rate=None, taker_fee_rate=0.001,
             estimated_fees_usd=0.003, estimated_slippage_pct=0.01,
-            estimated_net_profit_after_real_constraints_usd=-0.5,
+            estimated_net_profit_after_real_constraints_usd=-0.5, net_return_bps=-1666.7,
             min_notional_pass=False, lot_size_pass=True, balance_pass=True,
             executable=False, reason="notional too small", fee_source="estimated_default", computed_at=0.0,
         ),

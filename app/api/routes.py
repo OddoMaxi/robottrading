@@ -15,6 +15,7 @@ from app.execution.micro_live import micro_live_orchestrator, micro_live_state
 from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
+from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
 from app.risk.risk_engine import risk_engine
 from app.simulation.live_stress_test import run_live_stress_test
 
@@ -232,6 +233,97 @@ async def micro_live_binance_readiness() -> dict:
         "live_kill_switch_engaged": live_guard.kill_switch_engaged,
         "real_orders_placed": 0,
     }
+
+
+def _serialize_distribution(stats: DistributionStats) -> dict:
+    return {
+        "count": stats.count,
+        "mean": stats.mean,
+        "median": stats.median,
+        "p10": stats.p10,
+        "p25": stats.p25,
+        "p50": stats.p50,
+        "p75": stats.p75,
+        "p90": stats.p90,
+        "positive_rate_pct": stats.positive_rate_pct,
+        "negative_rate_pct": stats.negative_rate_pct,
+        "worst": stats.worst,
+        "best": stats.best,
+        "stdev": stats.stdev,
+    }
+
+
+def _serialize_group(group) -> dict:
+    return {
+        "key": group.key,
+        "observations": group.observations,
+        "net_profit": _serialize_distribution(group.net_profit),
+        "gross_profit_mean": group.gross_profit_mean,
+        "avg_fees_usd": group.avg_fees_usd,
+        "avg_slippage_pct": group.avg_slippage_pct,
+        "positive_net_rate_pct": group.positive_net_rate_pct,
+        "real_fee_coverage_pct": group.real_fee_coverage_pct,
+    }
+
+
+def _serialize_edge_report(report: MicroLiveEdgeReport) -> dict:
+    return {
+        "observations": report.observations,
+        "window_start": report.window_start.isoformat() if report.window_start else None,
+        "window_end": report.window_end.isoformat() if report.window_end else None,
+        "real_fee_coverage_pct": report.real_fee_coverage_pct,
+        "gross_profit": _serialize_distribution(report.gross_profit),
+        "net_profit": _serialize_distribution(report.net_profit),
+        "net_return_bps": _serialize_distribution(report.net_return_bps),
+        "avg_fees_usd": report.avg_fees_usd,
+        "avg_slippage_pct": report.avg_slippage_pct,
+        "rejection_reasons": report.rejection_reasons,
+        "top_positive_symbols": [_serialize_group(g) for g in report.top_positive_symbols()],
+        "negative_symbols": [_serialize_group(g) for g in report.negative_symbols()],
+        "by_strategy": [_serialize_group(g) for g in report.by_strategy],
+        "lunc_usdt": (
+            {
+                "observations": report.lunc_usdt.observations,
+                "net_profit": _serialize_distribution(report.lunc_usdt.net_profit),
+                "avg_book_spread_pct": report.lunc_usdt.avg_book_spread_pct,
+                "avg_available_depth_usd": report.lunc_usdt.avg_available_depth_usd,
+                "avg_slippage_pct": report.lunc_usdt.avg_slippage_pct,
+                "min_notional_pass_rate_pct": report.lunc_usdt.min_notional_pass_rate_pct,
+                "lot_size_pass_rate_pct": report.lunc_usdt.lot_size_pass_rate_pct,
+                "positive_net_rate_pct": report.lunc_usdt.positive_net_rate_pct,
+                "real_fee_coverage_pct": report.lunc_usdt.real_fee_coverage_pct,
+            }
+            if report.lunc_usdt is not None
+            else None
+        ),
+        "time_slices": [
+            {
+                "slice_start": ts.slice_start.isoformat(),
+                "slice_end": ts.slice_end.isoformat(),
+                "observations": ts.observations,
+                "positive_net_rate_pct": ts.positive_net_rate_pct,
+                "mean_net_profit_usd": ts.mean_net_profit_usd,
+                "median_net_profit_usd": ts.median_net_profit_usd,
+            }
+            for ts in report.time_slices
+        ],
+        "recommended_safety_margin_usd": report.recommended_safety_margin_usd,
+        "qualifying_after_gate": report.qualifying_after_gate,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/micro-live/edge-report")
+async def micro_live_edge_report(hours: float = 24.0, session: AsyncSession = Depends(get_session)) -> dict:
+    """PHASE 2E — REAL EDGE VALIDATION (user directive, 2026-08-23).
+    Aggregates the persisted micro_live_observations table over the last
+    `hours` — pure read, changes nothing, places no order."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    since = now - timedelta(hours=hours)
+    report = await build_micro_live_edge_report(session, since=since, until=now)
+    return _serialize_edge_report(report)
 
 
 @router.get("/market-data/health")
