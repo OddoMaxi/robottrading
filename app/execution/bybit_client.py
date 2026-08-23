@@ -132,6 +132,22 @@ def _parse_api_key_info(data: dict, now: float) -> BybitApiKeyInfo:
     )
 
 
+def parse_wallet_balance(data: dict, asset: str) -> float:
+    """Available (free) balance of one asset from GET /v5/account/
+    wallet-balance's raw response — Phase 3A's capital-pre-positioning
+    check (item: 'LUNC déjà disponible sur Bybit'). Returns 0.0 (never
+    raises) if the asset isn't present in any listed account."""
+    for account in data.get("result", {}).get("list", []):
+        for coin in account.get("coin", []):
+            if coin.get("coin") == asset:
+                # availableToWithdraw is Bybit's own "free, not locked in
+                # an open order" figure — the correct analog of Binance's
+                # balance.free, not walletBalance (which includes locked).
+                raw = coin.get("availableToWithdraw") or coin.get("walletBalance") or "0"
+                return float(raw) if raw else 0.0
+    return 0.0
+
+
 def _parse_fee_rate(data: dict, symbol: str, now: float) -> BybitFeeRate | None:
     for entry in data.get("result", {}).get("list", []):
         if entry.get("symbol") == symbol:

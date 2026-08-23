@@ -518,3 +518,58 @@ class DualLegObservationRecord(Base):
     rejection_reason: Mapped[str | None]
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class LiveArbitrageExecutionRecord(Base):
+    """PROFIT REALITY LEDGER (Phase 3A, user directive, 2026-08-23).
+
+    One row per REAL attempt made by
+    app.execution.live_arbitrage_executor.LiveArbitrageExecutor — this
+    table stays EMPTY until LIVE_TRADING_ENABLED is explicitly flipped
+    True by an operator (never by this codebase) AND a specific
+    execute_one_arbitrage() call is made (never automatic). Records
+    predicted vs ACTUAL outcome — actual fill prices/quantities/fees come
+    directly from what Binance/Bybit returned for that order, never from
+    the paper engine. Written by
+    app.database.repository.save_live_arbitrage_execution."""
+
+    __tablename__ = "live_arbitrage_executions"
+    __table_args__ = (Index("ix_live_arbitrage_executions_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, index=True)
+    symbol: Mapped[str]
+    outcome: Mapped[str]
+    reason: Mapped[str | None]
+    started_at: Mapped[datetime]
+    completed_at: Mapped[datetime | None]
+
+    predicted_net_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    predicted_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    predicted_slippage_pct: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    safety_adjusted_predicted_profit_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+
+    buy_client_order_id: Mapped[str | None]
+    buy_exchange_order_id: Mapped[str | None]
+    buy_status: Mapped[str | None]
+    buy_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+    buy_avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
+    buy_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    buy_latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
+
+    sell_client_order_id: Mapped[str | None]
+    sell_exchange_order_id: Mapped[str | None]
+    sell_status: Mapped[str | None]
+    sell_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+    sell_avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
+    sell_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    sell_latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
+
+    neutralization_order_id: Mapped[str | None]
+    neutralization_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+
+    actual_realized_spread_pct: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    actual_net_pnl_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    prediction_error_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

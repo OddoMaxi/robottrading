@@ -65,8 +65,14 @@ class BinanceAccountSnapshot:
         """Available (free, not locked) USDT — the only balance micro-live
         sizing may ever look at (item 3: use what Binance actually
         returns, never assume 10 USDT)."""
+        return self.balance_of("USDT")
+
+    def balance_of(self, asset: str) -> float:
+        """Available (free, not locked) balance of any asset — used by
+        Phase 3A's capital-pre-positioning check (item: 'USDT disponible
+        sur Binance')."""
         for balance in self.balances:
-            if balance.asset == "USDT":
+            if balance.asset == asset:
                 return balance.free
         return 0.0
 

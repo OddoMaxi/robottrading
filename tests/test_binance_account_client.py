@@ -41,6 +41,12 @@ def test_parse_account_snapshot_balance_usdt_defaults_to_zero_when_absent():
     assert snapshot.balance_usdt() == 0.0
 
 
+def test_balance_of_any_asset():
+    snapshot = _parse_account_snapshot(ACCOUNT_FIXTURE, now=0.0)
+    assert snapshot.balance_of("BNB") == 0.01
+    assert snapshot.balance_of("DOGE") == 0.0
+
+
 def test_parse_api_restrictions_read_only_key():
     restrictions = _parse_api_restrictions(RESTRICTIONS_FIXTURE_READ_ONLY, now=0.0)
     assert restrictions.enable_reading is True

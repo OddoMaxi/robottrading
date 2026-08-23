@@ -11,6 +11,7 @@ from app.database.models import OpportunityRecord
 from app.database.repository import log_system_event
 from app.database.session import get_session
 from app.execution.live_guard import LiveExecutionRefused, live_guard
+from app.execution.live_readiness_gate import build_first_live_gate_report
 from app.execution.micro_live import micro_live_orchestrator, micro_live_state
 from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
@@ -369,6 +370,44 @@ async def dual_leg_edge_report(hours: float = 24.0, session: AsyncSession = Depe
     since = now - timedelta(hours=hours)
     report = await build_dual_leg_edge_report(session, since=since, until=now)
     return _serialize_dual_leg_report(report)
+
+
+@router.get("/live/first-gate-report")
+async def live_first_gate_report() -> dict:
+    """PHASE 3A — FIRST-LIVE GATE (user directive, 2026-08-23). READ-ONLY:
+    account permissions, real balances, exchange filters — never places
+    an order, never imports anything that could. real_orders_placed is
+    always 0 regardless of the verdict."""
+    report = await build_first_live_gate_report()
+    size = report.smallest_common_order_size
+    return {
+        "binance_trade_api_ready": report.binance_trade_api_ready,
+        "binance_trade_api_detail": report.binance_trade_api_detail,
+        "bybit_trade_api_ready": report.bybit_trade_api_ready,
+        "bybit_trade_api_detail": report.bybit_trade_api_detail,
+        "withdrawals_disabled": report.withdrawals_disabled,
+        "withdrawals_detail": report.withdrawals_detail,
+        "binance_usdt_balance": report.binance_usdt_balance,
+        "bybit_lunc_balance": report.bybit_lunc_balance,
+        "max_live_notional_usdt": report.max_live_notional_usdt,
+        "leg_risk_protection_pass": report.leg_risk_protection_pass,
+        "leg_risk_protection_detail": report.leg_risk_protection_detail,
+        "live_kill_switch_pass": report.live_kill_switch_pass,
+        "live_kill_switch_detail": report.live_kill_switch_detail,
+        "real_pnl_ledger_ready": report.real_pnl_ledger_ready,
+        "real_pnl_ledger_detail": report.real_pnl_ledger_detail,
+        "smallest_common_order_size": {
+            "reachable": size.reachable,
+            "reason": size.reason,
+            "lunc_qty": size.lunc_qty,
+            "notional_usdt": size.notional_usdt,
+            "reference_price": size.reference_price,
+        },
+        "ready_for_first_real_arbitrage": report.ready_for_first_real_arbitrage,
+        "proposed_first_trade_size_usdt": report.proposed_first_trade_size_usdt,
+        "live_trading_enabled": live_guard.live_trading_enabled,
+        "real_orders_placed": 0,
+    }
 
 
 @router.get("/market-data/health")

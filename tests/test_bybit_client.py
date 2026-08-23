@@ -1,4 +1,18 @@
-from app.execution.bybit_client import _parse_api_key_info, _parse_book_ticker, _parse_fee_rate, _parse_symbol_rules
+from app.execution.bybit_client import _parse_api_key_info, _parse_book_ticker, _parse_fee_rate, _parse_symbol_rules, parse_wallet_balance
+
+WALLET_BALANCE_FIXTURE = {
+    "result": {
+        "list": [
+            {
+                "accountType": "UNIFIED",
+                "coin": [
+                    {"coin": "LUNC", "walletBalance": "1000000", "availableToWithdraw": "950000"},
+                    {"coin": "USDT", "walletBalance": "5.0", "availableToWithdraw": "5.0"},
+                ],
+            }
+        ]
+    }
+}
 
 READ_ONLY_KEY_INFO_FIXTURE = {
     "result": {
@@ -127,6 +141,15 @@ def test_parse_api_key_info_flags_trade_enabled_key():
     info = _parse_api_key_info(TRADE_ENABLED_KEY_INFO_FIXTURE, now=0.0)
     assert info.read_only is False
     assert info.is_safely_read_only() is False
+
+
+def test_parse_wallet_balance_finds_asset():
+    assert parse_wallet_balance(WALLET_BALANCE_FIXTURE, "LUNC") == 950000.0
+    assert parse_wallet_balance(WALLET_BALANCE_FIXTURE, "USDT") == 5.0
+
+
+def test_parse_wallet_balance_missing_asset_returns_zero():
+    assert parse_wallet_balance(WALLET_BALANCE_FIXTURE, "BTC") == 0.0
 
 
 def test_withdrawal_permission_is_always_a_real_violation():

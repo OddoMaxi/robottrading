@@ -12,6 +12,7 @@ from app.database.models import (
     DexSimulatedTradeRecord,
     DualLegObservationRecord,
     Exchange,
+    LiveArbitrageExecutionRecord,
     MicroLiveObservationRecord,
     OpportunityRecord,
     PriceSnapshot,
@@ -358,6 +359,63 @@ async def save_dual_leg_observation(session: AsyncSession, quote, strategy: str)
         sell_tradable=quote.sell_tradable,
         executable=quote.executable,
         rejection_reason=quote.reason,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_live_arbitrage_execution(session: AsyncSession, result) -> LiveArbitrageExecutionRecord:
+    """PROFIT REALITY LEDGER (Phase 3A, user directive, 2026-08-23).
+    Persists one app.execution.live_arbitrage_executor.LiveArbitrageResult
+    (not type-hinted directly, same database<->execution import-cycle
+    avoidance as the other save_* functions here) — for EVERY outcome,
+    not just BOTH_FILLED, so the ledger has no silent gap for an attempt
+    that was actually made. This table stays empty until an operator
+    explicitly enables live trading and calls execute_one_arbitrage()."""
+
+    def _latency_ms(submitted_at: float | None, confirmed_at: float | None) -> float | None:
+        if submitted_at is None or confirmed_at is None:
+            return None
+        return (confirmed_at - submitted_at) * 1000
+
+    def _realized_spread_pct(buy_price: float | None, sell_price: float | None) -> float | None:
+        if not buy_price or not sell_price:
+            return None
+        return (sell_price - buy_price) / buy_price * 100
+
+    record = LiveArbitrageExecutionRecord(
+        attempt_id=result.attempt_id,
+        symbol=result.symbol,
+        outcome=result.outcome.value if hasattr(result.outcome, "value") else str(result.outcome),
+        reason=result.reason,
+        started_at=datetime.fromtimestamp(result.started_at, tz=UTC).replace(tzinfo=None),
+        completed_at=(
+            datetime.fromtimestamp(result.completed_at, tz=UTC).replace(tzinfo=None) if result.completed_at is not None else None
+        ),
+        predicted_net_profit_usd=result.predicted_net_profit_usd,
+        predicted_fees_usd=result.predicted_fees_usd,
+        predicted_slippage_pct=result.predicted_slippage_pct,
+        safety_adjusted_predicted_profit_usd=result.safety_adjusted_predicted_profit_usd,
+        buy_client_order_id=result.buy_client_order_id,
+        buy_exchange_order_id=result.buy_exchange_order_id,
+        buy_status=result.buy_status,
+        buy_filled_qty=result.buy_filled_qty,
+        buy_avg_fill_price=result.buy_avg_fill_price,
+        buy_fees_usd=result.buy_fees_usd,
+        buy_latency_ms=_latency_ms(result.buy_submitted_at, result.buy_confirmed_at),
+        sell_client_order_id=result.sell_client_order_id,
+        sell_exchange_order_id=result.sell_exchange_order_id,
+        sell_status=result.sell_status,
+        sell_filled_qty=result.sell_filled_qty,
+        sell_avg_fill_price=result.sell_avg_fill_price,
+        sell_fees_usd=result.sell_fees_usd,
+        sell_latency_ms=_latency_ms(result.sell_submitted_at, result.sell_confirmed_at),
+        neutralization_order_id=result.neutralization_order_id,
+        neutralization_filled_qty=result.neutralization_filled_qty,
+        actual_realized_spread_pct=_realized_spread_pct(result.buy_avg_fill_price, result.sell_avg_fill_price),
+        actual_net_pnl_usd=result.actual_net_pnl_usd,
+        prediction_error_usd=result.prediction_error_usd,
     )
     session.add(record)
     await session.flush()

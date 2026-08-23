@@ -2,9 +2,16 @@
 2026-08-23).
 
 Statically verifies:
-1. No file in the repo references a Binance order-placement/cancel
-   endpoint or method name — there is no code path that COULD place a
-   real order, not just a codebase that "doesn't currently call" one.
+1. No file in the repo references a Binance/Bybit order-placement/cancel
+   endpoint or method name — EXCEPT the two files Phase 3A (user
+   directive, 2026-08-23) explicitly and deliberately authorized to
+   contain that capability (app.execution.binance_live_trade_client,
+   app.execution.bybit_live_trade_client) and this test file itself
+   (which must name the tokens to allowlist them). Every other file in
+   the repo — main.py, the read-only clients, the dashboard, every
+   reporting module — must still contain none of these tokens at all.
+   See tests/test_phase3a_isolation.py for what gates the two allowlisted
+   files instead of a blanket absence.
 2. app.execution.binance_account_client / app.execution.micro_live never
    log the raw API key/secret value.
 3. app.execution.live_guard's module singleton starts with
@@ -38,6 +45,17 @@ FORBIDDEN_ORDER_TOKENS = (
     "/v5/order/amend",
 )
 
+# PHASE 3A (user directive, 2026-08-23) — the ONLY two files in the repo
+# allowed to reference an order-placement endpoint, and the ONLY caller
+# tests/test_phase3a_isolation.py permits to import them
+# (app.execution.live_arbitrage_executor). Adding a path here must never
+# be done casually — it is exactly the thing this test exists to make
+# hard to do by accident.
+ALLOWLISTED_ORDER_CAPABLE_FILES = {
+    APP_DIR / "execution" / "binance_live_trade_client.py",
+    APP_DIR / "execution" / "bybit_live_trade_client.py",
+}
+
 
 def _all_py_files() -> list[Path]:
     return [*APP_DIR.rglob("*.py"), MAIN_ENTRYPOINT]
@@ -46,6 +64,8 @@ def _all_py_files() -> list[Path]:
 def test_no_file_references_a_binance_order_endpoint_or_method_name():
     violations = []
     for path in _all_py_files():
+        if path in ALLOWLISTED_ORDER_CAPABLE_FILES:
+            continue
         text = path.read_text()
         for token in FORBIDDEN_ORDER_TOKENS:
             if token in text:

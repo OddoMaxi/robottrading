@@ -28,9 +28,22 @@ class LiveExecutionRefused(Exception):
 
 
 class LiveTradingGuard:
-    def __init__(self, live_trading_enabled: bool, max_live_capital_usdt: float) -> None:
+    def __init__(
+        self,
+        live_trading_enabled: bool,
+        max_live_capital_usdt: float,
+        symbol_allowlist: list[str] | None = None,
+        direction: str | None = None,
+        max_notional_per_leg_usdt: float | None = None,
+        max_concurrent_arbitrages: int = 1,
+    ) -> None:
         self._live_trading_enabled = live_trading_enabled
         self._max_live_capital_usdt = max_live_capital_usdt
+        self._symbol_allowlist = set(symbol_allowlist or [])
+        self._direction = direction
+        self._max_notional_per_leg_usdt = max_notional_per_leg_usdt
+        self._max_concurrent_arbitrages = max_concurrent_arbitrages
+        self._in_flight_count = 0
         self._kill_switch_engaged = False
         self._kill_switch_reason: str | None = None
         self._kill_switch_at: float | None = None
@@ -75,10 +88,52 @@ class LiveTradingGuard:
                 f"requested {requested_usdt} USDT exceeds max_live_capital_usdt cap of {self._max_live_capital_usdt} USDT"
             )
 
+    def assert_arbitrage_allowed(self, symbol: str, direction: str, notional_per_leg_usdt: float) -> None:
+        """PHASE 3A (user directive, 2026-08-23) — the specific gate
+        app.execution.live_arbitrage_executor must pass before EVERY
+        real dual-leg attempt (not just once at startup): kill switch,
+        live_trading_enabled, symbol allowlist, configured direction,
+        per-leg notional cap, and the concurrent-arbitrage limit. Raises
+        LiveExecutionRefused for any reason at all to proceed — callers
+        must never catch this and continue, only report it and stop."""
+        if self._kill_switch_engaged:
+            raise LiveExecutionRefused(f"live kill switch engaged: {self._kill_switch_reason}")
+        if not self._live_trading_enabled:
+            raise LiveExecutionRefused("live_trading_enabled is False")
+        if symbol not in self._symbol_allowlist:
+            raise LiveExecutionRefused(f"symbol {symbol} not in live_symbol_allowlist {sorted(self._symbol_allowlist)}")
+        if self._direction is not None and direction != self._direction:
+            raise LiveExecutionRefused(f"direction {direction} does not match configured live_direction {self._direction}")
+        if notional_per_leg_usdt <= 0:
+            raise LiveExecutionRefused(f"notional_per_leg_usdt must be positive, got {notional_per_leg_usdt}")
+        if self._max_notional_per_leg_usdt is not None and notional_per_leg_usdt > self._max_notional_per_leg_usdt:
+            raise LiveExecutionRefused(
+                f"requested {notional_per_leg_usdt} USDT per leg exceeds max_notional_per_leg_usdt cap of {self._max_notional_per_leg_usdt} USDT"
+            )
+        if self._in_flight_count >= self._max_concurrent_arbitrages:
+            raise LiveExecutionRefused(
+                f"max_concurrent_live_arbitrages ({self._max_concurrent_arbitrages}) already in flight"
+            )
+
+    def register_arbitrage_start(self) -> None:
+        self._in_flight_count += 1
+
+    def register_arbitrage_end(self) -> None:
+        self._in_flight_count = max(0, self._in_flight_count - 1)
+
+    @property
+    def in_flight_count(self) -> int:
+        return self._in_flight_count
+
     def status(self) -> dict:
         return {
             "live_trading_enabled": self._live_trading_enabled,
             "max_live_capital_usdt": self._max_live_capital_usdt,
+            "symbol_allowlist": sorted(self._symbol_allowlist),
+            "direction": self._direction,
+            "max_notional_per_leg_usdt": self._max_notional_per_leg_usdt,
+            "max_concurrent_arbitrages": self._max_concurrent_arbitrages,
+            "in_flight_count": self._in_flight_count,
             "kill_switch_engaged": self._kill_switch_engaged,
             "kill_switch_reason": self._kill_switch_reason,
             "kill_switch_at": self._kill_switch_at,
@@ -92,6 +147,10 @@ def _build_default_live_guard() -> LiveTradingGuard:
     return LiveTradingGuard(
         live_trading_enabled=settings.live_trading_enabled,
         max_live_capital_usdt=settings.max_live_capital_usdt,
+        symbol_allowlist=settings.live_symbol_allowlist,
+        direction=settings.live_direction,
+        max_notional_per_leg_usdt=settings.max_notional_per_leg_usdt,
+        max_concurrent_arbitrages=settings.max_concurrent_live_arbitrages,
     )
 
 

@@ -82,6 +82,23 @@ class Settings(BaseSettings):
     # sizing-time check above.
     max_live_capital_usdt: float = 10.0
 
+    # PHASE 3A (user directive, 2026-08-23) — CONTROLLED MICRO-LIVE,
+    # LUNCUSDT Binance(buy)->Bybit(sell) ONLY. Every one of these is
+    # checked by app.execution.live_guard before app.execution.
+    # live_arbitrage_executor is allowed to submit even the pre-trade
+    # dual-leg re-check, let alone an order — narrowing the scope here is
+    # itself a safety control, not just documentation of intent.
+    live_symbol_allowlist: list[str] = ["LUNCUSDT"]
+    live_direction: str = "BINANCE_BUY_BYBIT_SELL"
+    max_notional_per_leg_usdt: float = 10.0
+    max_concurrent_live_arbitrages: int = 1
+    # Self-documenting assertion, not a remotely-enforceable setting (this
+    # app has no way to change what's provisioned on the exchange side) —
+    # asserted against BinanceApiKeyRestrictions.enable_withdrawals and
+    # BybitApiKeyInfo.has_withdrawal_permission() before arming the live
+    # executor; see app.execution.live_readiness_gate.
+    withdrawals_required: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

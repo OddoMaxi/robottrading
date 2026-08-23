@@ -55,3 +55,55 @@ def test_status_never_includes_credentials():
     status = guard.status()
     for key in status:
         assert "key" not in key.lower() and "secret" not in key.lower()
+
+
+def _arb_guard(**overrides) -> LiveTradingGuard:
+    base = dict(
+        live_trading_enabled=True,
+        max_live_capital_usdt=10.0,
+        symbol_allowlist=["LUNCUSDT"],
+        direction="BINANCE_BUY_BYBIT_SELL",
+        max_notional_per_leg_usdt=10.0,
+        max_concurrent_arbitrages=1,
+    )
+    base.update(overrides)
+    return LiveTradingGuard(**base)
+
+
+def test_assert_arbitrage_allowed_passes_for_in_scope_request():
+    guard = _arb_guard()
+    guard.assert_arbitrage_allowed("LUNCUSDT", "BINANCE_BUY_BYBIT_SELL", 10.0)  # must not raise
+
+
+def test_assert_arbitrage_allowed_refuses_symbol_outside_allowlist():
+    guard = _arb_guard()
+    with pytest.raises(LiveExecutionRefused, match="not in live_symbol_allowlist"):
+        guard.assert_arbitrage_allowed("BTCUSDT", "BINANCE_BUY_BYBIT_SELL", 10.0)
+
+
+def test_assert_arbitrage_allowed_refuses_wrong_direction():
+    guard = _arb_guard()
+    with pytest.raises(LiveExecutionRefused, match="does not match configured live_direction"):
+        guard.assert_arbitrage_allowed("LUNCUSDT", "BYBIT_BUY_BINANCE_SELL", 10.0)
+
+
+def test_assert_arbitrage_allowed_refuses_above_notional_cap():
+    guard = _arb_guard()
+    with pytest.raises(LiveExecutionRefused, match="exceeds max_notional_per_leg_usdt"):
+        guard.assert_arbitrage_allowed("LUNCUSDT", "BINANCE_BUY_BYBIT_SELL", 10.01)
+
+
+def test_assert_arbitrage_allowed_refuses_when_max_concurrent_reached():
+    guard = _arb_guard(max_concurrent_arbitrages=1)
+    guard.register_arbitrage_start()
+    with pytest.raises(LiveExecutionRefused, match="already in flight"):
+        guard.assert_arbitrage_allowed("LUNCUSDT", "BINANCE_BUY_BYBIT_SELL", 10.0)
+    guard.register_arbitrage_end()
+    guard.assert_arbitrage_allowed("LUNCUSDT", "BINANCE_BUY_BYBIT_SELL", 10.0)  # must not raise now
+
+
+def test_register_arbitrage_end_never_goes_negative():
+    guard = _arb_guard()
+    guard.register_arbitrage_end()
+    guard.register_arbitrage_end()
+    assert guard.in_flight_count == 0
