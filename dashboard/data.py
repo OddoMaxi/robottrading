@@ -615,7 +615,12 @@ class MicroLiveBinanceReadiness:
     real_balance_verified: bool = False
     account_snapshot_error: str | None = None
     can_trade: bool | None = None
-    can_withdraw: bool | None = None
+    can_withdraw: bool | None = None  # account-level KYC flag — see key_enable_withdrawals for the key's own permission scope
+    key_enable_reading: bool | None = None
+    key_enable_withdrawals: bool | None = None  # the field item 2's "no withdrawal permission" requirement is actually checked against
+    key_enable_spot_and_margin_trading: bool | None = None
+    key_ip_restricted: bool | None = None
+    api_restrictions_error: str | None = None
     micro_live_cap_usdt: float = 10.0
     max_live_capital_usdt: float = 10.0
     paper_capital_usd: float = 10_000.0

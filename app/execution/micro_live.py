@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from app.execution.binance_account_client import (
     BinanceAccountClient,
     BinanceAccountSnapshot,
+    BinanceApiKeyRestrictions,
     BinanceCredentialsMissing,
 )
 from app.execution.binance_filters import SymbolNotFound, SymbolRules, parse_symbol_rules
@@ -66,6 +67,8 @@ class MicroLiveState:
         self.observations: list[MicroLiveObservation] = []
         self.account_snapshot: BinanceAccountSnapshot | None = None
         self.account_snapshot_error: str | None = None
+        self.api_restrictions: BinanceApiKeyRestrictions | None = None
+        self.api_restrictions_error: str | None = None
         self.last_connectivity_reachable: bool | None = None
         self.last_connectivity_detail: str | None = None
 
@@ -117,6 +120,8 @@ class MicroLiveOrchestrator:
         self._client = client or BinanceAccountClient()
         self._account_snapshot: BinanceAccountSnapshot | None = None
         self._account_snapshot_fetched_at = 0.0
+        self._api_restrictions: BinanceApiKeyRestrictions | None = None
+        self._api_restrictions_fetched_at = 0.0
         self._exchange_info_cache: dict[str, tuple[float, SymbolRules]] = {}
 
     async def check_connectivity(self):
@@ -145,6 +150,30 @@ class MicroLiveOrchestrator:
         micro_live_state.account_snapshot = snapshot
         micro_live_state.account_snapshot_error = None
         return snapshot
+
+    async def get_api_restrictions(self, now: float | None = None) -> BinanceApiKeyRestrictions | None:
+        """The authoritative check for item 2's 'no withdrawal permission'
+        requirement — GET /sapi/v1/account/apiRestrictions reflects the
+        CALLING KEY's own scope, unlike BinanceAccountSnapshot.can_withdraw
+        (an account-level KYC flag, not a key permission — see
+        app.execution.binance_account_client.get_api_restrictions's own
+        docstring)."""
+        now = now if now is not None else time.time()
+        if self._api_restrictions is not None and now - self._api_restrictions_fetched_at < ACCOUNT_SNAPSHOT_TTL_SECONDS:
+            return self._api_restrictions
+        try:
+            restrictions = await self._client.get_api_restrictions()
+        except BinanceCredentialsMissing as exc:
+            micro_live_state.api_restrictions_error = str(exc)
+            return None
+        except Exception as exc:
+            micro_live_state.api_restrictions_error = f"apiRestrictions fetch failed: {exc}"
+            return None
+        self._api_restrictions = restrictions
+        self._api_restrictions_fetched_at = now
+        micro_live_state.api_restrictions = restrictions
+        micro_live_state.api_restrictions_error = None
+        return restrictions
 
     async def _get_symbol_rules(self, symbol: str, now: float) -> SymbolRules | None:
         cached = self._exchange_info_cache.get(symbol)

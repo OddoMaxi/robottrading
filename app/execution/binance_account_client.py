@@ -71,6 +71,35 @@ class BinanceAccountSnapshot:
         return 0.0
 
 
+@dataclass(slots=True)
+class BinanceApiKeyRestrictions:
+    """The CALLING KEY's own configured permission scope — this, not
+    BinanceAccountSnapshot.can_withdraw, is what item 2's 'no withdrawal
+    permission' requirement must be checked against."""
+
+    enable_reading: bool
+    enable_withdrawals: bool
+    enable_spot_and_margin_trading: bool
+    enable_margin: bool
+    enable_futures: bool
+    enable_internal_transfer: bool
+    ip_restrict: bool
+    fetched_at: float
+
+
+def _parse_api_restrictions(data: dict, now: float) -> BinanceApiKeyRestrictions:
+    return BinanceApiKeyRestrictions(
+        enable_reading=bool(data.get("enableReading", False)),
+        enable_withdrawals=bool(data.get("enableWithdrawals", False)),
+        enable_spot_and_margin_trading=bool(data.get("enableSpotAndMarginTrading", False)),
+        enable_margin=bool(data.get("enableMargin", False)),
+        enable_futures=bool(data.get("enableFutures", False)),
+        enable_internal_transfer=bool(data.get("enableInternalTransfer", False)),
+        ip_restrict=bool(data.get("ipRestrict", False)),
+        fetched_at=now,
+    )
+
+
 def _parse_account_snapshot(data: dict, now: float) -> BinanceAccountSnapshot:
     balances = [
         BinanceBalance(asset=b["asset"], free=float(b["free"]), locked=float(b["locked"]))
@@ -161,6 +190,27 @@ class BinanceAccountClient(ExchangeClient):
             ) as response:
                 response.raise_for_status()
                 return await response.json()
+
+    async def get_api_restrictions(self) -> BinanceApiKeyRestrictions:
+        """GET /sapi/v1/account/apiRestrictions — SIGNED, read-only. This
+        is the endpoint that actually reflects the CALLING KEY's own
+        configured permission scope (enableReading/enableWithdrawals/
+        enableSpotAndMarginTrading/ipRestrict, etc.) — unlike
+        /api/v3/account's canWithdraw, which reflects the ACCOUNT's
+        overall withdrawal eligibility (KYC/compliance status), not this
+        key's permissions. Item 2's 'no withdrawal permission' constraint
+        must be checked against enableWithdrawals from THIS endpoint."""
+        headers, params = self._signed_request_params()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/sapi/v1/account/apiRestrictions",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return _parse_api_restrictions(data, now=time.time())
 
     async def get_trade_fee(self, symbol: str) -> dict:
         """GET /sapi/v1/asset/tradeFee — SIGNED, read-only. Real maker/

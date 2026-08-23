@@ -197,6 +197,7 @@ async def micro_live_binance_readiness() -> dict:
     settings = get_settings()
     connectivity = await micro_live_orchestrator.check_connectivity()
     snapshot = await micro_live_orchestrator.get_account_snapshot()
+    restrictions = await micro_live_orchestrator.get_api_restrictions()
     summary = micro_live_state.summary()
     return {
         "binance_connectivity": connectivity.reachable,
@@ -209,7 +210,15 @@ async def micro_live_binance_readiness() -> dict:
         "real_balance_verified": snapshot is not None,
         "account_snapshot_error": micro_live_state.account_snapshot_error,
         "can_trade": snapshot.can_trade if snapshot is not None else None,
+        # NOTE: this is the ACCOUNT's overall (KYC/compliance) withdrawal
+        # eligibility, not this key's own permission scope — see
+        # key_enable_withdrawals below for the field item 2 actually cares about.
         "can_withdraw": snapshot.can_withdraw if snapshot is not None else None,
+        "key_enable_reading": restrictions.enable_reading if restrictions is not None else None,
+        "key_enable_withdrawals": restrictions.enable_withdrawals if restrictions is not None else None,
+        "key_enable_spot_and_margin_trading": restrictions.enable_spot_and_margin_trading if restrictions is not None else None,
+        "key_ip_restricted": restrictions.ip_restrict if restrictions is not None else None,
+        "api_restrictions_error": micro_live_state.api_restrictions_error,
         "micro_live_cap_usdt": settings.micro_live_cap_usdt,
         "max_live_capital_usdt": settings.max_live_capital_usdt,
         "paper_capital_usd": settings.paper_capital_usd,

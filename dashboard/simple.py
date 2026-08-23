@@ -1230,18 +1230,32 @@ def render_phase2d_micro_live_section() -> None:
             '<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">⚠️ Coupe-circuit LIVE engagé</div></div>',
             unsafe_allow_html=True,
         )
+    if readiness.key_enable_withdrawals:
+        st.markdown(
+            '<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">'
+            '🚨 Cette clé API a la permission de RETRAIT activée (enableWithdrawals=true) — contrainte de sécurité violée. '
+            "Désactive « Enable Withdrawals » sur cette clé dans Binance API Management.</div></div>",
+            unsafe_allow_html=True,
+        )
     if readiness.account_snapshot_error:
         st.caption(f"⚠️ Solde réel indisponible : {readiness.account_snapshot_error}")
+    if readiness.api_restrictions_error:
+        st.caption(f"⚠️ Permissions de la clé indisponibles : {readiness.api_restrictions_error}")
     if not readiness.credentials_configured:
         st.caption("⚠️ Aucune clé API Binance configurée (BINANCE_API_KEY/BINANCE_API_SECRET) — solde réel et filtres indisponibles.")
 
     balance_display = f"{readiness.real_balance_usdt:,.2f} $".replace(",", " ") if readiness.real_balance_usdt is not None else "—"
     reasons = readiness.rejection_reasons or {}
+    withdraw_display = (
+        "—" if readiness.key_enable_withdrawals is None else ("🚨 OUI" if readiness.key_enable_withdrawals else "✓ NON")
+    )
 
     render_stat_cards(
         [
             {"label": "Connectivité Binance", "value": "✓ PASS" if readiness.binance_connectivity else "✗ FAIL"},
             {"label": "Mode compte", "value": readiness.account_mode},
+            {"label": "Clé — retrait autorisé", "value": withdraw_display, "sub": "doit rester NON pour cette phase"},
+            {"label": "Clé — restreinte par IP", "value": "✓ OUI" if readiness.key_ip_restricted else "NON" if readiness.key_ip_restricted is not None else "—"},
             {"label": "Solde réel (USDT)", "value": balance_display, "sub": "✓ vérifié" if readiness.real_balance_verified else "non vérifié"},
             {"label": "Cap micro-live", "value": f"{readiness.micro_live_cap_usdt:.2f} $"},
             {"label": "Cap max exécution live (indépendant)", "value": f"{readiness.max_live_capital_usdt:.2f} $"},
