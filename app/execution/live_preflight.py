@@ -55,7 +55,13 @@ async def build_multi_symbol_preflight_report(requested_notional_per_leg_usdt: f
     master_ranker_detail = "unable to rank opportunities"
     ranked: list[RankedOpportunity] = []
     try:
-        ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=notional, max_symbols=None)
+        # Bounded rather than the full ~240-symbol universe: scanning
+        # everything synchronously per request takes several minutes (see
+        # app.execution.live_ranker's own note) — a background
+        # continuously-refreshing ranker is the right long-term fix, not
+        # built yet. 60 symbols keeps this preflight call practical while
+        # still covering a meaningfully large slice of the universe.
+        ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=notional, max_symbols=60)
         master_ranker_ready = True
         master_ranker_detail = f"{len(ranked)} direction(s) evaluated across {len(universe.common_symbols)} symbol(s)"
     except Exception as exc:

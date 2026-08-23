@@ -458,14 +458,24 @@ def _serialize_ranked(r) -> dict:
 
 
 @router.get("/live/ranker")
-async def live_ranker(notional_per_leg_usdt: float | None = None, top: int = 20) -> dict:
+async def live_ranker(notional_per_leg_usdt: float | None = None, top: int = 20, max_symbols: int = 40) -> dict:
     """PHASE 3 — MASTER's live opportunity ranker (user directive,
-    2026-08-23). Read-only, no order. real_orders_placed is always 0."""
+    2026-08-23). Read-only, no order. real_orders_placed is always 0.
+
+    max_symbols caps how much of the dynamic universe is scanned per
+    request — the full Binance∩Bybit intersection (~240 symbols as of
+    this deployment) takes several minutes scanned synchronously per
+    request; this endpoint is meant for interactive/dashboard use, so it
+    defaults to a bounded slice rather than blocking on the whole
+    universe. A background, continuously-refreshing ranker process
+    (mirroring altcoin_scanner.py's own architecture) would be the right
+    fix for scanning the full universe continuously — not built yet."""
     settings = get_settings()
     notional = notional_per_leg_usdt if notional_per_leg_usdt is not None else settings.max_notional_per_leg_usdt
-    ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=notional)
+    ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=notional, max_symbols=max_symbols)
     return {
         "requested_notional_per_leg_usdt": notional,
+        "symbols_scanned": max_symbols,
         "total_evaluated": len(ranked),
         "qualified": len([r for r in ranked if r.score > 0]),
         "top_opportunities": [_serialize_ranked(r) for r in ranked[:top]],
