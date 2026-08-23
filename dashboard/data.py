@@ -556,6 +556,47 @@ def get_micro_live_readiness_cached() -> ReadinessSummary:
     return asyncio.run(fetch_micro_live_readiness())
 
 
+@dataclass(slots=True)
+class MasterStatusSummary:
+    reachable: bool
+    paper_authority_enabled: bool = False
+    rollback_reason: str | None = None
+    rollback_at: float | None = None
+    total_capital_usd: float = 0.0
+    realized_pnl_usd: float = 0.0
+    available_capital_usd: float = 0.0
+    reserved_capital_usd: float = 0.0
+    reserved_cex_usd: float = 0.0
+    reserved_dex_usd: float = 0.0
+    invariant_violations: list = field(default_factory=list)
+    grants_count: int = 0
+    rejections_count: int = 0
+    fills_count: int = 0
+    real_orders_placed: bool = False
+
+
+async def fetch_master_status() -> MasterStatusSummary:
+    """PHASE 2C (user directive, 2026-08-23) — same HTTP-to-the-engine
+    pattern as fetch_micro_live_readiness: MASTER's live capital state is
+    in-process state only the engine itself has, not something a DB query
+    can reconstruct. Never raises — an unreachable engine reports
+    reachable=False rather than crashing the dashboard."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/master/status", timeout=aiohttp.ClientTimeout(total=10)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        return MasterStatusSummary(reachable=True, **payload)
+    except Exception:
+        return MasterStatusSummary(reachable=False)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_master_status_cached() -> MasterStatusSummary:
+    return asyncio.run(fetch_master_status())
+
+
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
     engine = create_async_engine(get_settings().database_url)
     try:

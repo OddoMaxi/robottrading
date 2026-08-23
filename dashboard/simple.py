@@ -1028,7 +1028,67 @@ def render_reality_page() -> None:
             ]
         )
 
+    render_phase2c_master_mode_section()
     render_phase2_shadow_section()
+
+
+# --- PHASE 2C — CONTROLLED PAPER CUTOVER / MASTER MODE (user directive, 2026-08-23) ---
+#
+# PAPER TRADING ONLY. Live state is read straight from the engine's own
+# /master/status endpoint (app.orchestration.global_allocator's real,
+# in-process capital state) — the same "browser is never the source of
+# truth" discipline this whole dashboard follows. real_orders_placed is
+# always shown and is always false; nothing here can ever reflect a real
+# order or real capital.
+
+
+def render_phase2c_master_mode_section() -> None:
+    status = data.get_master_status_cached()
+    if not status.reachable:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">PHASE 2C — MASTER MODE</div>', unsafe_allow_html=True)
+        st.caption("Moteur injoignable — état MASTER indisponible.")
+        return
+
+    mode_label = "🟢 MASTER MODE = PAPER ACTIVE" if status.paper_authority_enabled else "🔴 MASTER MODE = ROLLBACK (OLD seul autorité)"
+    mode_class = "simple-status-running" if status.paper_authority_enabled else "simple-status-down"
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #10b981;border-radius:14px;background:rgba(16,185,129,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#10b981;">PHASE 2C — CONTROLLED PAPER CUTOVER</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">PAPER TRADING UNIQUEMENT — aucun ordre réel, aucune clé API réelle requise.</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<span class="simple-status-pill {mode_class}" style="display:inline-block;margin:10px 0;">{mode_label}</span>', unsafe_allow_html=True)
+    if status.rollback_reason:
+        st.markdown(
+            f'<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">⚠️ Rollback : {status.rollback_reason}</div></div>',
+            unsafe_allow_html=True,
+        )
+    if status.invariant_violations:
+        st.markdown(
+            f'<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">⚠️ Invariant violé : {"; ".join(status.invariant_violations)}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    render_stat_cards(
+        [
+            {"label": "Capital global", "value": f"{status.total_capital_usd:,.2f} $".replace(",", " ")},
+            {"label": "Disponible", "value": f"{status.available_capital_usd:,.2f} $".replace(",", " ")},
+            {"label": "Réservé (total)", "value": f"{status.reserved_capital_usd:,.2f} $".replace(",", " ")},
+            {"label": "Réservé CEX", "value": f"{status.reserved_cex_usd:,.2f} $".replace(",", " ")},
+            {"label": "Réservé DEX", "value": f"{status.reserved_dex_usd:,.2f} $".replace(",", " ")},
+            {"label": "P&L simulé réalisé", "value": f"{status.realized_pnl_usd:+.2f} $"},
+            {"label": "Décisions MASTER (session)", "value": f"{status.grants_count + status.rejections_count:,}".replace(",", " ")},
+            {"label": "Allocations accordées", "value": f"{status.grants_count:,}".replace(",", " ")},
+            {"label": "Rejets MASTER", "value": f"{status.rejections_count:,}".replace(",", " ")},
+            {"label": "Fills MASTER", "value": f"{status.fills_count:,}".replace(",", " ")},
+            {"label": "Ledger réconcilié", "value": "✓ OUI" if not status.invariant_violations else "✗ NON"},
+            {"label": "Real orders", "value": f"{'0' if not status.real_orders_placed else '⚠️ NON ZERO'}"},
+        ]
+    )
+    st.caption(
+        "Stratégies sous contrôle MASTER : cross_exchange (portefeuille 5K uniquement — 500/1K/10K/25K restent en comparaison, jamais gérés par MASTER), "
+        "atomic, dex_triangular, dex_multihop, dex_cross. Les autres stratégies CEX restent entièrement sous OLD."
+    )
 
 
 # --- PHASE 2 — GLOBAL ORCHESTRATION / SHADOW MODE (user directive, 2026-08-22) ---

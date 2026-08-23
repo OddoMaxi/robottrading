@@ -9,6 +9,8 @@ from app.config.constants import PRIORITY_EXCHANGES, TRIANGULAR_CROSS_PAIRS, Mar
 from app.database.models import OpportunityRecord
 from app.database.session import get_session
 from app.market_data.store import market_data_store
+from app.orchestration.control import master_control
+from app.orchestration.global_allocator import global_allocator
 from app.risk.risk_engine import risk_engine
 from app.simulation.live_stress_test import run_live_stress_test
 
@@ -48,6 +50,49 @@ async def engage_kill_switch(body: KillSwitchRequest) -> dict:
 async def disengage_kill_switch() -> dict:
     risk_engine.disengage_kill_switch()
     return {"kill_switch_engaged": False}
+
+
+class MasterRollbackRequest(BaseModel):
+    reason: str = "manual"
+
+
+@router.get("/master/status")
+async def master_status() -> dict:
+    """PHASE 2C (user directive, 2026-08-23) — PAPER TRADING ONLY. Never
+    reflects a real order or real capital."""
+    now = time.time()
+    return {
+        "paper_authority_enabled": master_control.paper_authority_enabled,
+        "rollback_reason": master_control.rollback_reason,
+        "rollback_at": master_control.rollback_at,
+        "total_capital_usd": global_allocator.total_capital_usd,
+        "realized_pnl_usd": global_allocator.realized_pnl_usd,
+        "available_capital_usd": global_allocator.available_capital_usd(now),
+        "reserved_capital_usd": global_allocator.locked_capital_usd(now),
+        "reserved_cex_usd": global_allocator.locked_by_engine_usd(now, "CEX"),
+        "reserved_dex_usd": global_allocator.locked_by_engine_usd(now, "DEX"),
+        "invariant_violations": global_allocator.check_invariant(now),
+        "grants_count": global_allocator.grants_count,
+        "rejections_count": global_allocator.rejections_count,
+        "fills_count": global_allocator.fills_count,
+        "real_orders_placed": False,
+    }
+
+
+@router.post("/master/rollback")
+async def master_rollback(body: MasterRollbackRequest) -> dict:
+    """Instant rollback to OLD as sole paper authority — a pure in-memory
+    flag flip (app.orchestration.control.master_control), no data
+    reconstruction, takes effect on the very next scan cycle for every
+    cutover-gated call site in main.py."""
+    master_control.disable(body.reason)
+    return {"paper_authority_enabled": False, "reason": body.reason}
+
+
+@router.post("/master/enable")
+async def master_enable() -> dict:
+    master_control.enable()
+    return {"paper_authority_enabled": True}
 
 
 @router.get("/market-data/health")

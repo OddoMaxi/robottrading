@@ -8,6 +8,7 @@ import random
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace as dataclasses_replace
 from datetime import UTC, datetime
 
 import uvicorn
@@ -39,6 +40,7 @@ from app.database.repository import (
     create_all_tables,
     get_or_create_exchange,
     get_or_create_portfolio,
+    log_system_event,
     save_cex_scan_event,
     save_dex_trade_attempt,
     save_opportunity,
@@ -67,6 +69,8 @@ from app.onchain.multihop_arbitrage import build_token_graph, detect_multihop_op
 from app.onchain.pool_discovery import discover_pools
 from app.onchain.ranking import apply_master_ranking_score
 from app.opportunity.detector import OpportunityDetector
+from app.orchestration.control import master_control
+from app.orchestration.global_allocator import CUTOVER_STRATEGIES, global_allocator, try_reserve_for_opportunity
 from app.opportunity.tracker import OpportunityTracker
 from app.reporting.micro_live_readiness import build_micro_live_readiness
 from app.reporting.shadow_live import build_shadow_live_status
@@ -216,6 +220,35 @@ _dex_gas_provider = RpcGasProvider()
 DEX_PAPER_TRADING_CAPITAL_USD = 5_000.0
 dex_capital_pool = DexCapitalPool(total_capital_usd=DEX_PAPER_TRADING_CAPITAL_USD)
 _dex_paper_trading_rng = random.Random()
+
+# PHASE 2C — Controlled Paper Cutover (user directive, 2026-08-23). PAPER
+# ONLY: real_orders_placed stays false throughout — this decides how much
+# of a $10,000 SIMULATED pool (CEX "5K" reference portfolio + DEX $5,000
+# pool, unified) each opportunity in app.orchestration.global_allocator.
+# CUTOVER_STRATEGIES may draw from, never a real order. The existing
+# executors (paper_trader.simulate, attempt_dex_trade) are called
+# completely unmodified — MASTER only ever hands them a CAPPED COPY of
+# the Opportunity (dataclasses.replace(opp, capital_usd=grant.amount)),
+# never rewrites their internal simulation logic. master_control
+# (app.orchestration.control) is the rollback switch: disabling it makes
+# every cutover-gated call site below fall back to its exact
+# pre-Phase-2C behavior, instantly, with no data reconstruction.
+MASTER_CEX_REFERENCE_PORTFOLIO = "5K"  # the only CEX portfolio MASTER ever gates — 500/1K/10K/25K remain pure comparison instruments, always run unconditionally
+
+
+async def _master_check_invariant_and_maybe_rollback(session, now: float) -> None:
+    """Called after every reservation-affecting MASTER operation. Any
+    invariant violation triggers an IMMEDIATE rollback — master_control
+    is disabled and every cutover-gated call site reverts to its
+    pre-Phase-2C behavior on the very next check, no restart needed."""
+    if not master_control.paper_authority_enabled:
+        return
+    violations = global_allocator.check_invariant(now)
+    if violations:
+        reason = "; ".join(violations)
+        logger.critical("PHASE 2C ROLLBACK — global capital allocator invariant violated: %s", reason)
+        master_control.disable(reason, now=now)
+        await log_system_event(session, event_type="master_rollback", severity="critical", message=reason)
 
 _NATIVE_TOKEN_SYMBOL_BY_CHAIN = {"eth": "WETH", "bsc": "WBNB", "solana": "SOL"}
 
@@ -421,8 +454,43 @@ async def dex_detection_loop() -> None:
                         # attempted this same cycle under a different
                         # execution method, not a second real opportunity.
                         if opp.strategy in DEX_ATTEMPTABLE_STRATEGIES and opp.rejection_reason != "duplicate_economic_event":
-                            attempt = attempt_dex_trade(opp, dex_capital_pool, gas_estimate.gas_cost_usd, _dex_paper_trading_rng, now=scan_time)
+                            # PHASE 2C (user directive, 2026-08-23): every
+                            # currently-attemptable DEX strategy is in
+                            # CUTOVER_STRATEGIES (all 4 were empirically
+                            # validated in Phase 2B) — MASTER gates this
+                            # attempt against the SAME shared $10,000 pool
+                            # CEX's "5K" portfolio draws from, capping the
+                            # request via a modified copy of the
+                            # opportunity; dex_capital_pool's own existing
+                            # $5,000 check still runs unchanged underneath
+                            # as a hard backstop (attempt_dex_trade itself
+                            # is never modified).
+                            opp_for_attempt = opp
+                            dex_grant = None
+                            if master_control.paper_authority_enabled and opp.strategy in CUTOVER_STRATEGIES and not risk_engine.kill_switch_engaged:
+                                dex_grant = try_reserve_for_opportunity(
+                                    global_allocator, opp.id, opp.capital_usd, opp.holding_period_seconds, scan_time, engine="DEX"
+                                )
+                                if dex_grant is None:
+                                    global_allocator.record_rejection()
+                                    await log_system_event(
+                                        session, event_type="master_rejection", severity="info",
+                                        message=f"DEX {opp.strategy} {opp.symbol} — no capital available in the global pool",
+                                        metadata={"opportunity_id": str(opp.id), "engine": "DEX"},
+                                    )
+                                    continue
+                                global_allocator.record_grant()
+                                opp_for_attempt = dataclasses_replace(opp, capital_usd=dex_grant.amount)
+
+                            attempt = attempt_dex_trade(opp_for_attempt, dex_capital_pool, gas_estimate.gas_cost_usd, _dex_paper_trading_rng, now=scan_time)
                             await save_dex_trade_attempt(session, attempt)
+
+                            if dex_grant is not None:
+                                global_allocator.adjust_reservation(opp.id, attempt.capital_usd)
+                                global_allocator.resolve_pnl(attempt.net_profit_usd)
+                                if attempt.status.value == "dex_filled":
+                                    global_allocator.record_fill()
+                                await _master_check_invariant_and_maybe_rollback(session, scan_time)
 
                 for tracked in dex_opportunity_tracker.expire_stale(now=scan_time):
                     await close_opportunity_tracking(session, tracked, closed_at=scan_time)
@@ -531,8 +599,44 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         # virtual portfolio happens to be replaying it.
                         outcome = paper_trader.determine_outcome(opp)
                         for portfolio in portfolios:
-                            trade = paper_trader.simulate(opp, portfolio, outcome, now=now)
+                            # PHASE 2C (user directive, 2026-08-23): MASTER
+                            # only ever gates the "5K" reference portfolio,
+                            # and only for the empirically-validated
+                            # cross_exchange strategy — the other 4
+                            # what-if portfolios (500/1K/10K/25K) and every
+                            # other CEX strategy always attempt exactly as
+                            # before, completely untouched by MASTER.
+                            opp_for_portfolio = opp
+                            grant = None
+                            if (
+                                master_control.paper_authority_enabled
+                                and portfolio.name == MASTER_CEX_REFERENCE_PORTFOLIO
+                                and opp.strategy in CUTOVER_STRATEGIES
+                                and not risk_engine.kill_switch_engaged
+                            ):
+                                grant = try_reserve_for_opportunity(
+                                    global_allocator, opp.id, opp.capital_usd, opp.holding_period_seconds, now, engine="CEX"
+                                )
+                                if grant is None:
+                                    global_allocator.record_rejection()
+                                    await log_system_event(
+                                        session, event_type="master_rejection", severity="info",
+                                        message=f"CEX {opp.strategy} {opp.symbol} — no capital available in the global pool",
+                                        metadata={"opportunity_id": str(opp.id), "engine": "CEX"},
+                                    )
+                                    continue  # only the "5K" attempt is skipped — other portfolios below are unaffected
+                                global_allocator.record_grant()
+                                opp_for_portfolio = dataclasses_replace(opp, capital_usd=grant.amount)
+
+                            trade = paper_trader.simulate(opp_for_portfolio, portfolio, outcome, now=now)
                             await save_simulated_trade(session, trade, opp.id, portfolio_ids[portfolio.name])
+
+                            if grant is not None:
+                                global_allocator.adjust_reservation(opp.id, trade.capital_usd)
+                                global_allocator.resolve_pnl(trade.net_profit_usd)
+                                if trade.status.value in ("simulated_executed", "partial_fill"):
+                                    global_allocator.record_fill()
+                                await _master_check_invariant_and_maybe_rollback(session, now)
 
                 # FAST TRADING ONLY (user directive, 2026-08-21) — 30-minute
                 # hard stop. Cheap when nothing is overdue (a single
