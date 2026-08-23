@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
+    AltcoinScanObservationRecord,
     Base,
     CexScanEventRecord,
     DexSimulatedTradeRecord,
@@ -416,6 +417,51 @@ async def save_live_arbitrage_execution(session: AsyncSession, result) -> LiveAr
         actual_realized_spread_pct=_realized_spread_pct(result.buy_avg_fill_price, result.sell_avg_fill_price),
         actual_net_pnl_usd=result.actual_net_pnl_usd,
         prediction_error_usd=result.prediction_error_usd,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_altcoin_scan_observation(
+    session: AsyncSession,
+    direction_quote,
+    observed_at: datetime,
+    continuity_status: str,
+    persistence_seconds: float,
+) -> AltcoinScanObservationRecord:
+    """ALTCOIN SCANNER (user directive, 2026-08-23). Persists one
+    (symbol, buy_exchange, sell_exchange) observation from
+    app.scanner.cross_exchange_scanner.DirectionQuote. Written by the
+    standalone altcoin_scanner.py process — never by main.py."""
+    quote = direction_quote.quote
+    reference_notional_usd = quote.executable_qty * quote.buy_execution_price
+    net_profit_per_1000usdt = (
+        quote.net_profit_usd / reference_notional_usd * 1000 if reference_notional_usd > 0 else 0.0
+    )
+    record = AltcoinScanObservationRecord(
+        symbol=direction_quote.symbol,
+        buy_exchange=direction_quote.buy_exchange,
+        sell_exchange=direction_quote.sell_exchange,
+        observed_at=observed_at,
+        buy_execution_price=quote.buy_execution_price,
+        sell_execution_price=quote.sell_execution_price,
+        gross_spread_pct=quote.gross_spread_pct,
+        buy_fee_rate=quote.buy_fee_usd / reference_notional_usd if reference_notional_usd > 0 else 0.0,
+        sell_fee_rate=quote.sell_fee_usd / reference_notional_usd if reference_notional_usd > 0 else 0.0,
+        buy_fee_source=quote.buy_fee_source,
+        sell_fee_source=quote.sell_fee_source,
+        buy_slippage_pct=quote.buy_slippage_pct,
+        sell_slippage_pct=quote.sell_slippage_pct,
+        available_depth_usd=reference_notional_usd,
+        executable_qty=quote.executable_qty,
+        net_profit_usd=quote.net_profit_usd,
+        net_return_bps=quote.net_return_bps,
+        net_profit_per_1000usdt=net_profit_per_1000usdt,
+        executable=quote.executable,
+        rejection_reason=quote.reason,
+        continuity_status=continuity_status,
+        persistence_seconds=persistence_seconds,
     )
     session.add(record)
     await session.flush()

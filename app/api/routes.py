@@ -16,6 +16,7 @@ from app.execution.micro_live import micro_live_orchestrator, micro_live_state
 from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
+from app.reporting.altcoin_scan_report import AltcoinScanReport, DirectionSummary, build_altcoin_scan_report, market_priority_score
 from app.reporting.dual_leg_edge import DualLegEdgeReport, build_dual_leg_edge_report
 from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
 from app.risk.risk_engine import risk_engine
@@ -408,6 +409,54 @@ async def live_first_gate_report() -> dict:
         "ready_for_first_real_arbitrage": report.ready_for_first_real_arbitrage,
         "proposed_first_trade_size_usdt": report.proposed_first_trade_size_usdt,
         "live_trading_enabled": live_guard.live_trading_enabled,
+        "real_orders_placed": 0,
+    }
+
+
+def _serialize_direction_summary(s: DirectionSummary) -> dict:
+    volatility_proxy_pct = max(0.0, s.gross_spread_max_pct - s.gross_spread_mean_pct)
+    return {
+        "symbol": s.symbol,
+        "buy_exchange": s.buy_exchange,
+        "sell_exchange": s.sell_exchange,
+        "observations": s.observations,
+        "gross_spread_mean_pct": s.gross_spread_mean_pct,
+        "gross_spread_max_pct": s.gross_spread_max_pct,
+        "net_spread_mean_pct": s.net_spread_mean_pct,
+        "net_spread_max_pct": s.net_spread_max_pct,
+        "net_profit_per_1000usdt_mean": s.net_profit_per_1000usdt_mean,
+        "net_profit_per_1000usdt_max": s.net_profit_per_1000usdt_max,
+        "positive_rate_pct": s.positive_rate_pct,
+        "mean_persistence_seconds": s.mean_persistence_seconds,
+        "max_persistence_seconds": s.max_persistence_seconds,
+        "unique_detections": s.unique_detections,
+        "continuations": s.continuations,
+        "best_observed_at": s.best_observed_at.isoformat(),
+        "status": s.status.value,
+        "market_priority_score": market_priority_score(s, gross_spread_volatility_pct=volatility_proxy_pct),
+    }
+
+
+@router.get("/scanner/altcoin-report")
+async def scanner_altcoin_report(hours: float = 24.0, session: AsyncSession = Depends(get_session)) -> dict:
+    """ALTCOIN SCANNER — TOP CROSS-EXCHANGE OPPORTUNITIES LIVE (user
+    directive, 2026-08-23). Reads the table written by the standalone
+    altcoin_scanner.py process (never imported here, never imported by
+    main.py). MASTER stays in Shadow Mode: this is a pure read, changes
+    nothing, and cannot place an order — real_orders_placed is always 0."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    since = now - timedelta(hours=hours)
+    report = await build_altcoin_scan_report(session, since=since, until=now)
+    return {
+        "window_start": report.window_start.isoformat() if report.window_start else None,
+        "window_end": report.window_end.isoformat() if report.window_end else None,
+        "total_observations": report.total_observations,
+        "top_opportunities": [_serialize_direction_summary(s) for s in report.best_direction_by_symbol],
+        "lunc_benchmark": _serialize_direction_summary(report.lunc_benchmark) if report.lunc_benchmark else None,
+        "better_than_lunc": report.better_than_lunc,
+        "master_execution_authority": False,
         "real_orders_placed": 0,
     }
 

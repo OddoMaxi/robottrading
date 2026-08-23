@@ -573,3 +573,48 @@ class LiveArbitrageExecutionRecord(Base):
     prediction_error_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class AltcoinScanObservationRecord(Base):
+    """ALTCOIN SCANNER (user directive, 2026-08-23). One row per
+    (symbol, buy_exchange, sell_exchange) evaluated on each scan cycle of
+    the standalone altcoin_scanner.py process — MASTER stays in Shadow
+    Mode, real_orders_placed stays 0, nothing here is read by main.py's
+    detection loop or any execution-authority code. Written by
+    app.database.repository.save_altcoin_scan_observation."""
+
+    __tablename__ = "altcoin_scan_observations"
+    __table_args__ = (
+        Index("ix_altcoin_scan_observations_observed_at", "observed_at"),
+        Index("ix_altcoin_scan_observations_symbol", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str]
+    buy_exchange: Mapped[str]
+    sell_exchange: Mapped[str]
+    observed_at: Mapped[datetime]
+
+    buy_execution_price: Mapped[float] = mapped_column(Numeric(30, 12))  # buy_exchange's best ask — the price actually used
+    sell_execution_price: Mapped[float] = mapped_column(Numeric(30, 12))  # sell_exchange's best bid — the price actually used
+
+    gross_spread_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    buy_fee_rate: Mapped[float] = mapped_column(Numeric(10, 6))
+    sell_fee_rate: Mapped[float] = mapped_column(Numeric(10, 6))
+    buy_fee_source: Mapped[str]
+    sell_fee_source: Mapped[str]
+    buy_slippage_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    sell_slippage_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    available_depth_usd: Mapped[float] = mapped_column(Numeric(20, 4))
+    executable_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+
+    net_profit_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    net_return_bps: Mapped[float] = mapped_column(Numeric(14, 4))
+    net_profit_per_1000usdt: Mapped[float] = mapped_column(Numeric(20, 6))
+
+    executable: Mapped[bool]
+    rejection_reason: Mapped[str | None]
+    continuity_status: Mapped[str]  # "new" | "continuation" | "none"
+    persistence_seconds: Mapped[float] = mapped_column(Numeric(14, 3))
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
