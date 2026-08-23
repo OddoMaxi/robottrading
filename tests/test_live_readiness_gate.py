@@ -100,3 +100,38 @@ async def test_gate_populates_real_balances():
     report = await build_first_live_gate_report(binance_client=ReadOnlyBinance(), bybit_client=ReadOnlyBybitReadOnlyKey())
     assert report.binance_usdt_balance == 13.2
     assert report.bybit_lunc_balance == 950000.0
+
+
+class TradeCapableBinance(ReadOnlyBinance):
+    async def get_api_restrictions(self):
+        return SimpleNamespace(enable_spot_and_margin_trading=True, enable_withdrawals=False)
+
+
+class TradeCapableBybit(ReadOnlyBybitReadOnlyKey):
+    async def get_api_key_info(self):
+        return SimpleNamespace(read_only=False, permissions={"Spot": ["SpotTrade"]}, has_withdrawal_permission=lambda: False)
+
+
+async def test_gate_refuses_ready_when_bybit_has_zero_pre_positioned_lunc():
+    """The exact real-world bug caught in this session: perfect
+    permissions on both keys must still not be enough if there is
+    nothing to actually sell on the Bybit leg."""
+
+    class ZeroLuncBybit(TradeCapableBybit):
+        async def get_wallet_balance(self):
+            return {"result": {"list": [{"coin": [{"coin": "LUNC", "availableToWithdraw": "0"}]}]}}
+
+    report = await build_first_live_gate_report(binance_client=TradeCapableBinance(), bybit_client=ZeroLuncBybit())
+    assert report.bybit_lunc_balance == 0.0
+    assert report.capital_pre_positioned is False
+    assert report.ready_for_first_real_arbitrage is False
+
+
+async def test_gate_is_ready_when_every_condition_including_capital_is_met():
+    report = await build_first_live_gate_report(binance_client=TradeCapableBinance(), bybit_client=TradeCapableBybit())
+    assert report.binance_trade_api_ready is True
+    assert report.bybit_trade_api_ready is True
+    assert report.withdrawals_disabled is True
+    assert report.capital_pre_positioned is True
+    assert report.ready_for_first_real_arbitrage is True
+    assert report.proposed_first_trade_size_usdt is not None

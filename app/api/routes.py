@@ -403,6 +403,8 @@ async def live_first_gate_report() -> dict:
             "notional_usdt": size.notional_usdt,
             "reference_price": size.reference_price,
         },
+        "capital_pre_positioned": report.capital_pre_positioned,
+        "capital_pre_positioned_detail": report.capital_pre_positioned_detail,
         "ready_for_first_real_arbitrage": report.ready_for_first_real_arbitrage,
         "proposed_first_trade_size_usdt": report.proposed_first_trade_size_usdt,
         "live_trading_enabled": live_guard.live_trading_enabled,

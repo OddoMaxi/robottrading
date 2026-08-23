@@ -47,6 +47,8 @@ class FirstLiveGateReport:
     real_pnl_ledger_ready: bool
     real_pnl_ledger_detail: str
     smallest_common_order_size: SmallestCommonOrderSize
+    capital_pre_positioned: bool
+    capital_pre_positioned_detail: str
     ready_for_first_real_arbitrage: bool
     proposed_first_trade_size_usdt: float | None
 
@@ -174,6 +176,22 @@ async def build_first_live_gate_report(
     ledger_ready = True
     ledger_detail = "live_arbitrage_executions table defined (app.database.models.LiveArbitrageExecutionRecord) — created via create_all_tables()"
 
+    # Capital pre-positioning (item 3 of the directive) is a HARD
+    # requirement, not just a nice-to-have display field — a key with
+    # perfect trade permissions is still not ready if there is nothing
+    # to actually sell/buy against on either leg. Checked against the
+    # exact size the gate would propose, not just "> 0".
+    capital_pre_positioned = False
+    capital_pre_positioned_detail = "smallest common order size not reachable — cannot evaluate capital sufficiency"
+    if smallest_size.reachable:
+        binance_ok = binance_usdt_balance is not None and binance_usdt_balance >= smallest_size.notional_usdt
+        bybit_ok = bybit_lunc_balance is not None and bybit_lunc_balance >= smallest_size.lunc_qty
+        capital_pre_positioned = binance_ok and bybit_ok
+        capital_pre_positioned_detail = (
+            f"binance_usdt_balance={binance_usdt_balance} (need >= {smallest_size.notional_usdt:.4f}), "
+            f"bybit_lunc_balance={bybit_lunc_balance} (need >= {smallest_size.lunc_qty})"
+        )
+
     ready = (
         binance_trade_ready
         and bybit_trade_ready
@@ -182,6 +200,7 @@ async def build_first_live_gate_report(
         and kill_switch_pass
         and ledger_ready
         and smallest_size.reachable
+        and capital_pre_positioned
     )
     proposed_size = smallest_size.notional_usdt if ready and smallest_size.reachable else None
 
@@ -202,6 +221,8 @@ async def build_first_live_gate_report(
         real_pnl_ledger_ready=ledger_ready,
         real_pnl_ledger_detail=ledger_detail,
         smallest_common_order_size=smallest_size,
+        capital_pre_positioned=capital_pre_positioned,
+        capital_pre_positioned_detail=capital_pre_positioned_detail,
         ready_for_first_real_arbitrage=ready,
         proposed_first_trade_size_usdt=proposed_size,
     )
