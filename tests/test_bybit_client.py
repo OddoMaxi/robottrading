@@ -8,11 +8,38 @@ READ_ONLY_KEY_INFO_FIXTURE = {
     }
 }
 
+# Real-world observed shape (Phase 2F, 2026-08-23): readOnly=1 with several
+# category permissions still populated — category names share Bybit's
+# internal "Trade" taxonomy but grant query-only access under a
+# Read-Only key. Confirmed against the key-creation UI's own text
+# ("Query order info for Spot trading only", etc.) — NOT a violation.
+READ_ONLY_KEY_WITH_NAMED_CATEGORIES_FIXTURE = {
+    "result": {
+        "readOnly": 1,
+        "ips": ["147.93.56.10"],
+        "permissions": {
+            "ContractTrade": ["Order", "Position"],
+            "Spot": ["SpotTrade"],
+            "Wallet": [],
+            "Options": ["OptionsTrade"],
+            "Derivatives": ["DerivativesTrade"],
+        },
+    }
+}
+
 TRADE_ENABLED_KEY_INFO_FIXTURE = {
     "result": {
         "readOnly": 0,
         "ips": [],
         "permissions": {"ContractTrade": [], "Spot": ["SpotTrade"], "Wallet": [], "Options": [], "Derivatives": []},
+    }
+}
+
+WITHDRAWAL_ENABLED_KEY_INFO_FIXTURE = {
+    "result": {
+        "readOnly": 1,
+        "ips": [],
+        "permissions": {"ContractTrade": [], "Spot": [], "Wallet": ["Withdraw"], "Options": [], "Derivatives": []},
     }
 }
 
@@ -81,7 +108,17 @@ def test_parse_api_key_info_read_only_key():
     info = _parse_api_key_info(READ_ONLY_KEY_INFO_FIXTURE, now=0.0)
     assert info.read_only is True
     assert info.ip_restricted is True
-    assert info.has_any_trade_or_withdraw_permission() is False
+    assert info.is_safely_read_only() is True
+
+
+def test_named_trade_categories_under_a_read_only_key_are_not_a_violation():
+    """The real-world case that looked alarming at first: readOnly=1 but
+    ContractTrade/Spot/Options/Derivatives all non-empty. Confirmed via
+    Bybit's own key-creation UI text that these grant query-only access
+    under a Read-Only key — must NOT be flagged."""
+    info = _parse_api_key_info(READ_ONLY_KEY_WITH_NAMED_CATEGORIES_FIXTURE, now=0.0)
+    assert info.read_only is True
+    assert info.is_safely_read_only() is True
 
 
 def test_parse_api_key_info_flags_trade_enabled_key():
@@ -89,4 +126,13 @@ def test_parse_api_key_info_flags_trade_enabled_key():
     checked against — not any account-wide status field."""
     info = _parse_api_key_info(TRADE_ENABLED_KEY_INFO_FIXTURE, now=0.0)
     assert info.read_only is False
-    assert info.has_any_trade_or_withdraw_permission() is True
+    assert info.is_safely_read_only() is False
+
+
+def test_withdrawal_permission_is_always_a_real_violation():
+    """Withdrawal has no read-only variant on Bybit — its presence must
+    always be flagged, unlike the other category names."""
+    info = _parse_api_key_info(WITHDRAWAL_ENABLED_KEY_INFO_FIXTURE, now=0.0)
+    assert info.read_only is True  # even though the top-level flag says read-only
+    assert info.has_withdrawal_permission() is True
+    assert info.is_safely_read_only() is False

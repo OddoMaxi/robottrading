@@ -75,13 +75,23 @@ class BybitApiKeyInfo:
     permissions: dict
     fetched_at: float
 
-    def has_any_trade_or_withdraw_permission(self) -> bool:
-        for category, perms in self.permissions.items():
-            if category.lower() == "wallet" and any(p for p in perms if "withdraw" in str(p).lower()):
-                return True
-            if category.lower() in ("spot", "contracttrade", "derivatives", "options") and perms:
-                return True
-        return False
+    def has_withdrawal_permission(self) -> bool:
+        """Withdrawal is the one Bybit permission category with NO
+        read-only variant (confirmed against the key-creation UI's own
+        text: 'Read-only permission not supported for withdrawal
+        requests') — its presence in Wallet permissions always means
+        real withdrawal capability was granted. Every OTHER category
+        name here (SpotTrade, ContractTrade Order/Position, OptionsTrade,
+        DerivativesTrade, ...) matches Bybit's internal permission
+        taxonomy but grants query/view access ONLY when read_only is
+        True — the name containing "Trade" does not itself mean trading
+        capability, which is why this method (unlike an earlier,
+        incorrect version) does not flag those."""
+        wallet_perms = self.permissions.get("Wallet", [])
+        return any("withdraw" in str(p).lower() for p in wallet_perms)
+
+    def is_safely_read_only(self) -> bool:
+        return self.read_only and not self.has_withdrawal_permission()
 
 
 def _parse_book_ticker(data: dict, symbol: str) -> BybitBookTicker | None:
