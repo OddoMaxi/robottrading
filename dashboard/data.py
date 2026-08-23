@@ -597,6 +597,63 @@ def get_master_status_cached() -> MasterStatusSummary:
     return asyncio.run(fetch_master_status())
 
 
+@dataclass(slots=True)
+class MicroLiveBinanceReadiness:
+    """PHASE 2D (user directive, 2026-08-23) — MICRO-LIVE READINESS.
+    Never carries a raw credential; every field here is either a public
+    market fact, a real (but non-secret) account balance/status, or a
+    session-level dry-run counter. real_orders_placed is always 0."""
+
+    reachable: bool
+    binance_connectivity: bool = False
+    credentials_configured: bool = False
+    latency_ms: float | None = None
+    connectivity_detail: str | None = None
+    account_mode: str = "mainnet_read_only"
+    live_trading_enabled: bool = False
+    real_balance_usdt: float | None = None
+    real_balance_verified: bool = False
+    account_snapshot_error: str | None = None
+    can_trade: bool | None = None
+    can_withdraw: bool | None = None
+    micro_live_cap_usdt: float = 10.0
+    max_live_capital_usdt: float = 10.0
+    paper_capital_usd: float = 10_000.0
+    opportunities_observed: int = 0
+    executable_with_cap: int = 0
+    non_executable: int = 0
+    rejection_reasons: dict = field(default_factory=dict)
+    avg_estimated_fees_usd: float | None = None
+    avg_estimated_slippage_pct: float | None = None
+    avg_net_profit_after_real_constraints_usd: float | None = None
+    live_kill_switch_engaged: bool = False
+    real_orders_placed: int = 0
+
+
+async def fetch_micro_live_binance_readiness() -> MicroLiveBinanceReadiness:
+    """Same HTTP-to-the-engine pattern as fetch_master_status: real
+    Binance connectivity/account state and the session's dry-run counters
+    live only in the engine process (app.execution.micro_live), not in
+    the database. Never raises — an unreachable engine reports
+    reachable=False rather than crashing the dashboard."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{base_url}/micro-live/binance-readiness", timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        return MicroLiveBinanceReadiness(reachable=True, **payload)
+    except Exception:
+        return MicroLiveBinanceReadiness(reachable=False)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_micro_live_binance_readiness_cached() -> MicroLiveBinanceReadiness:
+    return asyncio.run(fetch_micro_live_binance_readiness())
+
+
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
     engine = create_async_engine(get_settings().database_url)
     try:

@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     # Exchanges enabled in V1 (priority order per cahier des charges section 3)
     enabled_exchanges: list[str] = ["binance", "okx", "bybit"]
 
-    # Exchange API credentials (public market data only in V1 — kept for Phase 2)
+    # Exchange API credentials, read exclusively from the environment/.env
+    # — never hardcoded, never logged, never written to the DB, never shown
+    # on the dashboard (Phase 2D, item 2). As of Phase 2D, binance_api_key/
+    # secret are used for REAL read-only mainnet calls (account balances,
+    # exchange filters) by app.execution.binance_account_client — the key
+    # must be provisioned with reading permissions only; withdrawal must be
+    # disabled on the Binance side, this app has no way to enforce that
+    # remotely, only to never call an endpoint that would use it.
     binance_api_key: str = ""
     binance_api_secret: str = ""
     okx_api_key: str = ""
@@ -49,6 +56,31 @@ class Settings(BaseSettings):
     # app.execution.binance_testnet_client's own docstring.
     binance_testnet_api_key: str = ""
     binance_testnet_api_secret: str = ""
+
+    # Phase 2D (user directive, 2026-08-23) — PAPER/LIVE capital must never
+    # be conflated. PAPER_CAPITAL is the existing $10,000 simulated global
+    # pool (app.orchestration.global_allocator.global_allocator); it is
+    # never read by anything live-execution-related.
+    paper_capital_usd: float = 10_000.0
+
+    # MICRO_LIVE_CAP — the ceiling app.execution.reality_quote applies on
+    # top of whatever real balance Binance actually reports (never assumed
+    # to already be 10 USDT). Checked independently of max_live_capital_usdt
+    # below (defense in depth: two separately-enforced constants, one per
+    # guard layer, so a bug in one path can't silently remove the cap).
+    micro_live_cap_usdt: float = 10.0
+
+    # Hard default OFF. While False, app.execution.live_guard refuses any
+    # attempt to reach a real order-placement path — this is the single
+    # switch that must flip before Phase 2D's next step (real order
+    # authorization) can even be considered, and it is never flipped by
+    # this codebase itself.
+    live_trading_enabled: bool = False
+
+    # Independent hard cap enforced by app.execution.live_guard at the
+    # execution-attempt boundary itself, separate from micro_live_cap_usdt's
+    # sizing-time check above.
+    max_live_capital_usdt: float = 10.0
 
 
 @lru_cache

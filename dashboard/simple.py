@@ -1030,6 +1030,7 @@ def render_reality_page() -> None:
 
     render_phase2c_master_mode_section()
     render_phase2_shadow_section()
+    render_phase2d_micro_live_section()
 
 
 # --- PHASE 2C — CONTROLLED PAPER CUTOVER / MASTER MODE (user directive, 2026-08-23) ---
@@ -1194,6 +1195,74 @@ def render_phase2_shadow_section() -> None:
             "Remplace la comparaison au niveau opportunité pour CEX, qui ne voyait que les nouvelles détections — "
             "ici chaque cycle de scan (continuations incluses) est comparé 1:1, exactement comme OLD le vit en direct."
         )
+
+
+# --- PHASE 2D — BINANCE MICRO-LIVE READINESS / READ-ONLY VALIDATION
+# (user directive, 2026-08-23) ---
+#
+# Every number here comes from GET /micro-live/binance-readiness
+# (app.execution.micro_live's in-process state) — read-only real Binance
+# data (account balance/status, exchange filters, live book) evaluated
+# against a strict 10 USDT cap. real_orders_placed is always 0: this
+# section can never reflect a real order, only whether one COULD have
+# been placed under real constraints.
+
+
+def render_phase2d_micro_live_section() -> None:
+    readiness = data.get_micro_live_binance_readiness_cached()
+    if not readiness.reachable:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">PHASE 2D — MICRO-LIVE READINESS</div>', unsafe_allow_html=True)
+        st.caption("Moteur injoignable — état micro-live indisponible.")
+        return
+
+    live_label = "🔴 LIVE TRADING = DISABLED" if not readiness.live_trading_enabled else "🟠 LIVE TRADING = ENABLED"
+    conn_label = "🟢 connecté" if readiness.binance_connectivity else "🔴 injoignable"
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #f59e0b;border-radius:14px;background:rgba(245,158,11,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#f59e0b;">PHASE 2D — BINANCE MICRO-LIVE READINESS</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">LECTURE SEULE — aucun ordre réel n\'est jamais placé par cette section. '
+        f"Binance mainnet : {conn_label}.</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<span class="simple-status-pill simple-status-down" style="display:inline-block;margin:10px 0;">{live_label}</span>', unsafe_allow_html=True)
+    if readiness.live_kill_switch_engaged:
+        st.markdown(
+            '<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">⚠️ Coupe-circuit LIVE engagé</div></div>',
+            unsafe_allow_html=True,
+        )
+    if readiness.account_snapshot_error:
+        st.caption(f"⚠️ Solde réel indisponible : {readiness.account_snapshot_error}")
+    if not readiness.credentials_configured:
+        st.caption("⚠️ Aucune clé API Binance configurée (BINANCE_API_KEY/BINANCE_API_SECRET) — solde réel et filtres indisponibles.")
+
+    balance_display = f"{readiness.real_balance_usdt:,.2f} $".replace(",", " ") if readiness.real_balance_usdt is not None else "—"
+    reasons = readiness.rejection_reasons or {}
+
+    render_stat_cards(
+        [
+            {"label": "Connectivité Binance", "value": "✓ PASS" if readiness.binance_connectivity else "✗ FAIL"},
+            {"label": "Mode compte", "value": readiness.account_mode},
+            {"label": "Solde réel (USDT)", "value": balance_display, "sub": "✓ vérifié" if readiness.real_balance_verified else "non vérifié"},
+            {"label": "Cap micro-live", "value": f"{readiness.micro_live_cap_usdt:.2f} $"},
+            {"label": "Cap max exécution live (indépendant)", "value": f"{readiness.max_live_capital_usdt:.2f} $"},
+            {"label": "Capital PAPER (jamais réutilisé)", "value": f"{readiness.paper_capital_usd:,.0f} $".replace(",", " ")},
+            {"label": "Opportunités observées (dry-run)", "value": f"{readiness.opportunities_observed:,}".replace(",", " ")},
+            {"label": "Exécutables avec le cap", "value": f"{readiness.executable_with_cap:,}".replace(",", " ")},
+            {"label": "Non exécutables", "value": f"{readiness.non_executable:,}".replace(",", " ")},
+            {"label": "Rejets MIN_NOTIONAL", "value": f"{reasons.get('min_notional', 0):,}".replace(",", " ")},
+            {"label": "Rejets LOT_SIZE", "value": f"{reasons.get('lot_size', 0):,}".replace(",", " ")},
+            {"label": "Rejets solde insuffisant", "value": f"{reasons.get('balance', 0):,}".replace(",", " ")},
+            {"label": "Rejets profit net <= 0", "value": f"{reasons.get('net_profit_leq_zero', 0):,}".replace(",", " ")},
+            {"label": "Frais réels estimés (moy.)", "value": f"{readiness.avg_estimated_fees_usd:.4f} $" if readiness.avg_estimated_fees_usd is not None else "—"},
+            {"label": "Slippage réel estimé (moy.)", "value": f"{readiness.avg_estimated_slippage_pct:.3f} %" if readiness.avg_estimated_slippage_pct is not None else "—"},
+            {"label": "Profit net réel estimé (moy.)", "value": f"{readiness.avg_net_profit_after_real_constraints_usd:+.4f} $" if readiness.avg_net_profit_after_real_constraints_usd is not None else "—"},
+            {"label": "Real orders placed", "value": f"{readiness.real_orders_placed}"},
+        ]
+    )
+    st.caption(
+        "Dry-run limité aux opportunités cross_exchange ayant une jambe Binance (ce périmètre est explicitement Binance-only). "
+        "Le cap micro-live (10 USDT par défaut) est appliqué indépendamment du capital PAPER de 10 000 $ — jamais réutilisé pour ce dimensionnement."
+    )
 
 
 def render_simple_mode() -> None:

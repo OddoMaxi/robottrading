@@ -56,6 +56,7 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
+from app.execution.micro_live import micro_live_orchestrator
 from app.onchain.atomic_arbitrage import as_atomic_opportunity, simulate_atomic_bundle
 from app.onchain.chain_risk import ChainHealth, check_chain_health
 from app.onchain.constants import DEFAULT_DEX_TRADE_SIZE_USD, DEX_STABLECOIN_BASE_ASSETS, DEX_VENUES, MIN_NET_EDGE_PCT
@@ -247,8 +248,23 @@ async def _master_check_invariant_and_maybe_rollback(session, now: float) -> Non
     if violations:
         reason = "; ".join(violations)
         logger.critical("PHASE 2C ROLLBACK — global capital allocator invariant violated: %s", reason)
+        previous_state = {"paper_authority_enabled": master_control.paper_authority_enabled}
         master_control.disable(reason, now=now)
-        await log_system_event(session, event_type="master_rollback", severity="critical", message=reason)
+        await log_system_event(
+            session,
+            event_type="master_rollback",
+            severity="critical",
+            message=reason,
+            metadata={
+                "origin": "automatic",
+                "previous_state": previous_state,
+                "new_state": {
+                    "paper_authority_enabled": master_control.paper_authority_enabled,
+                    "rollback_reason": master_control.rollback_reason,
+                    "rollback_at": master_control.rollback_at,
+                },
+            },
+        )
 
 _NATIVE_TOKEN_SYMBOL_BY_CHAIN = {"eth": "WETH", "bsc": "WBNB", "solana": "SOL"}
 
@@ -598,6 +614,24 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                         # outcome is a property of the market, not of which
                         # virtual portfolio happens to be replaying it.
                         outcome = paper_trader.determine_outcome(opp)
+
+                        # PHASE 2D, items 5+9 (user directive, 2026-08-23) —
+                        # READ-ONLY dry-run against live Binance data for
+                        # every opportunity MASTER would have wanted to
+                        # execute (the same CUTOVER_STRATEGIES scope as the
+                        # paper cutover above). Runs independently of
+                        # master_control/risk_engine state so data
+                        # collection for the micro-live readiness report
+                        # continues even during a paper rollback. No order
+                        # is placed; any failure here (no credentials,
+                        # network error) is swallowed — it must never
+                        # affect paper execution below.
+                        if opp.strategy in CUTOVER_STRATEGIES:
+                            try:
+                                await micro_live_orchestrator.observe_reality_quote(opp, now=now)
+                            except Exception:
+                                logger.exception("micro-live dry-run observation failed (Phase 2D) — paper engine unaffected, continuing")
+
                         for portfolio in portfolios:
                             # PHASE 2C (user directive, 2026-08-23): MASTER
                             # only ever gates the "5K" reference portfolio,
