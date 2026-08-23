@@ -42,6 +42,7 @@ from app.database.repository import (
     get_or_create_portfolio,
     log_system_event,
     save_cex_scan_event,
+    save_dual_leg_observation,
     save_micro_live_observation,
     save_dex_trade_attempt,
     save_opportunity,
@@ -57,6 +58,7 @@ from app.execution.validator import validate
 from app.market_data.store import market_data_store
 from app.market_data.symbol_discovery import DiscoveredUniverse, discover_symbol_universe
 from app.execution.binance_testnet_client import BinanceTestnetClient
+from app.execution.dual_leg_observer import dual_leg_observer
 from app.execution.micro_live import micro_live_orchestrator
 from app.onchain.atomic_arbitrage import as_atomic_opportunity, simulate_atomic_bundle
 from app.onchain.chain_risk import ChainHealth, check_chain_health
@@ -634,6 +636,20 @@ async def detection_loop(detector: OpportunityDetector, portfolio_ids: dict[str,
                                     await save_micro_live_observation(session, quote, opp.strategy)
                             except Exception:
                                 logger.exception("micro-live dry-run observation failed (Phase 2D/2E) — paper engine unaffected, continuing")
+
+                            # PHASE 2F (user directive, 2026-08-23) — recomputes
+                            # the FULL arbitrage from live, independently-fetched
+                            # data on BOTH legs (Binance + the real mirror
+                            # exchange, e.g. Bybit for LUNCUSDT) — Phase 2D/2E
+                            # only ever reality-tested the Binance side. Same
+                            # fail-safe discipline: any error here is swallowed,
+                            # never affects paper execution below.
+                            try:
+                                dual_quote = await dual_leg_observer.observe(opp, micro_live_cap_usdt=settings.micro_live_cap_usdt, now=now)
+                                if dual_quote is not None:
+                                    await save_dual_leg_observation(session, dual_quote, opp.strategy)
+                            except Exception:
+                                logger.exception("dual-leg observation failed (Phase 2F) — paper engine unaffected, continuing")
 
                         for portfolio in portfolios:
                             # PHASE 2C (user directive, 2026-08-23): MASTER

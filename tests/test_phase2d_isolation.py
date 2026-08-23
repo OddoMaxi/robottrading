@@ -33,6 +33,9 @@ FORBIDDEN_ORDER_TOKENS = (
     "placeOrder",
     "newOrder",
     "cancelOrder",
+    "/v5/order/create",
+    "/v5/order/cancel",
+    "/v5/order/amend",
 )
 
 
@@ -62,12 +65,32 @@ def test_binance_account_client_has_no_order_placement_method():
     assert not order_shaped, f"BinanceAccountClient exposes order/withdraw-shaped method(s): {order_shaped}"
 
 
+def test_bybit_client_has_no_order_placement_method():
+    from app.execution.bybit_client import BybitClient
+
+    order_shaped = [
+        name
+        for name in dir(BybitClient)
+        if not name.startswith("_")
+        and any(word in name.lower() for word in ("place_order", "new_order", "create_order", "cancel", "withdraw"))
+    ]
+    assert not order_shaped, f"BybitClient exposes order/withdraw-shaped method(s): {order_shaped}"
+
+
 def test_credential_values_are_never_passed_to_a_logger_call():
-    """Textual scan: no logger.*(...) call in the Binance-adjacent modules
-    contains 'api_key' or 'api_secret' or 'settings.binance' in its
-    argument source — those values must only ever reach the signed-request
-    header/query construction, never a log line."""
-    for module in ("binance_account_client.py", "micro_live.py", "live_guard.py"):
+    """Textual scan: no logger.*(...) call in the exchange-adjacent
+    modules contains 'api_key' or 'api_secret' or 'settings.binance'/
+    'settings.bybit' in its argument source — those values must only
+    ever reach the signed-request header/query construction, never a
+    log line."""
+    for module in (
+        "binance_account_client.py",
+        "micro_live.py",
+        "live_guard.py",
+        "bybit_client.py",
+        "dual_leg_observer.py",
+        "dual_leg_quote.py",
+    ):
         path = APP_DIR / "execution" / module
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):

@@ -10,6 +10,7 @@ from app.database.models import (
     Base,
     CexScanEventRecord,
     DexSimulatedTradeRecord,
+    DualLegObservationRecord,
     Exchange,
     MicroLiveObservationRecord,
     OpportunityRecord,
@@ -312,6 +313,49 @@ async def save_micro_live_observation(session: AsyncSession, quote, strategy: st
         min_notional_pass=quote.min_notional_pass,
         lot_size_pass=quote.lot_size_pass,
         balance_pass=quote.balance_pass,
+        executable=quote.executable,
+        rejection_reason=quote.reason,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_dual_leg_observation(session: AsyncSession, quote, strategy: str) -> DualLegObservationRecord:
+    """PHASE 2F (user directive, 2026-08-23) — persists one dual-leg
+    arbitrage recomputation. Takes app.execution.dual_leg_quote.DualLegQuote
+    (not type-hinted directly, same database<->execution import-cycle
+    avoidance as save_micro_live_observation). Called from main.py's CEX
+    detection loop in the same try/except as the quote computation
+    itself; a write failure here can never affect paper execution."""
+    record = DualLegObservationRecord(
+        opportunity_id=quote.opportunity_id,
+        symbol=quote.symbol,
+        strategy=strategy,
+        observed_at=datetime.fromtimestamp(quote.computed_at, tz=UTC).replace(tzinfo=None),
+        buy_exchange=quote.buy_exchange,
+        sell_exchange=quote.sell_exchange,
+        buy_execution_price=quote.buy_execution_price,
+        sell_execution_price=quote.sell_execution_price,
+        executable_qty=quote.executable_qty,
+        gross_spread_pct=quote.gross_spread_pct,
+        buy_fee_usd=quote.buy_fee_usd,
+        sell_fee_usd=quote.sell_fee_usd,
+        buy_slippage_pct=quote.buy_slippage_pct,
+        sell_slippage_pct=quote.sell_slippage_pct,
+        buy_fee_source=quote.buy_fee_source,
+        sell_fee_source=quote.sell_fee_source,
+        buy_quote_age_ms=quote.buy_quote_age_ms,
+        sell_quote_age_ms=quote.sell_quote_age_ms,
+        dual_leg_latency_ms=quote.dual_leg_latency_ms,
+        net_profit_usd=quote.net_profit_usd,
+        net_return_bps=quote.net_return_bps,
+        buy_min_notional_pass=quote.buy_min_notional_pass,
+        buy_lot_size_pass=quote.buy_lot_size_pass,
+        sell_min_notional_pass=quote.sell_min_notional_pass,
+        sell_lot_size_pass=quote.sell_lot_size_pass,
+        buy_tradable=quote.buy_tradable,
+        sell_tradable=quote.sell_tradable,
         executable=quote.executable,
         rejection_reason=quote.reason,
     )

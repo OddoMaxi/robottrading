@@ -15,6 +15,7 @@ from app.execution.micro_live import micro_live_orchestrator, micro_live_state
 from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
+from app.reporting.dual_leg_edge import DualLegEdgeReport, build_dual_leg_edge_report
 from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
 from app.risk.risk_engine import risk_engine
 from app.simulation.live_stress_test import run_live_stress_test
@@ -324,6 +325,50 @@ async def micro_live_edge_report(hours: float = 24.0, session: AsyncSession = De
     since = now - timedelta(hours=hours)
     report = await build_micro_live_edge_report(session, since=since, until=now)
     return _serialize_edge_report(report)
+
+
+def _serialize_direction(d) -> dict:
+    return {
+        "direction": d.direction,
+        "observations": d.observations,
+        "net_profit": _serialize_distribution(d.net_profit),
+        "positive_rate_pct": d.positive_rate_pct,
+        "real_fee_coverage_pct": d.real_fee_coverage_pct,
+    }
+
+
+def _serialize_dual_leg_report(report: DualLegEdgeReport) -> dict:
+    return {
+        "observations": report.observations,
+        "window_start": report.window_start.isoformat() if report.window_start else None,
+        "window_end": report.window_end.isoformat() if report.window_end else None,
+        "real_fee_coverage_both_legs_pct": report.real_fee_coverage_both_legs_pct,
+        "executable_both_legs_pct": report.executable_both_legs_pct,
+        "net_profit": _serialize_distribution(report.net_profit),
+        "net_return_bps": _serialize_distribution(report.net_return_bps),
+        "dual_leg_latency_ms": _serialize_distribution(report.dual_leg_latency_ms),
+        "rejection_reasons": report.rejection_reasons,
+        "by_direction": [_serialize_direction(d) for d in report.by_direction],
+        "recommended_safety_margin_usd": report.recommended_safety_margin_usd,
+        "qualifying_after_gate": report.qualifying_after_gate,
+        "qualifying_after_gate_pct": report.qualifying_after_gate_pct,
+        "capital_pre_positioning_required": report.capital_pre_positioning_required,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/dual-leg/edge-report")
+async def dual_leg_edge_report(hours: float = 24.0, session: AsyncSession = Depends(get_session)) -> dict:
+    """PHASE 2F — DUAL-LEG REALITY VALIDATION (user directive, 2026-08-23).
+    Aggregates the persisted dual_leg_observations table — the full
+    arbitrage recomputed independently from live data on BOTH legs, never
+    opp.expected_profit_usd. Pure read, changes nothing, places no order."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    since = now - timedelta(hours=hours)
+    report = await build_dual_leg_edge_report(session, since=since, until=now)
+    return _serialize_dual_leg_report(report)
 
 
 @router.get("/market-data/health")

@@ -458,3 +458,63 @@ class MicroLiveObservationRecord(Base):
     rejection_reason: Mapped[str | None]
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class DualLegObservationRecord(Base):
+    """PHASE 2F — DUAL-LEG REALITY VALIDATION (user directive, 2026-08-23).
+
+    Phase 2D/2E only ever reality-tested the Binance leg of a
+    cross_exchange opportunity. One row per opportunity here captures the
+    FULL arbitrage recomputed independently from live, real,
+    separately-fetched data on BOTH legs (app.execution.dual_leg_quote) —
+    never opp.expected_profit_usd. Written by
+    app.database.repository.save_dual_leg_observation, called from
+    main.py's CEX detection loop in the same try/except discipline as
+    every other Phase 2D/2E/2F telemetry write: a failure here can never
+    affect paper execution. Read-only observability — nothing in this
+    table is ever read back by the detection loop, only by
+    app.reporting.dual_leg_edge and this phase's final report."""
+
+    __tablename__ = "dual_leg_observations"
+    __table_args__ = (
+        Index("ix_dual_leg_observations_observed_at", "observed_at"),
+        Index("ix_dual_leg_observations_symbol", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    symbol: Mapped[str]
+    strategy: Mapped[str]
+    observed_at: Mapped[datetime]
+
+    buy_exchange: Mapped[str]
+    sell_exchange: Mapped[str]
+    buy_execution_price: Mapped[float] = mapped_column(Numeric(30, 12))
+    sell_execution_price: Mapped[float] = mapped_column(Numeric(30, 12))
+    executable_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+
+    gross_spread_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    buy_fee_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    sell_fee_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    buy_slippage_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    sell_slippage_pct: Mapped[float] = mapped_column(Numeric(12, 6))
+    buy_fee_source: Mapped[str]  # "real_account_fee" | "estimated_default"
+    sell_fee_source: Mapped[str]
+
+    buy_quote_age_ms: Mapped[float] = mapped_column(Numeric(14, 3))
+    sell_quote_age_ms: Mapped[float] = mapped_column(Numeric(14, 3))
+    dual_leg_latency_ms: Mapped[float] = mapped_column(Numeric(14, 3))
+
+    net_profit_usd: Mapped[float] = mapped_column(Numeric(20, 6))
+    net_return_bps: Mapped[float] = mapped_column(Numeric(14, 4))
+
+    buy_min_notional_pass: Mapped[bool]
+    buy_lot_size_pass: Mapped[bool]
+    sell_min_notional_pass: Mapped[bool]
+    sell_lot_size_pass: Mapped[bool]
+    buy_tradable: Mapped[bool]
+    sell_tradable: Mapped[bool]
+    executable: Mapped[bool]
+    rejection_reason: Mapped[str | None]
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
