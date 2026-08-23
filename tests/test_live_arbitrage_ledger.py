@@ -21,6 +21,8 @@ async def test_save_live_arbitrage_execution_persists_both_filled_outcome():
     result = LiveArbitrageResult(
         attempt_id=uuid.uuid4(),
         symbol="LUNCUSDT",
+        buy_exchange="binance",
+        sell_exchange="bybit",
         outcome=ArbitrageOutcome.BOTH_FILLED,
         reason=None,
         predicted_net_profit_usd=0.05,
@@ -53,6 +55,8 @@ async def test_save_live_arbitrage_execution_persists_both_filled_outcome():
 
     assert session.added == [record]
     assert record.outcome == "both_filled"
+    assert record.buy_exchange == "binance"
+    assert record.sell_exchange == "bybit"
     assert record.buy_latency_ms == pytest.approx(300.0)
     assert record.sell_latency_ms == pytest.approx(500.0)
     assert record.actual_realized_spread_pct is not None and record.actual_realized_spread_pct > 0
@@ -62,7 +66,10 @@ async def test_save_live_arbitrage_execution_persists_both_filled_outcome():
 async def test_save_live_arbitrage_execution_persists_refused_outcome_with_no_orders():
     """The ledger must record a NO_TRADE_REFUSED attempt too — no
     silent gap just because no order was ever submitted."""
-    result = LiveArbitrageResult(attempt_id=uuid.uuid4(), symbol="LUNCUSDT", outcome=ArbitrageOutcome.NO_TRADE_REFUSED, reason="live_trading_enabled is False")
+    result = LiveArbitrageResult(
+        attempt_id=uuid.uuid4(), symbol="LUNCUSDT", buy_exchange="binance", sell_exchange="bybit",
+        outcome=ArbitrageOutcome.NO_TRADE_REFUSED, reason="live_trading_enabled is False",
+    )
     session = FakeSession()
     record = await save_live_arbitrage_execution(session, result)
     assert record.outcome == "no_trade_refused"

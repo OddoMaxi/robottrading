@@ -81,8 +81,15 @@ def _smallest_common_order_size(binance_rules, bybit_rules, reference_price: flo
 
 
 async def build_first_live_gate_report(
-    binance_client: BinanceAccountClient | None = None, bybit_client: BybitClient | None = None
+    binance_client: BinanceAccountClient | None = None,
+    bybit_client: BybitClient | None = None,
+    reference_symbol: str = SYMBOL,
 ) -> FirstLiveGateReport:
+    """PHASE 3 (user directive, 2026-08-23): reference_symbol is no
+    longer hardcoded to LUNCUSDT — app.execution.live_preflight passes
+    whatever app.execution.live_ranker currently finds as the best
+    candidate. The default here only exists for backward compatibility
+    with a bare call that doesn't have a ranked candidate yet."""
     settings = get_settings()
     binance = binance_client or BinanceAccountClient()
     bybit = bybit_client or BybitClient()
@@ -136,10 +143,10 @@ async def build_first_live_gate_report(
 
     smallest_size = SmallestCommonOrderSize(False, "exchange filters unavailable", None, None, None)
     try:
-        binance_info = await binance.get_exchange_info(symbols=[SYMBOL])
-        binance_rules = parse_binance_symbol_rules(binance_info, SYMBOL)
-        bybit_rules = await bybit.get_symbol_rules(SYMBOL)
-        book = await binance.get_book_ticker(SYMBOL)
+        binance_info = await binance.get_exchange_info(symbols=[reference_symbol])
+        binance_rules = parse_binance_symbol_rules(binance_info, reference_symbol)
+        bybit_rules = await bybit.get_symbol_rules(reference_symbol)
+        book = await binance.get_book_ticker(reference_symbol)
         reference_price = float(book["askPrice"])
         if bybit_rules is not None:
             smallest_size = _smallest_common_order_size(

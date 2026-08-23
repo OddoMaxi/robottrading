@@ -790,6 +790,92 @@ def get_micro_live_edge_report_cached(hours: float = 72.0) -> MicroLiveEdgeSumma
     return asyncio.run(fetch_micro_live_edge_report(hours=hours))
 
 
+@dataclass(slots=True)
+class RealTradeSummary:
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    outcome: str
+    actual_net_pnl_usd: float | None
+    started_at: str
+
+
+@dataclass(slots=True)
+class RealTradingDashboardSummary:
+    reachable: bool
+    total_real_capital_target_usdt: float = 0.0
+    binance_target_capital_usdt: float = 0.0
+    bybit_target_capital_usdt: float = 0.0
+    binance_balance_usdt: float = 0.0
+    bybit_balance_usdt: float = 0.0
+    available_capital_usdt: float = 0.0
+    today_real_pnl_usd: float = 0.0
+    total_real_pnl_usd: float = 0.0
+    real_trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate_pct: float | None = None
+    total_real_fees_usd: float = 0.0
+    average_profit_per_trade_usd: float | None = None
+    current_best_opportunity: dict | None = None
+    active_orders: int = 0
+    last_trades: list[RealTradeSummary] = field(default_factory=list)
+    kill_switch_engaged: bool = False
+    kill_switch_reason: str | None = None
+    live_trading_enabled: bool = False
+    real_orders_placed: int = 0
+
+
+async def fetch_live_dashboard_summary() -> RealTradingDashboardSummary:
+    """PHASE 3, item 10 (user directive, 2026-08-23) — same HTTP-to-the-
+    engine pattern as every other live-state fetcher here. Never raises —
+    an unreachable engine reports reachable=False."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/live/dashboard-summary", timeout=aiohttp.ClientTimeout(total=15)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        last_trades = [
+            RealTradeSummary(
+                symbol=t["symbol"], buy_exchange=t["buy_exchange"], sell_exchange=t["sell_exchange"],
+                outcome=t["outcome"], actual_net_pnl_usd=t["actual_net_pnl_usd"], started_at=t["started_at"],
+            )
+            for t in payload.get("last_trades", [])
+        ]
+        return RealTradingDashboardSummary(
+            reachable=True,
+            total_real_capital_target_usdt=payload["total_real_capital_target_usdt"],
+            binance_target_capital_usdt=payload["binance_target_capital_usdt"],
+            bybit_target_capital_usdt=payload["bybit_target_capital_usdt"],
+            binance_balance_usdt=payload["binance_balance_usdt"],
+            bybit_balance_usdt=payload["bybit_balance_usdt"],
+            available_capital_usdt=payload["available_capital_usdt"],
+            today_real_pnl_usd=payload["today_real_pnl_usd"],
+            total_real_pnl_usd=payload["total_real_pnl_usd"],
+            real_trades=payload["real_trades"],
+            wins=payload["wins"],
+            losses=payload["losses"],
+            win_rate_pct=payload["win_rate_pct"],
+            total_real_fees_usd=payload["total_real_fees_usd"],
+            average_profit_per_trade_usd=payload["average_profit_per_trade_usd"],
+            current_best_opportunity=payload["current_best_opportunity"],
+            active_orders=payload["active_orders"],
+            last_trades=last_trades,
+            kill_switch_engaged=payload["kill_switch_engaged"],
+            kill_switch_reason=payload["kill_switch_reason"],
+            live_trading_enabled=payload["live_trading_enabled"],
+            real_orders_placed=payload["real_orders_placed"],
+        )
+    except Exception:
+        return RealTradingDashboardSummary(reachable=False)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_live_dashboard_summary_cached() -> RealTradingDashboardSummary:
+    return asyncio.run(fetch_live_dashboard_summary())
+
+
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:
     engine = create_async_engine(get_settings().database_url)
     try:

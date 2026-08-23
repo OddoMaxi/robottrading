@@ -33,14 +33,19 @@ class LiveTradingGuard:
         live_trading_enabled: bool,
         max_live_capital_usdt: float,
         symbol_allowlist: list[str] | None = None,
-        direction: str | None = None,
+        allowed_directions: list[str] | None = None,
         max_notional_per_leg_usdt: float | None = None,
         max_concurrent_arbitrages: int = 1,
     ) -> None:
         self._live_trading_enabled = live_trading_enabled
         self._max_live_capital_usdt = max_live_capital_usdt
+        # PHASE 3 (user directive, 2026-08-23): an EMPTY allowlist means
+        # "unrestricted — any symbol in the dynamically-discovered
+        # universe is eligible," not "nothing is." A non-empty list still
+        # restricts to exactly those symbols, for an operator who wants
+        # to narrow scope back down deliberately.
         self._symbol_allowlist = set(symbol_allowlist or [])
-        self._direction = direction
+        self._allowed_directions = set(allowed_directions or [])
         self._max_notional_per_leg_usdt = max_notional_per_leg_usdt
         self._max_concurrent_arbitrages = max_concurrent_arbitrages
         self._in_flight_count = 0
@@ -100,10 +105,10 @@ class LiveTradingGuard:
             raise LiveExecutionRefused(f"live kill switch engaged: {self._kill_switch_reason}")
         if not self._live_trading_enabled:
             raise LiveExecutionRefused("live_trading_enabled is False")
-        if symbol not in self._symbol_allowlist:
+        if self._symbol_allowlist and symbol not in self._symbol_allowlist:
             raise LiveExecutionRefused(f"symbol {symbol} not in live_symbol_allowlist {sorted(self._symbol_allowlist)}")
-        if self._direction is not None and direction != self._direction:
-            raise LiveExecutionRefused(f"direction {direction} does not match configured live_direction {self._direction}")
+        if self._allowed_directions and direction not in self._allowed_directions:
+            raise LiveExecutionRefused(f"direction {direction} not in allowed_directions {sorted(self._allowed_directions)}")
         if notional_per_leg_usdt <= 0:
             raise LiveExecutionRefused(f"notional_per_leg_usdt must be positive, got {notional_per_leg_usdt}")
         if self._max_notional_per_leg_usdt is not None and notional_per_leg_usdt > self._max_notional_per_leg_usdt:
@@ -130,7 +135,7 @@ class LiveTradingGuard:
             "live_trading_enabled": self._live_trading_enabled,
             "max_live_capital_usdt": self._max_live_capital_usdt,
             "symbol_allowlist": sorted(self._symbol_allowlist),
-            "direction": self._direction,
+            "allowed_directions": sorted(self._allowed_directions),
             "max_notional_per_leg_usdt": self._max_notional_per_leg_usdt,
             "max_concurrent_arbitrages": self._max_concurrent_arbitrages,
             "in_flight_count": self._in_flight_count,
@@ -148,7 +153,7 @@ def _build_default_live_guard() -> LiveTradingGuard:
         live_trading_enabled=settings.live_trading_enabled,
         max_live_capital_usdt=settings.max_live_capital_usdt,
         symbol_allowlist=settings.live_symbol_allowlist,
-        direction=settings.live_direction,
+        allowed_directions=settings.live_allowed_directions,
         max_notional_per_leg_usdt=settings.max_notional_per_leg_usdt,
         max_concurrent_arbitrages=settings.max_concurrent_live_arbitrages,
     )

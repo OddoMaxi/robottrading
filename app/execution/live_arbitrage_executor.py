@@ -1,5 +1,9 @@
-"""LIVE ARBITRAGE EXECUTOR — LUNCUSDT Binance(buy)->Bybit(sell) ONLY
-(Phase 3A, user directive, 2026-08-23).
+"""LIVE ARBITRAGE EXECUTOR — Binance <-> Bybit spot, ANY common symbol,
+EITHER direction (Phase 3A built this for LUNCUSDT/Binance-buy/Bybit-sell
+only; Phase 3, user directive, 2026-08-23, generalizes it: "ne hardcode
+pas ... une liste arbitraire" — the symbol/direction are now call-time
+parameters, chosen by app.execution.live_ranker from the dynamically
+discovered common universe, never fixed in this module).
 
 DANGER: this module can place two real market orders. It is the ONLY
 caller of app.execution.binance_live_trade_client and
@@ -7,8 +11,7 @@ app.execution.bybit_live_trade_client in the entire codebase
 (tests/test_phase3a_isolation.py proves this) and is NEVER imported by
 main.py's detection loop or any other automatically-running code — every
 invocation of execute_one_arbitrage() is a deliberate, individually
-authorized act by an operator (a script or an admin-only endpoint calling
-it directly), never a loop.
+authorized act by an operator, never a loop.
 
 There is no real atomicity between two different exchanges. This module
 treats that as the central design constraint, not an edge case:
@@ -22,12 +25,12 @@ treats that as the central design constraint, not an edge case:
   "probably didn't fill" or "probably did" — the kill switch engages
   immediately and the attempt ends requiring manual reconciliation. This
   module never guesses.
-- If the buy leg (Binance) fills but the sell leg (Bybit) does not, the
-  resulting LUNC position is NEUTRALIZED by an immediate market sell on
-  the SAME exchange (Binance) — never left as naked directional
-  exposure, and never "fixed" by blindly retrying the Bybit leg (which
-  could double the position if the first attempt actually succeeded
-  after all under an ambiguous response).
+- If the buy leg fills but the sell leg does not, the resulting position
+  is NEUTRALIZED by an immediate market sell on the SAME exchange the buy
+  happened on — never left as naked directional exposure, and never
+  "fixed" by blindly retrying the other leg (which could double the
+  position if the first attempt actually succeeded after all under an
+  ambiguous response).
 - max_concurrent_live_arbitrages (checked via
   app.execution.live_guard.live_guard) prevents two attempts from
   overlapping in the first place — the simplest possible defense against
@@ -50,9 +53,9 @@ from enum import StrEnum
 from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.binance_filters import parse_symbol_rules as parse_binance_symbol_rules
 from app.execution.binance_filters import round_down_to_step
-from app.execution.binance_live_trade_client import BinanceLiveTradeClient, BinanceOrderResult
+from app.execution.binance_live_trade_client import BinanceLiveTradeClient
 from app.execution.bybit_client import BybitClient
-from app.execution.bybit_live_trade_client import BybitLiveTradeClient, BybitOrderStatus
+from app.execution.bybit_live_trade_client import BybitLiveTradeClient
 from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
 from app.execution.live_guard import LiveExecutionRefused, live_guard
 from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE
@@ -61,8 +64,11 @@ logger = logging.getLogger(__name__)
 
 LEG_CONFIRMATION_TIMEOUT_SECONDS = 15.0
 LEG_POLL_INTERVAL_SECONDS = 0.5
-SYMBOL = "LUNCUSDT"
-DIRECTION = "BINANCE_BUY_BYBIT_SELL"
+EXCHANGES = ("binance", "bybit")
+
+
+def direction_for(buy_exchange: str, sell_exchange: str) -> str:
+    return f"{buy_exchange.upper()}_BUY_{sell_exchange.upper()}_SELL"
 
 
 class ArbitrageOutcome(StrEnum):
@@ -70,7 +76,7 @@ class ArbitrageOutcome(StrEnum):
     NO_TRADE_UNPROFITABLE = "no_trade_unprofitable"  # fresh dual-leg re-check failed the safety-margin gate — no order sent
     NO_FILL = "no_fill"  # buy leg rejected/expired with zero fill — nothing to neutralize
     BOTH_FILLED = "both_filled"
-    BUY_ONLY_NEUTRALIZED = "buy_only_neutralized"  # sell leg failed; flattened on Binance
+    BUY_ONLY_NEUTRALIZED = "buy_only_neutralized"  # sell leg failed; flattened on the buy exchange
     NEUTRALIZATION_FAILED = "neutralization_failed"  # CRITICAL — manual intervention required, kill switch engaged
     UNKNOWN_BUY_LEG = "unknown_buy_leg"  # timeout/ambiguous response — kill switch engaged
     UNKNOWN_SELL_LEG = "unknown_sell_leg"  # timeout/ambiguous response — kill switch engaged
@@ -80,6 +86,8 @@ class ArbitrageOutcome(StrEnum):
 class LiveArbitrageResult:
     attempt_id: uuid.UUID
     symbol: str
+    buy_exchange: str
+    sell_exchange: str
     outcome: ArbitrageOutcome
     reason: str | None
 
@@ -116,6 +124,17 @@ class LiveArbitrageResult:
     completed_at: float | None = None
 
 
+@dataclass(slots=True)
+class _NormalizedOrderStatus:
+    order_id: str
+    is_terminal: bool
+    is_filled: bool
+    filled_qty: float
+    avg_fill_price: float | None
+    fee_usd: float
+    raw_status: str
+
+
 class LiveArbitrageExecutor:
     def __init__(
         self,
@@ -129,70 +148,88 @@ class LiveArbitrageExecutor:
         self._bybit_read = bybit_read or BybitClient()
         self._bybit_trade = bybit_trade or BybitLiveTradeClient()
 
-    async def _fresh_dual_leg_quote(self, micro_live_cap_usdt: float, master_requested_size_usd: float) -> DualLegQuote | None:
+    def _read_client(self, exchange: str):
+        return self._binance_read if exchange == "binance" else self._bybit_read
+
+    async def _fresh_dual_leg_quote(
+        self, symbol: str, buy_exchange: str, sell_exchange: str, micro_live_cap_usdt: float, master_requested_size_usd: float
+    ) -> tuple[DualLegQuote, LegSnapshot, LegSnapshot] | None:
         """Re-runs the EXACT Phase 2F dual-leg reality check with brand
-        new live data — never trusts a quote computed even seconds ago
-        for the actual go/no-go decision."""
+        new live data, for whichever (buy_exchange, sell_exchange) pair
+        is being attempted — never trusts a quote computed even seconds
+        ago for the actual go/no-go decision."""
         try:
-            book_b = await self._binance_read.get_book_ticker(SYMBOL)
-            depth_b = await self._binance_read.get_order_book_depth(SYMBOL, limit=20)
-            info_b = await self._binance_read.get_exchange_info(symbols=[SYMBOL])
-            rules_b = parse_binance_symbol_rules(info_b, SYMBOL)
-            fee_b = await self._binance_read.get_trade_fee(SYMBOL)
-
-            book_y = await self._bybit_read.get_book_ticker(SYMBOL)
-            depth_y = await self._bybit_read.get_order_book_depth(SYMBOL, limit=50)
-            rules_y = await self._bybit_read.get_symbol_rules(SYMBOL)
-            fee_y = await self._bybit_read.get_fee_rate(SYMBOL)
-            if book_y is None or rules_y is None:
+            buy_leg = await self._fetch_leg_snapshot(symbol, buy_exchange, "buy")
+            sell_leg = await self._fetch_leg_snapshot(symbol, sell_exchange, "sell")
+            if buy_leg is None or sell_leg is None:
                 return None
-
-            now = time.time()
-            buy_leg = LegSnapshot(
-                exchange="binance",
-                side="buy",
-                best_bid=float(book_b["bidPrice"]),
-                best_ask=float(book_b["askPrice"]),
-                depth_levels=[(float(p), float(q)) for p, q in depth_b.get("asks", [])],
-                min_qty=rules_b.min_qty,
-                step_size=rules_b.step_size,
-                tick_size=rules_b.tick_size,
-                min_notional=rules_b.min_notional,
-                tradable=(rules_b.status == "TRADING" and rules_b.is_spot_trading_allowed),
-                maker_fee_rate=fee_b.maker_fee_rate if fee_b is not None else None,
-                taker_fee_rate=fee_b.taker_fee_rate if fee_b is not None else DEFAULT_TAKER_FEE_RATE,
-                fee_source="real_account_fee" if fee_b is not None else "estimated_default",
-                fetch_started_at=now,
-                fetch_completed_at=time.time(),
-            )
-            sell_leg = LegSnapshot(
-                exchange="bybit",
-                side="sell",
-                best_bid=book_y.bid_price,
-                best_ask=book_y.ask_price,
-                depth_levels=[(float(p), float(q)) for p, q in depth_y.get("result", {}).get("b", [])],
-                min_qty=rules_y.min_order_qty,
-                step_size=rules_y.qty_step,
-                tick_size=rules_y.tick_size,
-                min_notional=rules_y.min_order_amt,
-                tradable=rules_y.is_tradable,
-                maker_fee_rate=fee_y.maker_fee_rate if fee_y is not None else None,
-                taker_fee_rate=fee_y.taker_fee_rate if fee_y is not None else DEFAULT_TAKER_FEE_RATE,
-                fee_source="real_account_fee" if fee_y is not None else "estimated_default",
-                fetch_started_at=time.time(),
-                fetch_completed_at=time.time(),
-            )
-            return compute_dual_leg_quote(
+            quote = compute_dual_leg_quote(
                 opportunity_id=uuid.uuid4(),
-                symbol=SYMBOL,
+                symbol=symbol,
                 buy_leg=buy_leg,
                 sell_leg=sell_leg,
                 master_requested_size_usd=master_requested_size_usd,
                 micro_live_cap_usdt=micro_live_cap_usdt,
             )
+            return quote, buy_leg, sell_leg
         except Exception as exc:
-            logger.warning("live-arbitrage: fresh dual-leg re-check failed: %s", exc)
+            logger.warning("live-arbitrage: fresh dual-leg re-check failed for %s %s->%s: %s", symbol, buy_exchange, sell_exchange, exc)
             return None
+
+    async def _fetch_leg_snapshot(self, symbol: str, exchange: str, side: str) -> LegSnapshot | None:
+        now = time.time()
+        if exchange == "binance":
+            book = await self._binance_read.get_book_ticker(symbol)
+            depth = await self._binance_read.get_order_book_depth(symbol, limit=20)
+            info = await self._binance_read.get_exchange_info(symbols=[symbol])
+            rules = parse_binance_symbol_rules(info, symbol)
+            fee = await self._binance_read.get_trade_fee(symbol)
+            depth_levels = [(float(p), float(q)) for p, q in depth.get("asks" if side == "buy" else "bids", [])]
+            return LegSnapshot(
+                exchange="binance",
+                side=side,
+                best_bid=float(book["bidPrice"]),
+                best_ask=float(book["askPrice"]),
+                depth_levels=depth_levels,
+                min_qty=rules.min_qty,
+                step_size=rules.step_size,
+                tick_size=rules.tick_size,
+                min_notional=rules.min_notional,
+                tradable=(rules.status == "TRADING" and rules.is_spot_trading_allowed),
+                maker_fee_rate=fee.maker_fee_rate if fee is not None else None,
+                taker_fee_rate=fee.taker_fee_rate if fee is not None else DEFAULT_TAKER_FEE_RATE,
+                fee_source="real_account_fee" if fee is not None else "estimated_default",
+                fetch_started_at=now,
+                fetch_completed_at=time.time(),
+            )
+        else:
+            book = await self._bybit_read.get_book_ticker(symbol)
+            if book is None:
+                return None
+            depth = await self._bybit_read.get_order_book_depth(symbol, limit=50)
+            rules = await self._bybit_read.get_symbol_rules(symbol)
+            if rules is None:
+                return None
+            fee = await self._bybit_read.get_fee_rate(symbol)
+            side_key = "a" if side == "buy" else "b"
+            depth_levels = [(float(p), float(q)) for p, q in depth.get("result", {}).get(side_key, [])]
+            return LegSnapshot(
+                exchange="bybit",
+                side=side,
+                best_bid=book.bid_price,
+                best_ask=book.ask_price,
+                depth_levels=depth_levels,
+                min_qty=rules.min_order_qty,
+                step_size=rules.qty_step,
+                tick_size=rules.tick_size,
+                min_notional=rules.min_order_amt,
+                tradable=rules.is_tradable,
+                maker_fee_rate=fee.maker_fee_rate if fee is not None else None,
+                taker_fee_rate=fee.taker_fee_rate if fee is not None else DEFAULT_TAKER_FEE_RATE,
+                fee_source="real_account_fee" if fee is not None else "estimated_default",
+                fetch_started_at=now,
+                fetch_completed_at=time.time(),
+            )
 
     async def _await_terminal(self, poll_fn, timeout_seconds: float) -> tuple[bool, object | None]:
         """Polls poll_fn() until it returns a terminal result or the
@@ -213,42 +250,120 @@ class LiveArbitrageExecutor:
             await asyncio.sleep(LEG_POLL_INTERVAL_SECONDS)
         return False, last_result
 
-    async def _neutralize_on_binance(self, qty: float, attempt_id: uuid.UUID) -> BinanceOrderResult | None:
-        """Flattens an unwanted LUNC position acquired on Binance with an
-        immediate market SELL on the SAME exchange — never attempts to
+    async def _place_market_buy(self, exchange: str, symbol: str, notional_usdt: float, client_order_id: str) -> None:
+        if exchange == "binance":
+            await self._binance_trade.place_market_order(symbol, "BUY", client_order_id=client_order_id, quote_order_qty=notional_usdt)
+        else:
+            book = await self._bybit_read.get_book_ticker(symbol)
+            rules = await self._bybit_read.get_symbol_rules(symbol)
+            if book is None or rules is None:
+                raise RuntimeError(f"bybit market data unavailable for {symbol} while sizing the buy leg")
+            qty = round_down_to_step(notional_usdt / book.ask_price, rules.qty_step)
+            await self._bybit_trade.place_market_order(symbol, "Buy", qty=qty, order_link_id=client_order_id)
+
+    async def _place_market_sell(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
+        if exchange == "binance":
+            await self._binance_trade.place_market_order(symbol, "SELL", client_order_id=client_order_id, quantity=qty)
+        else:
+            await self._bybit_trade.place_market_order(symbol, "Sell", qty=qty, order_link_id=client_order_id)
+
+    async def _get_status(self, exchange: str, symbol: str, client_order_id: str) -> _NormalizedOrderStatus | None:
+        if exchange == "binance":
+            result = await self._binance_trade.get_order_status(symbol, orig_client_order_id=client_order_id)
+            fees_by_asset = result.total_fees_by_asset()
+            non_usdt_fees = {a: v for a, v in fees_by_asset.items() if a != "USDT"}
+            if non_usdt_fees:
+                # Binance can charge the fee in a non-quote asset (BNB
+                # discount, or the base asset) — summing those alongside a
+                # USDT amount would silently produce a wrong USD total, so
+                # they're excluded here and logged instead of pretending
+                # the total is precise.
+                logger.warning("live-arbitrage: %s order fee(s) charged in non-USDT asset(s), excluded: %s", exchange, non_usdt_fees)
+            return _NormalizedOrderStatus(
+                order_id=str(result.order_id),
+                is_terminal=result.is_terminal,
+                is_filled=result.is_filled,
+                filled_qty=result.executed_qty,
+                avg_fill_price=result.average_fill_price(),
+                fee_usd=fees_by_asset.get("USDT", 0.0),
+                raw_status=result.status,
+            )
+        else:
+            status = await self._bybit_trade.get_order_status(symbol, order_link_id=client_order_id)
+            if status is None:
+                return None
+            # Assumes Bybit charged the fee in the quote asset (USDT) —
+            # Bybit's spot response doesn't break fees out by asset the
+            # way Binance's does; a VIP tier or promo that changed this
+            # would silently skew actual_net_pnl_usd, which is why
+            # prediction_error_usd is also recorded as a tell to investigate.
+            return _NormalizedOrderStatus(
+                order_id=status.order_id,
+                is_terminal=status.is_terminal,
+                is_filled=status.is_filled,
+                filled_qty=status.cum_exec_qty,
+                avg_fill_price=status.avg_price,
+                fee_usd=status.cum_exec_fee,
+                raw_status=status.order_status,
+            )
+
+    async def _get_step_size(self, exchange: str, symbol: str) -> tuple[float, float] | None:
+        """Returns (step_size, min_qty) for the given exchange/symbol, or
+        None if unavailable — used to round a neutralization/hedge
+        quantity to what that exchange will actually accept."""
+        if exchange == "binance":
+            info = await self._binance_read.get_exchange_info(symbols=[symbol])
+            rules = parse_binance_symbol_rules(info, symbol)
+            return rules.step_size, rules.min_qty
+        rules = await self._bybit_read.get_symbol_rules(symbol)
+        if rules is None:
+            return None
+        return rules.qty_step, rules.min_order_qty
+
+    async def _neutralize(self, exchange: str, symbol: str, qty: float, attempt_id: uuid.UUID) -> _NormalizedOrderStatus | None:
+        """Flattens an unwanted position acquired on `exchange` with an
+        immediate market SELL on that SAME exchange — never attempts to
         "fix" a one-leg-filled state by retrying the other exchange's
         leg, which could double the position if the original attempt
-        actually succeeded under an ambiguous response."""
+        actually succeeded after all under an ambiguous response."""
         neutralize_id = f"neutralize-{attempt_id}"
         try:
-            ack = await self._binance_trade.place_market_order(SYMBOL, "SELL", client_order_id=neutralize_id, quantity=qty)
+            await self._place_market_sell(exchange, symbol, qty, neutralize_id)
         except Exception as exc:
-            logger.critical("live-arbitrage: NEUTRALIZATION ORDER SUBMISSION FAILED for %s: %s", attempt_id, exc)
+            logger.critical("live-arbitrage: NEUTRALIZATION ORDER SUBMISSION FAILED on %s for %s: %s", exchange, attempt_id, exc)
             return None
-        reached, result = await self._await_terminal(
-            lambda: self._binance_trade.get_order_status(SYMBOL, orig_client_order_id=neutralize_id), LEG_CONFIRMATION_TIMEOUT_SECONDS
-        )
+        reached, result = await self._await_terminal(lambda: self._get_status(exchange, symbol, neutralize_id), LEG_CONFIRMATION_TIMEOUT_SECONDS)
         if not reached:
-            logger.critical("live-arbitrage: NEUTRALIZATION ORDER STATUS UNKNOWN for %s", attempt_id)
-            return ack
+            logger.critical("live-arbitrage: NEUTRALIZATION ORDER STATUS UNKNOWN on %s for %s", exchange, attempt_id)
+            return result
         return result
 
     async def execute_one_arbitrage(
         self,
+        symbol: str,
+        buy_exchange: str,
+        sell_exchange: str,
         requested_notional_per_leg_usdt: float,
         opportunity_id: uuid.UUID | None = None,
     ) -> LiveArbitrageResult:
-        """The entire leg-risk-managed attempt, start to finish. Callers
+        """The entire leg-risk-managed attempt, start to finish, for ANY
+        symbol/direction pair the caller (app.execution.live_ranker)
+        selects from the dynamically-discovered common universe. Callers
         (never main.py's automatic loop — see this module's own
         docstring) are responsible for persisting the returned result to
         the Profit Reality Ledger."""
+        if buy_exchange not in EXCHANGES or sell_exchange not in EXCHANGES or buy_exchange == sell_exchange:
+            raise ValueError(f"buy_exchange/sell_exchange must be distinct values from {EXCHANGES}, got {buy_exchange!r}/{sell_exchange!r}")
+
         attempt_id = uuid.uuid4()
+        direction = direction_for(buy_exchange, sell_exchange)
         result = LiveArbitrageResult(
-            attempt_id=attempt_id, symbol=SYMBOL, outcome=ArbitrageOutcome.NO_TRADE_REFUSED, reason=None
+            attempt_id=attempt_id, symbol=symbol, buy_exchange=buy_exchange, sell_exchange=sell_exchange,
+            outcome=ArbitrageOutcome.NO_TRADE_REFUSED, reason=None,
         )
 
         try:
-            live_guard.assert_arbitrage_allowed(SYMBOL, DIRECTION, requested_notional_per_leg_usdt)
+            live_guard.assert_arbitrage_allowed(symbol, direction, requested_notional_per_leg_usdt)
         except LiveExecutionRefused as exc:
             result.reason = str(exc)
             result.completed_at = time.time()
@@ -256,12 +371,13 @@ class LiveArbitrageExecutor:
 
         live_guard.register_arbitrage_start()
         try:
-            quote = await self._fresh_dual_leg_quote(requested_notional_per_leg_usdt, requested_notional_per_leg_usdt)
-            if quote is None:
+            fresh = await self._fresh_dual_leg_quote(symbol, buy_exchange, sell_exchange, requested_notional_per_leg_usdt, requested_notional_per_leg_usdt)
+            if fresh is None:
                 result.outcome = ArbitrageOutcome.NO_TRADE_UNPROFITABLE
                 result.reason = "fresh dual-leg re-check unavailable (data fetch failed)"
                 result.completed_at = time.time()
                 return result
+            quote, _buy_leg, _sell_leg = fresh
 
             result.predicted_net_profit_usd = quote.net_profit_usd
             result.predicted_fees_usd = quote.buy_fee_usd + quote.sell_fee_usd
@@ -289,9 +405,7 @@ class LiveArbitrageExecutor:
             result.buy_client_order_id = buy_client_order_id
             result.buy_submitted_at = time.time()
             try:
-                buy_ack = await self._binance_trade.place_market_order(
-                    SYMBOL, "BUY", client_order_id=buy_client_order_id, quote_order_qty=requested_notional_per_leg_usdt
-                )
+                await self._place_market_buy(buy_exchange, symbol, requested_notional_per_leg_usdt, buy_client_order_id)
             except Exception as exc:
                 live_guard.engage_kill_switch(f"buy leg submission raised an ambiguous error: {exc}")
                 result.outcome = ArbitrageOutcome.UNKNOWN_BUY_LEG
@@ -300,8 +414,7 @@ class LiveArbitrageExecutor:
                 return result
 
             reached, buy_status = await self._await_terminal(
-                lambda: self._binance_trade.get_order_status(SYMBOL, orig_client_order_id=buy_client_order_id),
-                LEG_CONFIRMATION_TIMEOUT_SECONDS,
+                lambda: self._get_status(buy_exchange, symbol, buy_client_order_id), LEG_CONFIRMATION_TIMEOUT_SECONDS
             )
             if not reached or buy_status is None:
                 live_guard.engage_kill_switch(f"buy leg status unknown after timeout for attempt {attempt_id}")
@@ -310,65 +423,55 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
-            assert isinstance(buy_status, BinanceOrderResult)
-            result.buy_exchange_order_id = str(buy_status.order_id)
-            result.buy_status = buy_status.status
-            result.buy_filled_qty = buy_status.executed_qty
-            result.buy_avg_fill_price = buy_status.average_fill_price()
-            fees_by_asset = buy_status.total_fees_by_asset()
-            non_usdt_fees = {asset: amt for asset, amt in fees_by_asset.items() if asset != "USDT"}
-            if non_usdt_fees:
-                # Binance can charge the fee in a non-quote asset (e.g. BNB
-                # discount, or the base asset itself) — summing those
-                # alongside a USDT amount would silently produce a wrong
-                # USD total, so they're excluded here and logged instead
-                # of pretending the total is precise.
-                logger.warning("live-arbitrage: buy leg fee(s) charged in non-USDT asset(s), excluded from buy_fees_usd: %s", non_usdt_fees)
-            result.buy_fees_usd = fees_by_asset.get("USDT", 0.0)
+            result.buy_exchange_order_id = buy_status.order_id
+            result.buy_status = buy_status.raw_status
+            result.buy_filled_qty = buy_status.filled_qty
+            result.buy_avg_fill_price = buy_status.avg_fill_price
+            result.buy_fees_usd = buy_status.fee_usd
             result.buy_confirmed_at = time.time()
 
-            if buy_status.executed_qty <= 0:
+            if buy_status.filled_qty <= 0:
                 result.outcome = ArbitrageOutcome.NO_FILL
-                result.reason = f"buy leg ended {buy_status.status} with zero fill — nothing to neutralize"
+                result.reason = f"buy leg ended {buy_status.raw_status} with zero fill — nothing to neutralize"
                 result.completed_at = time.time()
                 return result
 
-            bybit_rules = await self._bybit_read.get_symbol_rules(SYMBOL)
-            sell_qty = round_down_to_step(buy_status.executed_qty, bybit_rules.qty_step if bybit_rules is not None else 1.0)
-            if bybit_rules is None or sell_qty < bybit_rules.min_order_qty or sell_qty <= 0:
-                neutralize_result = await self._neutralize_on_binance(buy_status.executed_qty, attempt_id)
-                if neutralize_result is None or not getattr(neutralize_result, "is_filled", False):
-                    live_guard.engage_kill_switch(f"neutralization failed after buy fill too small to hedge on Bybit, attempt {attempt_id}")
+            sell_step = await self._get_step_size(sell_exchange, symbol)
+            sell_qty = round_down_to_step(buy_status.filled_qty, sell_step[0]) if sell_step is not None else 0.0
+            if sell_step is None or sell_qty < sell_step[1] or sell_qty <= 0:
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                if neutralize_result is None or not neutralize_result.is_filled:
+                    live_guard.engage_kill_switch(f"neutralization failed after buy fill too small to hedge on {sell_exchange}, attempt {attempt_id}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
-                    result.reason = "buy leg filled below Bybit's tradable minimum and the Binance-side flatten did not confirm filled"
+                    result.reason = f"buy leg filled below {sell_exchange}'s tradable minimum and the {buy_exchange}-side flatten did not confirm filled"
                 else:
                     result.outcome = ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
-                    result.reason = "buy fill was below Bybit's minimum tradable size — flattened on Binance instead"
-                    result.neutralization_order_id = str(neutralize_result.order_id)
-                    result.neutralization_filled_qty = neutralize_result.executed_qty
+                    result.reason = f"buy fill was below {sell_exchange}'s minimum tradable size — flattened on {buy_exchange} instead"
+                    result.neutralization_order_id = neutralize_result.order_id
+                    result.neutralization_filled_qty = neutralize_result.filled_qty
                 result.completed_at = time.time()
                 return result
 
-            sell_link_id = f"live-{attempt_id}-sell"
-            result.sell_client_order_id = sell_link_id
+            sell_client_order_id = f"live-{attempt_id}-sell"
+            result.sell_client_order_id = sell_client_order_id
             result.sell_submitted_at = time.time()
             try:
-                await self._bybit_trade.place_market_order(SYMBOL, "Sell", qty=sell_qty, order_link_id=sell_link_id)
+                await self._place_market_sell(sell_exchange, symbol, sell_qty, sell_client_order_id)
             except Exception as exc:
-                neutralize_result = await self._neutralize_on_binance(buy_status.executed_qty, attempt_id)
-                if neutralize_result is None or not getattr(neutralize_result, "is_filled", False):
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                if neutralize_result is None or not neutralize_result.is_filled:
                     live_guard.engage_kill_switch(f"neutralization failed after sell leg submission error, attempt {attempt_id}: {exc}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
                 else:
                     result.outcome = ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
-                    result.neutralization_order_id = str(neutralize_result.order_id)
-                    result.neutralization_filled_qty = neutralize_result.executed_qty
+                    result.neutralization_order_id = neutralize_result.order_id
+                    result.neutralization_filled_qty = neutralize_result.filled_qty
                 result.reason = f"sell leg submission raised an ambiguous error: {exc}"
                 result.completed_at = time.time()
                 return result
 
             reached, sell_status = await self._await_terminal(
-                lambda: self._bybit_trade.get_order_status(SYMBOL, order_link_id=sell_link_id), LEG_CONFIRMATION_TIMEOUT_SECONDS
+                lambda: self._get_status(sell_exchange, symbol, sell_client_order_id), LEG_CONFIRMATION_TIMEOUT_SECONDS
             )
             if not reached or sell_status is None:
                 live_guard.engage_kill_switch(f"sell leg status unknown after timeout for attempt {attempt_id} — DO NOT retry the sell leg blindly")
@@ -377,55 +480,46 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
-            assert isinstance(sell_status, BybitOrderStatus)
             result.sell_exchange_order_id = sell_status.order_id
-            result.sell_status = sell_status.order_status
-            result.sell_filled_qty = sell_status.cum_exec_qty
-            result.sell_avg_fill_price = sell_status.avg_price
-            # Assumes Bybit charged the fee in the quote asset (USDT) —
-            # Bybit's spot SELL fee convention, unlike Binance, isn't
-            # broken out by asset in this response; a VIP tier or promo
-            # that changed this would silently skew actual_net_pnl_usd
-            # below, which is why prediction_error_usd is also recorded
-            # (a large, persistent error there is the tell to investigate).
-            result.sell_fees_usd = sell_status.cum_exec_fee
+            result.sell_status = sell_status.raw_status
+            result.sell_filled_qty = sell_status.filled_qty
+            result.sell_avg_fill_price = sell_status.avg_fill_price
+            result.sell_fees_usd = sell_status.fee_usd
             result.sell_confirmed_at = time.time()
 
-            if sell_status.cum_exec_qty <= 0:
-                neutralize_result = await self._neutralize_on_binance(buy_status.executed_qty, attempt_id)
-                if neutralize_result is None or not getattr(neutralize_result, "is_filled", False):
+            if sell_status.filled_qty <= 0:
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                if neutralize_result is None or not neutralize_result.is_filled:
                     live_guard.engage_kill_switch(f"neutralization failed after sell leg rejected, attempt {attempt_id}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
-                    result.reason = "sell leg rejected/expired with zero fill and the Binance-side flatten did not confirm filled"
+                    result.reason = "sell leg rejected/expired with zero fill and the buy-exchange-side flatten did not confirm filled"
                 else:
                     result.outcome = ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
-                    result.reason = "sell leg rejected/expired with zero fill — flattened on Binance"
-                    result.neutralization_order_id = str(neutralize_result.order_id)
-                    result.neutralization_filled_qty = neutralize_result.executed_qty
+                    result.reason = "sell leg rejected/expired with zero fill — flattened on the buy exchange"
+                    result.neutralization_order_id = neutralize_result.order_id
+                    result.neutralization_filled_qty = neutralize_result.filled_qty
                 result.completed_at = time.time()
                 return result
 
             # Any residual (buy filled more than sell could match, e.g.
-            # Bybit only partially filled) is a leftover naked LUNC
-            # position ON BINANCE (that's where the buy happened) and
-            # must be neutralized there too — never left unhedged just
-            # because MOST of the arbitrage worked. Rounded to BINANCE's
-            # own step size (not Bybit's — this residual is sold on the
-            # exchange where it was bought), refetched fresh rather than
-            # reusing the buy leg's rules to avoid any staleness.
-            raw_residual_qty = buy_status.executed_qty - sell_status.cum_exec_qty
+            # the sell exchange only partially filled) is a leftover
+            # naked position on the BUY exchange (that's where it was
+            # acquired) and must be neutralized there too — never left
+            # unhedged just because MOST of the arbitrage worked.
+            raw_residual_qty = buy_status.filled_qty - sell_status.filled_qty
             if raw_residual_qty > 0:
-                binance_info = await self._binance_read.get_exchange_info(symbols=[SYMBOL])
-                binance_rules = parse_binance_symbol_rules(binance_info, SYMBOL)
-                residual_qty = round_down_to_step(raw_residual_qty, binance_rules.step_size)
-                # A residual below Binance's own minimum simply cannot be
-                # sold there and is accepted as unavoidable dust; only
-                # neutralize a residual actually worth acting on.
-                if residual_qty > 0 and residual_qty >= binance_rules.min_qty and residual_qty * (result.buy_avg_fill_price or 0) > 0.01:
-                    await self._neutralize_on_binance(residual_qty, attempt_id)
+                buy_step = await self._get_step_size(buy_exchange, symbol)
+                if buy_step is not None:
+                    residual_qty = round_down_to_step(raw_residual_qty, buy_step[0])
+                    # A residual below the buy exchange's own minimum
+                    # simply cannot be sold there and is accepted as
+                    # unavoidable dust; only neutralize a residual
+                    # actually worth acting on.
+                    if residual_qty > 0 and residual_qty >= buy_step[1] and residual_qty * (result.buy_avg_fill_price or 0) > 0.01:
+                        await self._neutralize(buy_exchange, symbol, residual_qty, attempt_id)
 
-            buy_cost_usd = (result.buy_avg_fill_price or 0) * buy_status.executed_qty + (result.buy_fees_usd or 0)
-            sell_proceeds_usd = (result.sell_avg_fill_price or 0) * sell_status.cum_exec_qty - (result.sell_fees_usd or 0)
+            buy_cost_usd = (result.buy_avg_fill_price or 0) * buy_status.filled_qty + (result.buy_fees_usd or 0)
+            sell_proceeds_usd = (result.sell_avg_fill_price or 0) * sell_status.filled_qty - (result.sell_fees_usd or 0)
             result.actual_net_pnl_usd = sell_proceeds_usd - buy_cost_usd
             result.prediction_error_usd = (
                 result.actual_net_pnl_usd - result.predicted_net_profit_usd if result.predicted_net_profit_usd is not None else None

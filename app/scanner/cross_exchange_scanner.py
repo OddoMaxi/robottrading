@@ -47,14 +47,22 @@ class DirectionQuote:
     quote: DualLegQuote
 
 
-async def scan_symbol(fetcher: MultiExchangeSnapshotFetcher, symbol: str, reference_notional_usd: float = REFERENCE_NOTIONAL_USD) -> list[DirectionQuote]:
-    """Fetches every exchange once (not once per direction) and returns a
-    DirectionQuote for every ordered pair where BOTH sides were reachable
-    — an exchange where the symbol isn't listed or fails to fetch is
-    silently skipped for that pair ('if available', per the directive),
-    never faked."""
+async def scan_symbol(
+    fetcher: MultiExchangeSnapshotFetcher,
+    symbol: str,
+    reference_notional_usd: float = REFERENCE_NOTIONAL_USD,
+    exchanges: tuple[str, ...] = EXCHANGES,
+) -> list[DirectionQuote]:
+    """Fetches every requested exchange once (not once per direction) and
+    returns a DirectionQuote for every ordered pair where BOTH sides were
+    reachable — an exchange where the symbol isn't listed or fails to
+    fetch is silently skipped for that pair ('if available', per the
+    directive), never faked. `exchanges` defaults to all three
+    (Binance/Bybit/OKX, the altcoin scanner's own scope); callers that
+    only trade a subset (e.g. app.execution.live_ranker, Binance+Bybit
+    only — no OKX live-trade client exists) pass a narrower tuple."""
     snapshots: dict[str, SymbolMarketData] = {}
-    for exchange in EXCHANGES:
+    for exchange in exchanges:
         data = await fetcher.fetch(exchange, symbol)
         if data is not None:
             snapshots[exchange] = data

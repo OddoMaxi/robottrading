@@ -1032,6 +1032,7 @@ def render_reality_page() -> None:
     render_phase2_shadow_section()
     render_phase2d_micro_live_section()
     render_phase2e_real_edge_section()
+    render_real_trading_section()
 
 
 # --- PHASE 2C — CONTROLLED PAPER CUTOVER / MASTER MODE (user directive, 2026-08-23) ---
@@ -1376,6 +1377,88 @@ def render_phase2e_real_edge_section() -> None:
     st.caption(
         "Le gate de sécurité (« opportunités qualifiées ») exige net_profit > marge de sécurité, pas seulement > 0 — "
         "la marge est calculée à partir de l'écart-type de l'edge net réellement observé, jamais choisie pour fabriquer un résultat favorable."
+    )
+
+
+# --- PHASE 3 — REAL TRADING, Binance + Bybit (user directive, 2026-08-23) ---
+#
+# Toutes les valeurs viennent de GET /live/dashboard-summary — soldes réels,
+# P&L calculé UNIQUEMENT à partir des fills réels retournés par les
+# exchanges (jamais du moteur paper), coupe-circuit réel. Séparé
+# visuellement des sections PAPER (couleur rouge/orange dédiée) pour
+# qu'aucune valeur ne puisse être confondue avec une simulation.
+
+
+def render_real_trading_section() -> None:
+    summary = data.get_live_dashboard_summary_cached()
+    if not summary.reachable:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">PHASE 3 — REAL TRADING (BINANCE + BYBIT)</div>', unsafe_allow_html=True)
+        st.caption("Moteur injoignable — état du trading réel indisponible.")
+        return
+
+    live_label = "🔴 LIVE TRADING = DISABLED" if not summary.live_trading_enabled else "🟢 LIVE TRADING = ENABLED"
+    st.markdown(
+        '<div style="margin-top:22px;padding:14px;border:2px solid #dc2626;border-radius:14px;background:rgba(220,38,38,0.06);">'
+        '<div style="font-size:1.1rem;font-weight:700;color:#dc2626;">PHASE 3 — REAL TRADING — BINANCE + BYBIT</div>'
+        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">Argent RÉEL — distinct des sections PAPER ci-dessus. '
+        "P&L calculé exclusivement depuis les fills réels des exchanges.</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f'<span class="simple-status-pill simple-status-down" style="display:inline-block;margin:10px 0;">{live_label}</span>', unsafe_allow_html=True)
+    if summary.kill_switch_engaged:
+        st.markdown(
+            f'<div class="simple-card" style="border-color:#ef4444;"><div class="simple-card-sub bad">🚨 Coupe-circuit LIVE engagé : {summary.kill_switch_reason}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    win_rate_display = f"{summary.win_rate_pct:.1f} %" if summary.win_rate_pct is not None else "—"
+    avg_profit_display = f"{summary.average_profit_per_trade_usd:+.4f} $" if summary.average_profit_per_trade_usd is not None else "—"
+    best = summary.current_best_opportunity
+
+    render_stat_cards(
+        [
+            {"label": "Capital réel cible (total)", "value": f"{summary.total_real_capital_target_usdt:,.0f} $".replace(",", " ")},
+            {"label": "Solde Binance", "value": f"{summary.binance_balance_usdt:,.2f} $".replace(",", " "), "sub": f"cible {summary.binance_target_capital_usdt:.0f} $"},
+            {"label": "Solde Bybit", "value": f"{summary.bybit_balance_usdt:,.2f} $".replace(",", " "), "sub": f"cible {summary.bybit_target_capital_usdt:.0f} $"},
+            {"label": "Capital disponible", "value": f"{summary.available_capital_usdt:,.2f} $".replace(",", " ")},
+            {"label": "P&L réel — aujourd'hui", "value": f"{summary.today_real_pnl_usd:+.4f} $"},
+            {"label": "P&L réel — total", "value": f"{summary.total_real_pnl_usd:+.4f} $"},
+            {"label": "Trades réels", "value": f"{summary.real_trades:,}".replace(",", " ")},
+            {"label": "Gagnants / perdants", "value": f"{summary.wins} / {summary.losses}"},
+            {"label": "Taux de réussite", "value": win_rate_display},
+            {"label": "Frais réels totaux", "value": f"{summary.total_real_fees_usd:.4f} $"},
+            {"label": "Profit moyen / trade", "value": avg_profit_display},
+            {"label": "Ordres actifs", "value": f"{summary.active_orders}"},
+            {"label": "Real orders placed", "value": f"{summary.real_orders_placed}"},
+        ]
+    )
+
+    if best is not None:
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">Meilleure opportunité actuelle</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="simple-perf-row"><span class="k">{best["symbol"]} — {best["buy_exchange"]}→{best["sell_exchange"]}</span>'
+            f'<span class="v">profit net {best["net_profit_usd"]:+.4f} $ · {best["net_return_bps"]:+.1f} bps · '
+            f'{"pré-positionné" if best["prepositioned"] else "PAS pré-positionné"}</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Aucune opportunité qualifiée actuellement (aucun candidat pré-positionné avec un edge net réel positif).")
+
+    if summary.last_trades:
+        with st.expander("Derniers trades réels"):
+            for t in summary.last_trades:
+                pnl_str = f"{t.actual_net_pnl_usd:+.4f} $" if t.actual_net_pnl_usd is not None else "—"
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{t.symbol} — {t.buy_exchange}→{t.sell_exchange} ({t.outcome})</span>'
+                    f'<span class="v">{pnl_str} · {t.started_at}</span></div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("Aucun trade réel enregistré pour l'instant — la table reste vide tant qu'aucun ordre réel n'a été autorisé et exécuté.")
+
+    st.caption(
+        "Les données PAPER (sections ci-dessus) et RÉELLES (cette section) restent strictement séparées — "
+        "aucune donnée paper n'alimente jamais ce P&L, et inversement."
     )
 
 

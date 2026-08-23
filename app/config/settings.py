@@ -82,15 +82,28 @@ class Settings(BaseSettings):
     # sizing-time check above.
     max_live_capital_usdt: float = 10.0
 
-    # PHASE 3A (user directive, 2026-08-23) — CONTROLLED MICRO-LIVE,
-    # LUNCUSDT Binance(buy)->Bybit(sell) ONLY. Every one of these is
-    # checked by app.execution.live_guard before app.execution.
-    # live_arbitrage_executor is allowed to submit even the pre-trade
-    # dual-leg re-check, let alone an order — narrowing the scope here is
-    # itself a safety control, not just documentation of intent.
-    live_symbol_allowlist: list[str] = ["LUNCUSDT"]
-    live_direction: str = "BINANCE_BUY_BYBIT_SELL"
-    max_notional_per_leg_usdt: float = 10.0
+    # PHASE 3A (user directive, 2026-08-23) — CONTROLLED MICRO-LIVE. Every
+    # one of these is checked by app.execution.live_guard before
+    # app.execution.live_arbitrage_executor is allowed to submit even the
+    # pre-trade dual-leg re-check, let alone an order.
+    #
+    # PHASE 3 (user directive, 2026-08-23) — "ne hardcode pas ZAMA, TOM,
+    # LUNC ou une liste arbitraire": live_symbol_allowlist now defaults to
+    # EMPTY, meaning "no fixed restriction — any symbol in the
+    # dynamically-discovered Binance∩Bybit common universe is eligible."
+    # An operator can still narrow it back down by setting this env var
+    # explicitly; the code itself never populates it. See
+    # app.execution.live_guard.LiveTradingGuard.assert_arbitrage_allowed
+    # for the empty-means-unrestricted semantics.
+    live_symbol_allowlist: list[str] = []
+    # Both directions are live-eligible now (item 2: "Scanner les deux
+    # directions") — no longer a single fixed string.
+    live_allowed_directions: list[str] = ["BINANCE_BUY_BYBIT_SELL", "BYBIT_BUY_BINANCE_SELL"]
+    # Phase 3, item 6: start small and require explicit authorization to
+    # raise — this codebase never raises it itself (see
+    # app.reporting.live_validation_score for the recommendation-only
+    # ELIGIBLE_FOR_SIZE_INCREASE signal).
+    max_notional_per_leg_usdt: float = 5.0
     max_concurrent_live_arbitrages: int = 1
     # Self-documenting assertion, not a remotely-enforceable setting (this
     # app has no way to change what's provisioned on the exchange side) —
@@ -98,6 +111,16 @@ class Settings(BaseSettings):
     # BybitApiKeyInfo.has_withdrawal_permission() before arming the live
     # executor; see app.execution.live_readiness_gate.
     withdrawals_required: bool = False
+
+    # PHASE 3 (user directive, 2026-08-23) — capital POOL targets, not
+    # order sizes and NOT assumed balances. The real balance is always
+    # read fresh from each exchange (app.execution.binance_account_client/
+    # app.execution.bybit_client) — these numbers are only ever used to
+    # LABEL the dashboard's "target" column, never substituted for a real
+    # balance read, and never used to gate execution.
+    total_real_capital_usdt: float = 160.0
+    binance_target_capital_usdt: float = 100.0
+    bybit_target_capital_usdt: float = 60.0
 
 
 @lru_cache

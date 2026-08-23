@@ -82,15 +82,23 @@ def test_execute_one_arbitrage_checks_live_guard_before_any_order_call():
         node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute_one_arbitrage"
     )
     # the assert_arbitrage_allowed call must appear textually before any
-    # place_market_order call within the function
+    # order-submission call within the function — PHASE 3 (user directive,
+    # 2026-08-23) generalized the executor to dispatch per-exchange via
+    # _place_market_buy/_place_market_sell instead of calling
+    # place_market_order directly, so those are the names checked here now.
     calls_in_order = [
         node.func.attr
         for node in ast.walk(func)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("assert_arbitrage_allowed", "place_market_order")
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("assert_arbitrage_allowed", "_place_market_buy", "_place_market_sell")
     ]
     assert "assert_arbitrage_allowed" in calls_in_order, "execute_one_arbitrage never calls live_guard.assert_arbitrage_allowed"
-    assert calls_in_order.index("assert_arbitrage_allowed") < calls_in_order.index("place_market_order"), (
-        "assert_arbitrage_allowed must be checked before the first place_market_order call"
+    first_order_call_index = min(
+        i for i, name in enumerate(calls_in_order) if name in ("_place_market_buy", "_place_market_sell")
+    )
+    assert calls_in_order.index("assert_arbitrage_allowed") < first_order_call_index, (
+        "assert_arbitrage_allowed must be checked before the first order-submission call"
     )
 
 
@@ -120,9 +128,12 @@ def test_settings_defaults_are_the_locked_down_ones():
 
     defaults = Settings(_env_file=None)
     assert defaults.live_trading_enabled is False
-    assert defaults.live_symbol_allowlist == ["LUNCUSDT"]
-    assert defaults.live_direction == "BINANCE_BUY_BYBIT_SELL"
-    assert defaults.max_notional_per_leg_usdt == 10.0
+    # PHASE 3 (user directive, 2026-08-23): "ne hardcode pas ... une liste
+    # arbitraire" — empty means unrestricted-by-symbol-list, not
+    # "nothing allowed" (app.execution.live_guard treats empty specially).
+    assert defaults.live_symbol_allowlist == []
+    assert set(defaults.live_allowed_directions) == {"BINANCE_BUY_BYBIT_SELL", "BYBIT_BUY_BINANCE_SELL"}
+    assert defaults.max_notional_per_leg_usdt == 5.0
     assert defaults.max_concurrent_live_arbitrages == 1
     assert defaults.withdrawals_required is False
 

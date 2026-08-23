@@ -11,14 +11,19 @@ from app.database.models import OpportunityRecord
 from app.database.repository import log_system_event
 from app.database.session import get_session
 from app.execution.live_guard import LiveExecutionRefused, live_guard
+from app.execution.live_preflight import build_multi_symbol_preflight_report
+from app.execution.live_ranker import rank_live_opportunities
 from app.execution.live_readiness_gate import build_first_live_gate_report
+from app.execution.live_universe import live_universe_builder
 from app.execution.micro_live import micro_live_orchestrator, micro_live_state
 from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
 from app.reporting.altcoin_scan_report import AltcoinScanReport, DirectionSummary, build_altcoin_scan_report, market_priority_score
 from app.reporting.dual_leg_edge import DualLegEdgeReport, build_dual_leg_edge_report
+from app.reporting.live_validation_score import build_live_validation_score
 from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
+from app.reporting.real_trading_summary import build_real_trading_summary
 from app.risk.risk_engine import risk_engine
 from app.simulation.live_stress_test import run_live_stress_test
 
@@ -408,6 +413,177 @@ async def live_first_gate_report() -> dict:
         "capital_pre_positioned_detail": report.capital_pre_positioned_detail,
         "ready_for_first_real_arbitrage": report.ready_for_first_real_arbitrage,
         "proposed_first_trade_size_usdt": report.proposed_first_trade_size_usdt,
+        "live_trading_enabled": live_guard.live_trading_enabled,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/universe")
+async def live_universe() -> dict:
+    """PHASE 3 (user directive, 2026-08-23) — the dynamically-discovered
+    Binance∩Bybit tradable Spot USDT universe. Read-only, no order."""
+    universe = await live_universe_builder.get_universe()
+    return {
+        "common_symbols": universe.common_symbols,
+        "common_pairs_count": len(universe.common_symbols),
+        "binance_symbol_count": universe.binance_symbol_count,
+        "bybit_symbol_count": universe.bybit_symbol_count,
+        "fetched_at": universe.fetched_at,
+        "real_orders_placed": 0,
+    }
+
+
+def _serialize_ranked(r) -> dict:
+    q = r.quote
+    p = r.prepositioning
+    return {
+        "symbol": r.symbol,
+        "buy_exchange": r.buy_exchange,
+        "sell_exchange": r.sell_exchange,
+        "net_profit_usd": q.net_profit_usd,
+        "net_return_bps": q.net_return_bps,
+        "gross_spread_pct": q.gross_spread_pct,
+        "dual_leg_latency_ms": q.dual_leg_latency_ms,
+        "executable": q.executable,
+        "reason": q.reason,
+        "required_buy_balance_usdt": p.required_buy_balance_usdt,
+        "required_sell_asset": p.required_sell_asset,
+        "required_sell_qty": p.required_sell_qty,
+        "available_buy_balance_usdt": p.available_buy_balance_usdt,
+        "available_sell_balance": p.available_sell_balance,
+        "prepositioned": p.prepositioned,
+        "executable_now": p.executable_now,
+        "score": r.score,
+    }
+
+
+@router.get("/live/ranker")
+async def live_ranker(notional_per_leg_usdt: float | None = None, top: int = 20) -> dict:
+    """PHASE 3 — MASTER's live opportunity ranker (user directive,
+    2026-08-23). Read-only, no order. real_orders_placed is always 0."""
+    settings = get_settings()
+    notional = notional_per_leg_usdt if notional_per_leg_usdt is not None else settings.max_notional_per_leg_usdt
+    ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=notional)
+    return {
+        "requested_notional_per_leg_usdt": notional,
+        "total_evaluated": len(ranked),
+        "qualified": len([r for r in ranked if r.score > 0]),
+        "top_opportunities": [_serialize_ranked(r) for r in ranked[:top]],
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/validation-score")
+async def live_validation_score(session: AsyncSession = Depends(get_session)) -> dict:
+    """PHASE 3, item 7 (user directive, 2026-08-23) — predicted vs actual
+    from the Profit Reality Ledger. Recommendation only — never
+    auto-applies a capital increase. Read-only."""
+    report = await build_live_validation_score(session)
+    return {
+        "total_attempts": report.total_attempts,
+        "completed_trades": report.completed_trades,
+        "profitable_trades": report.profitable_trades,
+        "profitable_rate_pct": report.profitable_rate_pct,
+        "mean_actual_net_pnl_usd": report.mean_actual_net_pnl_usd,
+        "mean_prediction_error_usd": report.mean_prediction_error_usd,
+        "mean_abs_prediction_error_usd": report.mean_abs_prediction_error_usd,
+        "neutralization_failures": report.neutralization_failures,
+        "unknown_leg_outcomes": report.unknown_leg_outcomes,
+        "eligible_for_size_increase": report.eligible_for_size_increase,
+        "eligibility_reason": report.eligibility_reason,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/multi-symbol-preflight")
+async def live_multi_symbol_preflight(notional_per_leg_usdt: float | None = None) -> dict:
+    """PHASE 3, items 11+13 (user directive, 2026-08-23) — FINAL
+    MULTI-SYMBOL LIVE PREFLIGHT. Read-only: account permissions, real
+    balances, dynamic universe, MASTER ranker, capital pre-positioning.
+    Never places an order regardless of the verdict."""
+    report = await build_multi_symbol_preflight_report(requested_notional_per_leg_usdt=notional_per_leg_usdt)
+    gate = report.account_gate
+    best = report.best_candidate
+    return {
+        "binance_trade_api_ready": gate.binance_trade_api_ready,
+        "bybit_trade_api_ready": gate.bybit_trade_api_ready,
+        "withdrawals_disabled": gate.withdrawals_disabled,
+        "binance_usdt_balance": gate.binance_usdt_balance,
+        "bybit_lunc_balance": gate.bybit_lunc_balance,
+        "common_pairs_scanned": len(report.universe.common_symbols),
+        "binance_symbol_count": report.universe.binance_symbol_count,
+        "bybit_symbol_count": report.universe.bybit_symbol_count,
+        "dynamic_scanner_ready": report.dynamic_scanner_ready,
+        "dynamic_scanner_detail": report.dynamic_scanner_detail,
+        "master_ranker_ready": report.master_ranker_ready,
+        "master_ranker_detail": report.master_ranker_detail,
+        "qualified_opportunities": report.qualified_opportunities,
+        "best_candidate": _serialize_ranked(best) if best is not None else None,
+        "leg_risk_protection_pass": gate.leg_risk_protection_pass,
+        "live_kill_switch_pass": gate.live_kill_switch_pass,
+        "real_pnl_ledger_ready": gate.real_pnl_ledger_ready,
+        "live_trading_enabled": live_guard.live_trading_enabled,
+        "ready_to_start": report.ready_to_start,
+        "ready_reason": report.ready_reason,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/dashboard-summary")
+async def live_dashboard_summary(session: AsyncSession = Depends(get_session)) -> dict:
+    """PHASE 3, item 10 — REAL TRADING dashboard section (user directive,
+    2026-08-23). Combines real balances, the Profit Reality Ledger P&L
+    stats, MASTER's current best opportunity, and live/kill-switch
+    status — every figure here is either read live from the exchanges or
+    computed from ACTUAL fills, never from the paper engine. Read-only."""
+    settings = get_settings()
+    gate = await build_first_live_gate_report()
+    trading = await build_real_trading_summary(session)
+
+    best = None
+    try:
+        ranked = await rank_live_opportunities(requested_notional_per_leg_usdt=settings.max_notional_per_leg_usdt, max_symbols=30)
+        qualified = [r for r in ranked if r.score > 0]
+        best = qualified[0] if qualified else None
+    except Exception:
+        best = None
+
+    binance_balance = gate.binance_usdt_balance or 0.0
+    bybit_balance = 0.0
+    try:
+        from app.execution.bybit_client import BybitClient, parse_wallet_balance
+
+        wallet = await BybitClient().get_wallet_balance()
+        bybit_balance = parse_wallet_balance(wallet, "USDT")
+    except Exception:
+        bybit_balance = 0.0
+
+    return {
+        "total_real_capital_target_usdt": settings.total_real_capital_usdt,
+        "binance_target_capital_usdt": settings.binance_target_capital_usdt,
+        "bybit_target_capital_usdt": settings.bybit_target_capital_usdt,
+        "binance_balance_usdt": binance_balance,
+        "bybit_balance_usdt": bybit_balance,
+        "available_capital_usdt": binance_balance + bybit_balance,
+        "today_real_pnl_usd": trading.today_real_pnl_usd,
+        "total_real_pnl_usd": trading.total_real_pnl_usd,
+        "real_trades": trading.total_real_trades,
+        "wins": trading.wins,
+        "losses": trading.losses,
+        "win_rate_pct": trading.win_rate_pct,
+        "total_real_fees_usd": trading.total_real_fees_usd,
+        "average_profit_per_trade_usd": trading.average_profit_per_trade_usd,
+        "current_best_opportunity": _serialize_ranked(best) if best is not None else None,
+        "active_orders": live_guard.in_flight_count,
+        "last_trades": [
+            {
+                "symbol": t.symbol, "buy_exchange": t.buy_exchange, "sell_exchange": t.sell_exchange,
+                "outcome": t.outcome, "actual_net_pnl_usd": t.actual_net_pnl_usd, "started_at": t.started_at.isoformat(),
+            }
+            for t in trading.last_trades
+        ],
+        "kill_switch_engaged": live_guard.kill_switch_engaged,
+        "kill_switch_reason": live_guard.kill_switch_reason,
         "live_trading_enabled": live_guard.live_trading_enabled,
         "real_orders_placed": 0,
     }

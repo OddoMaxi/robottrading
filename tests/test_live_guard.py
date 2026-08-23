@@ -62,7 +62,7 @@ def _arb_guard(**overrides) -> LiveTradingGuard:
         live_trading_enabled=True,
         max_live_capital_usdt=10.0,
         symbol_allowlist=["LUNCUSDT"],
-        direction="BINANCE_BUY_BYBIT_SELL",
+        allowed_directions=["BINANCE_BUY_BYBIT_SELL"],
         max_notional_per_leg_usdt=10.0,
         max_concurrent_arbitrages=1,
     )
@@ -83,8 +83,21 @@ def test_assert_arbitrage_allowed_refuses_symbol_outside_allowlist():
 
 def test_assert_arbitrage_allowed_refuses_wrong_direction():
     guard = _arb_guard()
-    with pytest.raises(LiveExecutionRefused, match="does not match configured live_direction"):
+    with pytest.raises(LiveExecutionRefused, match="not in allowed_directions"):
         guard.assert_arbitrage_allowed("LUNCUSDT", "BYBIT_BUY_BINANCE_SELL", 10.0)
+
+
+def test_assert_arbitrage_allowed_empty_symbol_allowlist_means_unrestricted():
+    """PHASE 3 (user directive, 2026-08-23): 'ne hardcode pas ... une
+    liste arbitraire' — an empty allowlist must allow ANY symbol, not
+    reject everything."""
+    guard = _arb_guard(symbol_allowlist=[])
+    guard.assert_arbitrage_allowed("SOMENEWCOINUSDT", "BINANCE_BUY_BYBIT_SELL", 5.0)  # must not raise
+
+
+def test_assert_arbitrage_allowed_empty_directions_means_unrestricted():
+    guard = _arb_guard(allowed_directions=[])
+    guard.assert_arbitrage_allowed("LUNCUSDT", "BYBIT_BUY_BINANCE_SELL", 5.0)  # must not raise
 
 
 def test_assert_arbitrage_allowed_refuses_above_notional_cap():

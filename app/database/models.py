@@ -539,6 +539,8 @@ class LiveArbitrageExecutionRecord(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     attempt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, index=True)
     symbol: Mapped[str]
+    buy_exchange: Mapped[str] = mapped_column(default="binance")
+    sell_exchange: Mapped[str] = mapped_column(default="bybit")
     outcome: Mapped[str]
     reason: Mapped[str | None]
     started_at: Mapped[datetime]

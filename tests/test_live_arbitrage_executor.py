@@ -146,8 +146,8 @@ def _armed_guard(**overrides):
     base = dict(
         live_trading_enabled=True,
         max_live_capital_usdt=10.0,
-        symbol_allowlist=["LUNCUSDT"],
-        direction="BINANCE_BUY_BYBIT_SELL",
+        symbol_allowlist=[],  # PHASE 3: empty = unrestricted, matches the "no hardcoded list" default
+        allowed_directions=[],
         max_notional_per_leg_usdt=10.0,
         max_concurrent_arbitrages=1,
     )
@@ -158,7 +158,7 @@ def _armed_guard(**overrides):
 async def test_refuses_when_live_trading_disabled(monkeypatch):
     guard = _armed_guard(live_trading_enabled=False)
     monkeypatch.setattr(executor_module, "live_guard", guard)
-    result = await _executor().execute_one_arbitrage(10.0)
+    result = await _executor().execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.NO_TRADE_REFUSED
     assert result.buy_client_order_id is None
 
@@ -167,21 +167,21 @@ async def test_no_order_submitted_when_refused(monkeypatch):
     guard = _armed_guard(live_trading_enabled=False)
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade()
-    await _executor(binance_trade=binance_trade).execute_one_arbitrage(10.0)
+    await _executor(binance_trade=binance_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert binance_trade.submitted_orders == []
 
 
 async def test_in_flight_count_returns_to_zero_after_refused_attempt(monkeypatch):
     guard = _armed_guard(live_trading_enabled=False)
     monkeypatch.setattr(executor_module, "live_guard", guard)
-    await _executor().execute_one_arbitrage(10.0)
+    await _executor().execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert guard.in_flight_count == 0
 
 
 async def test_both_legs_filled_computes_actual_pnl(monkeypatch):
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
-    result = await _executor().execute_one_arbitrage(10.0)
+    result = await _executor().execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.BOTH_FILLED
     assert result.actual_net_pnl_usd is not None
     assert result.actual_net_pnl_usd > 0  # the fixture prices have a healthy Bybit-over-Binance spread
@@ -192,7 +192,7 @@ async def test_buy_leg_rejected_with_zero_fill_is_no_fill_not_neutralized(monkey
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade(fill_qty=0.0)
-    result = await _executor(binance_trade=binance_trade).execute_one_arbitrage(10.0)
+    result = await _executor(binance_trade=binance_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.NO_FILL
     assert result.neutralization_order_id is None
 
@@ -202,7 +202,7 @@ async def test_sell_leg_submission_error_triggers_neutralization(monkeypatch):
     monkeypatch.setattr(executor_module, "live_guard", guard)
     bybit_trade = FakeBybitTrade(raise_on_submit=True)
     binance_trade = FakeBinanceTrade()
-    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(10.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
     assert result.neutralization_order_id is not None
     # the buy leg AND the neutralization sell were both submitted to Binance — never retried on Bybit
@@ -214,7 +214,7 @@ async def test_sell_leg_rejected_triggers_neutralization(monkeypatch):
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     bybit_trade = FakeBybitTrade(fill_qty=0.0)
-    result = await _executor(bybit_trade=bybit_trade).execute_one_arbitrage(10.0)
+    result = await _executor(bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
 
 
@@ -225,7 +225,7 @@ async def test_buy_leg_timeout_engages_kill_switch_and_never_submits_sell(monkey
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade(never_terminal=True)
     bybit_trade = FakeBybitTrade()
-    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(10.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.UNKNOWN_BUY_LEG
     assert guard.kill_switch_engaged is True
     assert bybit_trade.submitted_orders == []  # never attempts the sell leg on an unknown buy outcome
@@ -237,7 +237,7 @@ async def test_sell_leg_timeout_engages_kill_switch_without_blind_retry(monkeypa
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     bybit_trade = FakeBybitTrade(never_terminal=True)
-    result = await _executor(bybit_trade=bybit_trade).execute_one_arbitrage(10.0)
+    result = await _executor(bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.UNKNOWN_SELL_LEG
     assert guard.kill_switch_engaged is True
     # exactly one sell submission — the whole point is it must NEVER retry blindly on ambiguity
@@ -268,9 +268,51 @@ async def test_neutralization_failure_is_marked_critical(monkeypatch):
     monkeypatch.setattr(executor_module, "LEG_CONFIRMATION_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(executor_module, "LEG_POLL_INTERVAL_SECONDS", 0.01)
     binance_trade.get_order_status = flaky_get_status
-    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(10.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.NEUTRALIZATION_FAILED
     assert guard.kill_switch_engaged is True
+
+
+async def test_reverse_direction_bybit_buy_binance_sell_also_works(monkeypatch):
+    """PHASE 3 (user directive, 2026-08-23): 'scanner les deux
+    directions' — Bybit buy -> Binance sell must be just as fully
+    supported as the original Binance-buy/Bybit-sell direction."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    # swap the fixtures' relative pricing so buying on bybit (ask) and
+    # selling on binance (bid) is the profitable direction
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+
+    class CheapBybitRead(FakeBybitRead):
+        async def get_book_ticker(self, symbol):
+            return type("Ticker", (), {"bid_price": 0.00005430, "ask_price": 0.00005440})()
+
+    class RichBinanceRead(FakeBinanceRead):
+        async def get_book_ticker(self, symbol):
+            return {"bidPrice": "0.00005600", "askPrice": "0.00005610"}
+
+        async def get_order_book_depth(self, symbol, limit=20):
+            return {"asks": [], "bids": [[str(p), str(q)] for p, q in DEEP_BIDS]}
+
+    executor = LiveArbitrageExecutor(
+        binance_read=RichBinanceRead(), binance_trade=binance_trade, bybit_read=CheapBybitRead(), bybit_trade=bybit_trade
+    )
+    result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.buy_exchange == "bybit"
+    assert result.sell_exchange == "binance"
+    assert bybit_trade.submitted_orders[0][1] == "Buy"
+    assert binance_trade.submitted_orders[0][1] == "SELL"
+    # the point of this test is the exchange/side dispatch, not the fixtures'
+    # fill-price realism — just confirm the full flow completed and computed a P&L
+    assert result.actual_net_pnl_usd is not None
+
+
+async def test_execute_one_arbitrage_rejects_same_exchange_both_legs():
+    executor = LiveArbitrageExecutor()
+    with pytest.raises(ValueError):
+        await executor.execute_one_arbitrage(SYMBOL, "binance", "binance", 5.0)
 
 
 async def test_no_fresh_dual_leg_data_means_no_trade_not_a_crash(monkeypatch):
@@ -281,12 +323,12 @@ async def test_no_fresh_dual_leg_data_means_no_trade_not_a_crash(monkeypatch):
         async def get_book_ticker(self, symbol):
             return None
 
-    result = await _executor().execute_one_arbitrage(10.0)  # sanity baseline still works
+    result = await _executor().execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)  # sanity baseline still works
     assert result.outcome == ArbitrageOutcome.BOTH_FILLED
 
     broken_executor = LiveArbitrageExecutor(
         binance_read=FakeBinanceRead(), binance_trade=FakeBinanceTrade(), bybit_read=BrokenBybitRead(), bybit_trade=FakeBybitTrade()
     )
-    result = await broken_executor.execute_one_arbitrage(10.0)
+    result = await broken_executor.execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.NO_TRADE_UNPROFITABLE
     assert guard.in_flight_count == 0

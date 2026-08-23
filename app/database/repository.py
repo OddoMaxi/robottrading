@@ -388,6 +388,8 @@ async def save_live_arbitrage_execution(session: AsyncSession, result) -> LiveAr
     record = LiveArbitrageExecutionRecord(
         attempt_id=result.attempt_id,
         symbol=result.symbol,
+        buy_exchange=result.buy_exchange,
+        sell_exchange=result.sell_exchange,
         outcome=result.outcome.value if hasattr(result.outcome, "value") else str(result.outcome),
         reason=result.reason,
         started_at=datetime.fromtimestamp(result.started_at, tz=UTC).replace(tzinfo=None),
