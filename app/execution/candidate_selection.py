@@ -132,6 +132,60 @@ def classify_candidate(
 
 
 @dataclass(slots=True)
+class TopupPlan:
+    should_topup: bool
+    topup_notional_usdt: float
+    reason: str
+
+
+def compute_inventory_topup_plan(
+    *,
+    classification_status: CandidateStatus,
+    sell_available_qty: float,
+    sell_price: float,
+    sell_min_notional: float,
+    max_topup_usdt: float,
+) -> TopupPlan:
+    """Pure function (user directive, 2026-08-24, INVENTORY RECYCLING /
+    item 5): after one cycle, a symbol's sell-side residual routinely
+    falls below MIN_NOTIONAL (dust) without hitting zero -- classify_
+    candidate correctly reports BELOW_MIN_NOTIONAL for that, but nothing
+    previously let the batch top the position back up rather than
+    treating it as permanently spent for the rest of the session.
+
+    Only ever applies to an ALREADY-BELOW_MIN_NOTIONAL classification --
+    never overrides any other status, and is not itself a fresh edge
+    check: the caller must still re-run classify_candidate against the
+    real combined balance after any actual top-up fill before treating
+    the symbol as executable again (constitute_inventory does its own
+    post-fill edge revalidation regardless). The requested top-up is
+    only ever the real shortfall to a modest target above the floor
+    (1.5x MIN_NOTIONAL, so the position does not immediately dip back
+    under it after the very next sell) -- existing dust always counts
+    toward that target, this never blindly requests the full cap."""
+    if classification_status != CandidateStatus.BELOW_MIN_NOTIONAL:
+        return TopupPlan(False, 0.0, "not applicable -- classification is not BELOW_MIN_NOTIONAL")
+    if sell_price <= 0 or sell_min_notional <= 0:
+        return TopupPlan(False, 0.0, "no valid price/min_notional to plan a top-up against")
+
+    current_value_usdt = sell_available_qty * sell_price
+    target_notional_usdt = sell_min_notional * 1.5
+    shortfall_usdt = target_notional_usdt - current_value_usdt
+    if shortfall_usdt <= 0:
+        return TopupPlan(
+            False, 0.0,
+            f"current dust ({current_value_usdt} USDT) already at/above the target ({target_notional_usdt} USDT) -- "
+            "BELOW_MIN_NOTIONAL must be from a buy-side balance or common-qty constraint, not sell-side dust",
+        )
+    if shortfall_usdt > max_topup_usdt:
+        return TopupPlan(False, 0.0, f"shortfall {shortfall_usdt} USDT exceeds max_topup_usdt cap {max_topup_usdt} USDT")
+    return TopupPlan(
+        True, round(shortfall_usdt, 2),
+        f"topping up {round(shortfall_usdt, 2)} USDT to reach target {target_notional_usdt} USDT (current dust worth {current_value_usdt} USDT)",
+    )
+
+
+@dataclass(slots=True)
 class CandidateInput:
     symbol: str
     buy_exchange: str

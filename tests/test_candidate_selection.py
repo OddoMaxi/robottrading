@@ -6,6 +6,7 @@ from app.execution.candidate_selection import (
     CandidateRejectionCache,
     CandidateStatus,
     classify_candidate,
+    compute_inventory_topup_plan,
     select_best_candidate,
 )
 
@@ -188,6 +189,65 @@ def test_select_best_candidate_returns_none_when_nothing_is_selectable():
     a = CandidateInput("A/USDT", "binance", "bybit", CandidateClassification(CandidateStatus.BELOW_MIN_NOTIONAL, "x", 0.0))
     b = CandidateInput("B/USDT", "binance", "bybit", CandidateClassification(CandidateStatus.EDGE_TOO_LOW, "x", 0.0))
     assert select_best_candidate([a, b]) is None
+
+
+# ---- compute_inventory_topup_plan (user directive, 2026-08-24, INVENTORY
+# RECYCLING / item 5) --------------------------------------------------------
+
+
+def test_topup_not_applicable_to_a_non_below_min_notional_status():
+    plan = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.EXECUTABLE_NOW, sell_available_qty=1000.0, sell_price=0.003, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    assert plan.should_topup is False
+
+
+def test_topup_recommended_for_real_rvn_style_dust():
+    """The exact real scenario this closes: 84.5821 RVN worth ~0.27 USDT
+    against a 5.0 USDT floor -- a real, boundable top-up should be
+    recommended, not a permanent write-off of the symbol."""
+    plan = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=84.5821, sell_price=0.0032, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    assert plan.should_topup is True
+    assert 0 < plan.topup_notional_usdt <= 20.0
+    # Target is 1.5x the floor (7.5 USDT) minus the ~0.27 USDT of existing dust.
+    assert plan.topup_notional_usdt == pytest.approx(7.5 - 84.5821 * 0.0032, abs=0.01)
+
+
+def test_topup_existing_dust_counts_toward_the_target():
+    smaller_shortfall = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=1000.0, sell_price=0.003, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    larger_shortfall = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=10.0, sell_price=0.003, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    assert smaller_shortfall.topup_notional_usdt < larger_shortfall.topup_notional_usdt
+
+
+def test_topup_refused_when_shortfall_exceeds_cap():
+    plan = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=0.0, sell_price=0.003, sell_min_notional=100.0, max_topup_usdt=20.0
+    )
+    assert plan.should_topup is False
+    assert "exceeds" in plan.reason
+
+
+def test_topup_refused_when_dust_already_above_target():
+    """A BELOW_MIN_NOTIONAL verdict driven by a buy-side/common-qty
+    constraint rather than sell-side dust must not trigger a pointless
+    top-up request."""
+    plan = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=10000.0, sell_price=0.003, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    assert plan.should_topup is False
+
+
+def test_topup_zero_price_is_refused_not_a_crash():
+    plan = compute_inventory_topup_plan(
+        classification_status=CandidateStatus.BELOW_MIN_NOTIONAL, sell_available_qty=100.0, sell_price=0.0, sell_min_notional=5.0, max_topup_usdt=20.0
+    )
+    assert plan.should_topup is False
 
 
 def test_select_best_candidate_prefers_first_selectable_in_ranked_order():
