@@ -60,6 +60,14 @@ class DirectionSummary:
     continuations: int
     best_observed_at: datetime
     status: OpportunityStatus
+    # INVENTORY MANAGER V2 (user directive, 2026-08-24) — a mean can hide
+    # a distribution dominated by one lucky tick; median/P10/min give the
+    # Inventory Score a much harder-to-fool view of the TYPICAL and
+    # WORST-CASE edge, not just the average.
+    net_profit_per_1000usdt_median: float = 0.0
+    net_profit_per_1000usdt_p10: float = 0.0  # 10th percentile — "worst-case-but-not-outlier" edge
+    net_profit_per_1000usdt_min: float = 0.0
+    available_depth_usd_mean: float = 0.0
 
 
 @dataclass(slots=True)
@@ -88,10 +96,20 @@ def _classify(positive_rate_pct: float, net_profit_per_1000usdt_mean: float, mea
     return OpportunityStatus.WEAK
 
 
+def _p10(sorted_values: list[float]) -> float:
+    """10th percentile — statistics.quantiles needs >=2 points; with
+    fewer, the minimum IS the worst-case-so-far, which is the honest
+    answer rather than an invented decile."""
+    if len(sorted_values) < 2:
+        return sorted_values[0] if sorted_values else 0.0
+    return statistics.quantiles(sorted_values, n=10, method="inclusive")[0]
+
+
 def _summarize_direction(rows: list[AltcoinScanObservationRecord]) -> DirectionSummary:
     gross = [float(r.gross_spread_pct) for r in rows]
     net_pct = [float(r.net_return_bps) / 100 for r in rows]  # bps -> pct, for a like-for-like "net spread %" figure
     per_1000 = [float(r.net_profit_per_1000usdt) for r in rows]
+    depth = [float(r.available_depth_usd) for r in rows]
     positive = [r for r in rows if r.executable and float(r.net_profit_usd) > 0]
     persistence = [float(r.persistence_seconds) for r in rows if r.continuity_status in ("new", "continuation")]
     detections = sum(1 for r in rows if r.continuity_status == "new")
@@ -102,6 +120,7 @@ def _summarize_direction(rows: list[AltcoinScanObservationRecord]) -> DirectionS
     mean_persistence = statistics.fmean(persistence) if persistence else 0.0
     max_persistence = max(persistence) if persistence else 0.0
     mean_per_1000 = statistics.fmean(per_1000) if per_1000 else 0.0
+    sorted_per_1000 = sorted(per_1000)
 
     return DirectionSummary(
         symbol=rows[0].symbol,
@@ -121,6 +140,10 @@ def _summarize_direction(rows: list[AltcoinScanObservationRecord]) -> DirectionS
         continuations=continuations,
         best_observed_at=best_row.observed_at.replace(tzinfo=UTC) if best_row.observed_at.tzinfo is None else best_row.observed_at,
         status=_classify(positive_rate, mean_per_1000, mean_persistence, len(rows)),
+        net_profit_per_1000usdt_median=statistics.median(per_1000) if per_1000 else 0.0,
+        net_profit_per_1000usdt_p10=_p10(sorted_per_1000),
+        net_profit_per_1000usdt_min=min(per_1000) if per_1000 else 0.0,
+        available_depth_usd_mean=statistics.fmean(depth) if depth else 0.0,
     )
 
 

@@ -1033,6 +1033,7 @@ def render_reality_page() -> None:
     render_phase2d_micro_live_section()
     render_phase2e_real_edge_section()
     render_real_trading_section()
+    render_full_market_discovery_section()
     render_inventory_manager_section()
 
 
@@ -1463,23 +1464,61 @@ def render_real_trading_section() -> None:
     )
 
 
+def render_full_market_discovery_section() -> None:
+    summary = data.get_full_market_discovery_summary_cached()
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">FULL MARKET DISCOVERY — UNIVERS DYNAMIQUE COMPLET</div>', unsafe_allow_html=True)
+    if not summary.reachable:
+        st.caption("Moteur injoignable — découverte de marché indisponible.")
+        return
+
+    age_str = f"{summary.scan_status_age_seconds:.0f}s" if summary.scan_status_age_seconds is not None else "—"
+    cycle_str = f"{summary.cycle_duration_seconds:.1f}s" if summary.cycle_duration_seconds is not None else "—"
+    render_stat_cards(
+        [
+            {"label": "Paires communes (univers)", "value": f"{summary.common_pairs}"},
+            {"label": "Paires scannées (STAGE A)", "value": f"{summary.pairs_fast_scanned}"},
+            {"label": "Paires validées en profondeur (STAGE B)", "value": f"{summary.pairs_deep_validated}"},
+            {"label": "Paires avec edge brut", "value": f"{summary.pairs_with_raw_edge}"},
+            {"label": "Edges nets positifs (après coûts)", "value": f"{summary.pairs_net_positive_edges}"},
+            {"label": "Edges récurrents", "value": f"{summary.pairs_with_repeating_net_edge}"},
+            {"label": "Dernier cycle scanner", "value": age_str, "sub": f"durée {cycle_str}"},
+        ]
+    )
+    if not summary.scan_status_available:
+        st.caption("Aucun cycle du scanner deux-étages n'a encore été observé — le processus altcoin_scanner.py démarre peut-être tout juste.")
+
+    if summary.top_10_opportunities:
+        with st.expander(f"TOP 10 opportunités actuelles ({len(summary.top_10_opportunities)})"):
+            for t in summary.top_10_opportunities:
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{t.symbol} — {t.buy_exchange}→{t.sell_exchange}</span>'
+                    f'<span class="v">{t.net_profit_per_1000usdt_mean:+.2f} $/1000usdt · {t.status}</span></div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("Pas encore d'historique suffisant pour un classement TOP 10.")
+
+
 def render_inventory_manager_section() -> None:
     summary = data.get_inventory_manager_summary_cached()
     if not summary.reachable:
-        st.markdown('<div class="simple-card-label" style="margin-top:14px;">INVENTORY MANAGER — CROSS-EXCHANGE</div>', unsafe_allow_html=True)
+        st.markdown('<div class="simple-card-label" style="margin-top:14px;">INVENTORY INTELLIGENCE</div>', unsafe_allow_html=True)
         st.caption("Moteur injoignable — état de l'inventaire indisponible.")
         return
 
+    mode_label = f"MODE = {summary.inventory_manager_mode}" + (" · AUTO_REAL_REBALANCE = TRUE ⚠️" if summary.auto_real_rebalance else " · AUTO_REAL_REBALANCE = FALSE")
     st.markdown(
         '<div style="margin-top:22px;padding:14px;border:2px solid #7c3aed;border-radius:14px;background:rgba(124,58,237,0.06);">'
-        '<div style="font-size:1.1rem;font-weight:700;color:#7c3aed;">INVENTORY MANAGER — CROSS-EXCHANGE (SIMULATION / READ-ONLY)</div>'
-        '<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">Recommandations de rééquilibrage uniquement — aucun ordre réel n\'est '
+        '<div style="font-size:1.1rem;font-weight:700;color:#7c3aed;">INVENTORY INTELLIGENCE (SIMULATION / READ-ONLY)</div>'
+        f'<div style="font-size:0.85rem;color:#6b7280;margin-top:2px;">{mode_label} — Recommandations de rééquilibrage uniquement, aucun ordre réel n\'est '
         "jamais envoyé par ce module. Les 160 USDT réels ne sont pas convertis automatiquement tant que ce comportement "
         "n'a pas été vérifié et explicitement autorisé.</div></div>",
         unsafe_allow_html=True,
     )
 
     pnl_display = f"{summary.inventory_pnl_usd:+.4f} $" if summary.inventory_pnl_usd is not None else "N/A"
+    strong_count = sum(1 for s in summary.inventory_scores if s.classification == "STRONG_PREPOSITION_CANDIDATE")
+    candidate_count = sum(1 for s in summary.inventory_scores if s.classification == "PREPOSITION_CANDIDATE")
     render_stat_cards(
         [
             {"label": "USDT disponible (total)", "value": f"{summary.total_usdt_available:,.2f} $".replace(",", " ")},
@@ -1488,6 +1527,7 @@ def render_inventory_manager_section() -> None:
             {"label": "Capital verrouillé en inventaire", "value": f"{summary.capital_locked_in_inventory_usdt:,.2f} $".replace(",", " ")},
             {"label": "Actifs pré-positionnés", "value": f"{len(summary.prepositioned_assets)}"},
             {"label": "Inventaire manquant", "value": f"{len(summary.inventory_missing)}"},
+            {"label": "STRONG candidates", "value": f"{strong_count}", "sub": f"{candidate_count} PREPOSITION_CANDIDATE"},
             {"label": "Candidats de rééquilibrage", "value": f"{len(summary.rebalance_candidates)}"},
             {"label": "Inventory P&L", "value": pnl_display, "sub": summary.inventory_pnl_note if summary.inventory_pnl_usd is None else None},
         ]
@@ -1495,6 +1535,18 @@ def render_inventory_manager_section() -> None:
 
     if summary.prepositioned_assets:
         st.caption(f"Déjà pré-positionnés et exécutables immédiatement : {', '.join(summary.prepositioned_assets)}")
+
+    if summary.inventory_scores:
+        with st.expander(f"TOP inventory scores — classification complète ({len(summary.inventory_scores)})"):
+            for s in summary.inventory_scores:
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">[{s.classification}] {s.symbol}</span>'
+                    f'<span class="v">score {s.total_score:.0f}/100 · {s.sightings} sightings · {s.net_positive_rate_pct:.0f}% positif · '
+                    f'médiane {s.median_net_edge_per_1000usdt:+.2f} · P10 {s.p10_net_edge_per_1000usdt:+.2f} · reuse {s.expected_reuse_label}</span></div>',
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.caption("Aucun historique de scoring disponible pour l'instant.")
 
     if summary.inventory_missing:
         with st.expander(f"Opportunités bloquées par manque d'inventaire ({len(summary.inventory_missing)})"):
@@ -1513,12 +1565,12 @@ def render_inventory_manager_section() -> None:
             for r in summary.rebalance_candidates:
                 score_str = f"{r.inventory_score:.0f}/100" if r.inventory_score is not None else "—"
                 st.markdown(
-                    f'<div class="simple-perf-row"><span class="k">[{r.action}] {r.asset} sur {r.exchange}</span>'
-                    f'<span class="v">{r.recommended_notional_usdt:.2f} $ · score {score_str} · {r.reason}</span></div>',
+                    f'<div class="simple-perf-row"><span class="k">[{r.action} · {r.classification or "—"}] {r.asset} sur {r.exchange}</span>'
+                    f'<span class="v">{r.capital_required_usdt:.2f} $ · score {score_str} · {r.reason}</span></div>',
                     unsafe_allow_html=True,
                 )
     else:
-        st.caption("Aucune recommandation de rééquilibrage actuellement.")
+        st.caption("Aucune recommandation de rééquilibrage actuellement — NONE / NO ACTION.")
 
     st.caption(
         "Ce module est 100% SIMULATION — il calcule des recommandations à partir des soldes réels et de l'historique "

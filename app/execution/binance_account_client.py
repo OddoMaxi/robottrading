@@ -209,6 +209,20 @@ class BinanceAccountClient(ExchangeClient):
                 response.raise_for_status()
                 return await response.json()
 
+    async def get_all_tickers_24hr(self) -> list[dict]:
+        """GET /api/v3/ticker/24hr with no symbol — public, EVERY Binance
+        Spot symbol's bid/ask/volume/24h-change in ONE call. Item 2 (STAGE
+        A) of the Inventory Manager V2 directive: this is what makes
+        cheaply pre-filtering the full ~240-symbol dynamic universe
+        possible without a per-symbol request each."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/api/v3/ticker/24hr",
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                return await response.json()
+
     async def get_order_book_depth(self, symbol: str, limit: int = 20) -> dict:
         """GET /api/v3/depth — public, top-of-book depth for slippage
         estimation."""

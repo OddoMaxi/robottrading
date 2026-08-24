@@ -893,9 +893,31 @@ class RebalanceCandidateRow:
     exchange: str
     asset: str
     recommended_notional_usdt: float
+    capital_required_usdt: float
     inventory_score: float | None
+    classification: str | None
+    sightings: int | None
+    net_positive_rate_pct: float | None
+    median_net_edge: float | None
+    p10_net_edge: float | None
+    expected_reuse_label: str | None
     reason: str
     simulated: bool
+
+
+@dataclass(slots=True)
+class InventoryScoreRow:
+    symbol: str
+    base_asset: str
+    observations: int
+    sightings: int
+    net_positive_rate_pct: float
+    median_net_edge_per_1000usdt: float
+    p10_net_edge_per_1000usdt: float
+    total_score: float
+    expected_reuse_label: str
+    classification: str
+    reason: str
 
 
 @dataclass(slots=True)
@@ -909,18 +931,21 @@ class InventoryManagerDashboardSummary:
     capital_locked_in_inventory_usdt: float = 0.0
     prepositioned_assets: list[str] = field(default_factory=list)
     inventory_missing: list[InventoryMissingRow] = field(default_factory=list)
+    inventory_scores: list[InventoryScoreRow] = field(default_factory=list)
     rebalance_candidates: list[RebalanceCandidateRow] = field(default_factory=list)
     inventory_pnl_usd: float | None = None
     inventory_pnl_note: str = ""
     simulation_only: bool = True
+    inventory_manager_mode: str = "SIMULATION"
+    auto_real_rebalance: bool = False
     real_orders_placed: int = 0
 
 
 async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
-    """Inventory Manager (user directive, 2026-08-23) — SIMULATION/
-    READ-ONLY ONLY. Same HTTP-to-the-engine pattern as every other
-    live-state fetcher here. Never raises — an unreachable engine
-    reports reachable=False."""
+    """Inventory Manager (user directive, 2026-08-23, extended to the
+    full dynamic universe 2026-08-24) — SIMULATION/READ-ONLY ONLY. Same
+    HTTP-to-the-engine pattern as every other live-state fetcher here.
+    Never raises — an unreachable engine reports reachable=False."""
     base_url = get_settings().engine_api_base_url
     try:
         async with aiohttp.ClientSession() as session:
@@ -935,10 +960,23 @@ async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
             )
             for m in payload.get("inventory_missing", [])
         ]
+        scores = [
+            InventoryScoreRow(
+                symbol=s["symbol"], base_asset=s["base_asset"], observations=s["observations"],
+                sightings=s["sightings"], net_positive_rate_pct=s["net_positive_rate_pct"],
+                median_net_edge_per_1000usdt=s["median_net_edge_per_1000usdt"],
+                p10_net_edge_per_1000usdt=s["p10_net_edge_per_1000usdt"], total_score=s["total_score"],
+                expected_reuse_label=s["expected_reuse_label"], classification=s["classification"], reason=s["reason"],
+            )
+            for s in payload.get("inventory_scores", [])
+        ]
         candidates = [
             RebalanceCandidateRow(
                 action=c["action"], exchange=c["exchange"], asset=c["asset"],
-                recommended_notional_usdt=c["recommended_notional_usdt"], inventory_score=c["inventory_score"],
+                recommended_notional_usdt=c["recommended_notional_usdt"], capital_required_usdt=c["capital_required_usdt"],
+                inventory_score=c["inventory_score"], classification=c["classification"], sightings=c["sightings"],
+                net_positive_rate_pct=c["net_positive_rate_pct"], median_net_edge=c["median_net_edge"],
+                p10_net_edge=c["p10_net_edge"], expected_reuse_label=c["expected_reuse_label"],
                 reason=c["reason"], simulated=c["simulated"],
             )
             for c in payload.get("rebalance_candidates", [])
@@ -953,10 +991,13 @@ async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
             capital_locked_in_inventory_usdt=payload["capital_locked_in_inventory_usdt"],
             prepositioned_assets=payload["prepositioned_assets"],
             inventory_missing=missing,
+            inventory_scores=scores,
             rebalance_candidates=candidates,
             inventory_pnl_usd=payload["inventory_pnl_usd"],
             inventory_pnl_note=payload["inventory_pnl_note"],
             simulation_only=payload["simulation_only"],
+            inventory_manager_mode=payload.get("inventory_manager_mode", "SIMULATION"),
+            auto_real_rebalance=payload.get("auto_real_rebalance", False),
             real_orders_placed=payload["real_orders_placed"],
         )
     except Exception:
@@ -966,6 +1007,70 @@ async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
 @st.cache_data(ttl=15, show_spinner=False)
 def get_inventory_manager_summary_cached() -> InventoryManagerDashboardSummary:
     return asyncio.run(fetch_inventory_manager_summary())
+
+
+@dataclass(slots=True)
+class TopOpportunityRow:
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    net_profit_per_1000usdt_mean: float
+    status: str
+
+
+@dataclass(slots=True)
+class FullMarketDiscoverySummary:
+    reachable: bool
+    common_pairs: int = 0
+    pairs_fast_scanned: int = 0
+    pairs_deep_validated: int = 0
+    pairs_with_raw_edge: int = 0
+    pairs_net_positive_edges: int = 0
+    pairs_with_repeating_net_edge: int = 0
+    top_10_opportunities: list[TopOpportunityRow] = field(default_factory=list)
+    scan_status_available: bool = False
+    scan_status_age_seconds: float | None = None
+    cycle_duration_seconds: float | None = None
+
+
+async def fetch_full_market_discovery_summary() -> FullMarketDiscoverySummary:
+    """FULL MARKET DISCOVERY (Inventory Manager V2, user directive,
+    2026-08-24) — same HTTP-to-the-engine pattern as every other
+    live-state fetcher here. Never raises — an unreachable engine
+    reports reachable=False."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/live/full-universe-discovery", timeout=aiohttp.ClientTimeout(total=30)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        top10 = [
+            TopOpportunityRow(
+                symbol=t["symbol"], buy_exchange=t["buy_exchange"], sell_exchange=t["sell_exchange"],
+                net_profit_per_1000usdt_mean=t["net_profit_per_1000usdt_mean"], status=t["status"],
+            )
+            for t in payload.get("top_10_opportunities", [])
+        ]
+        return FullMarketDiscoverySummary(
+            reachable=True,
+            common_pairs=payload["common_pairs"],
+            pairs_fast_scanned=payload["pairs_fast_scanned"],
+            pairs_deep_validated=payload["pairs_deep_validated"],
+            pairs_with_raw_edge=payload["pairs_with_raw_edge"],
+            pairs_net_positive_edges=payload["pairs_net_positive_edges"],
+            pairs_with_repeating_net_edge=payload["pairs_with_repeating_net_edge"],
+            top_10_opportunities=top10,
+            scan_status_available=payload["scan_status_available"],
+            scan_status_age_seconds=payload["scan_status_age_seconds"],
+            cycle_duration_seconds=payload["cycle_duration_seconds"],
+        )
+    except Exception:
+        return FullMarketDiscoverySummary(reachable=False)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_full_market_discovery_summary_cached() -> FullMarketDiscoverySummary:
+    return asyncio.run(fetch_full_market_discovery_summary())
 
 
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:

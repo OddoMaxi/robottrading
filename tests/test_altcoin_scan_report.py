@@ -1,3 +1,4 @@
+import statistics
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -7,6 +8,7 @@ from app.reporting.altcoin_scan_report import (
     _best_direction_per_symbol,
     _classify,
     _group_by_symbol_and_direction,
+    _p10,
     _summarize_direction,
     market_priority_score,
 )
@@ -51,9 +53,10 @@ class _FakeRow:
     executable: bool
     continuity_status: str
     persistence_seconds: float
+    available_depth_usd: float = 500.0
 
 
-def _row(symbol="ZRO/USDT", buy="binance", sell="bybit", net_profit=1.0, per_1000=5.0, status="new", persistence=10.0, minute=0):
+def _row(symbol="ZRO/USDT", buy="binance", sell="bybit", net_profit=1.0, per_1000=5.0, status="new", persistence=10.0, minute=0, depth=500.0):
     return _FakeRow(
         symbol=symbol,
         buy_exchange=buy,
@@ -66,6 +69,7 @@ def _row(symbol="ZRO/USDT", buy="binance", sell="bybit", net_profit=1.0, per_100
         executable=net_profit > 0,
         continuity_status=status,
         persistence_seconds=persistence,
+        available_depth_usd=depth,
     )
 
 
@@ -81,6 +85,31 @@ def test_summarize_direction_computes_positive_rate_and_best_timestamp():
     assert summary.continuations == 1
     assert summary.positive_rate_pct == 2 / 3 * 100
     assert summary.best_observed_at == datetime(2026, 8, 23, 18, 1, tzinfo=UTC)
+
+
+def test_p10_falls_back_to_min_with_fewer_than_two_points():
+    assert _p10([]) == 0.0
+    assert _p10([4.2]) == 4.2
+
+
+def test_p10_of_a_spread_distribution():
+    values = sorted([float(i) for i in range(1, 11)])  # 1..10
+    assert _p10(values) == statistics.quantiles(values, n=10, method="inclusive")[0]
+
+
+def test_summarize_direction_computes_median_p10_and_min_edge():
+    rows = [
+        _row(net_profit=1.0, per_1000=1.0, minute=0, depth=100.0),
+        _row(net_profit=2.0, per_1000=2.0, minute=1, depth=200.0),
+        _row(net_profit=3.0, per_1000=10.0, minute=2, depth=300.0),
+    ]
+    summary = _summarize_direction(rows)
+    assert summary.net_profit_per_1000usdt_median == 2.0
+    assert summary.net_profit_per_1000usdt_min == 1.0
+    assert summary.available_depth_usd_mean == 200.0
+    # P10 of [1, 2, 10] should sit near the bottom of the distribution,
+    # well below the mean (4.33) — a single lucky tick can't hide here.
+    assert summary.net_profit_per_1000usdt_p10 < summary.net_profit_per_1000usdt_mean
 
 
 def test_group_by_symbol_and_direction_separates_directions():

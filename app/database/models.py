@@ -620,3 +620,29 @@ class AltcoinScanObservationRecord(Base):
     persistence_seconds: Mapped[float] = mapped_column(Numeric(14, 3))
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
+class FullUniverseScanStatusRecord(Base):
+    """INVENTORY MANAGER V2 (user directive, 2026-08-24) — single-row,
+    upserted-every-cycle status of altcoin_scanner.py's two-stage scan
+    (app.scanner.fast_discovery STAGE A + cross_exchange_scanner STAGE B).
+
+    altcoin_scanner.py runs as its own systemd service/process
+    (robotcripto-altcoin-scanner.service), entirely separate from
+    robotcripto-engine.service's FastAPI process — there is no shared
+    memory between them, so the DB is the only channel for the engine's
+    /live/full-universe-discovery endpoint to read the scanner's current
+    per-cycle counters. Always exactly one row (id=1), overwritten each
+    cycle — this is current status, not a history table (see
+    app.database.repository.upsert_full_universe_scan_status)."""
+
+    __tablename__ = "full_universe_scan_status"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    updated_at: Mapped[datetime]
+    common_pairs_count: Mapped[int]
+    pairs_fast_scanned: Mapped[int]
+    pairs_with_raw_edge: Mapped[int]
+    pairs_deep_validated: Mapped[int]
+    pairs_net_positive: Mapped[int]
+    cycle_duration_seconds: Mapped[float] = mapped_column(Numeric(10, 3))

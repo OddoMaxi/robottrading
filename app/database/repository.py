@@ -13,6 +13,7 @@ from app.database.models import (
     DexSimulatedTradeRecord,
     DualLegObservationRecord,
     Exchange,
+    FullUniverseScanStatusRecord,
     LiveArbitrageExecutionRecord,
     MicroLiveObservationRecord,
     OpportunityRecord,
@@ -468,3 +469,46 @@ async def save_altcoin_scan_observation(
     session.add(record)
     await session.flush()
     return record
+
+
+async def upsert_full_universe_scan_status(
+    session: AsyncSession,
+    updated_at: datetime,
+    common_pairs_count: int,
+    pairs_fast_scanned: int,
+    pairs_with_raw_edge: int,
+    pairs_deep_validated: int,
+    pairs_net_positive: int,
+    cycle_duration_seconds: float,
+) -> FullUniverseScanStatusRecord:
+    """INVENTORY MANAGER V2 (user directive, 2026-08-24). Always id=1 —
+    overwrites the single row rather than inserting a new one, so this
+    table never grows. Written by the standalone altcoin_scanner.py
+    process; read by GET /live/full-universe-discovery in the engine
+    process, which has no other way to see the scanner's live counters."""
+    existing = await session.get(FullUniverseScanStatusRecord, 1)
+    if existing is None:
+        session.add(
+            FullUniverseScanStatusRecord(
+                id=1, updated_at=updated_at, common_pairs_count=common_pairs_count,
+                pairs_fast_scanned=pairs_fast_scanned, pairs_with_raw_edge=pairs_with_raw_edge,
+                pairs_deep_validated=pairs_deep_validated, pairs_net_positive=pairs_net_positive,
+                cycle_duration_seconds=cycle_duration_seconds,
+            )
+        )
+    else:
+        existing.updated_at = updated_at
+        existing.common_pairs_count = common_pairs_count
+        existing.pairs_fast_scanned = pairs_fast_scanned
+        existing.pairs_with_raw_edge = pairs_with_raw_edge
+        existing.pairs_deep_validated = pairs_deep_validated
+        existing.pairs_net_positive = pairs_net_positive
+        existing.cycle_duration_seconds = cycle_duration_seconds
+    await session.flush()
+    result = await session.get(FullUniverseScanStatusRecord, 1)
+    assert result is not None
+    return result
+
+
+async def get_full_universe_scan_status(session: AsyncSession) -> FullUniverseScanStatusRecord | None:
+    return await session.get(FullUniverseScanStatusRecord, 1)

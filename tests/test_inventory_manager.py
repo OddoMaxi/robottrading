@@ -2,9 +2,11 @@ from datetime import UTC, datetime
 
 import app.execution.inventory_manager as inv_module
 from app.execution.inventory_manager import (
+    InventoryClassification,
     OpportunityInventoryCheck,
     _to_opportunity_check,
     build_inventory_report,
+    is_preposition_eligible,
     recommend_rebalance,
     score_direction_for_inventory,
 )
@@ -31,6 +33,10 @@ def _summary(**overrides) -> DirectionSummary:
         continuations=6,
         best_observed_at=datetime(2026, 8, 23, tzinfo=UTC),
         status=OpportunityStatus.STRONG,
+        net_profit_per_1000usdt_median=3.0,
+        net_profit_per_1000usdt_p10=1.5,  # positive — a genuinely consistent case by default
+        net_profit_per_1000usdt_min=0.5,
+        available_depth_usd_mean=500.0,
     )
     base.update(overrides)
     return DirectionSummary(**base)
@@ -41,14 +47,16 @@ def _summary(**overrides) -> DirectionSummary:
 
 def test_strong_recurring_symbol_is_eligible():
     score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3)
-    assert score.eligible_for_prepositioning is True
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.STRONG_PREPOSITION_CANDIDATE
     assert 0.0 < score.total_score <= 100.0
     assert score.base_asset == "ZRO"
 
 
 def test_insufficient_observations_not_eligible():
     score = score_direction_for_inventory(_summary(observations=2), min_expected_reuse_count=3)
-    assert score.eligible_for_prepositioning is False
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
     assert "insufficient history" in score.reason
 
 
@@ -57,13 +65,24 @@ def test_one_off_opportunity_never_earns_prepositioning():
     already disappearing — a symbol seen only once or twice must not
     qualify even if everything else about it looks great."""
     score = score_direction_for_inventory(_summary(unique_detections=1, continuations=0), min_expected_reuse_count=3)
-    assert score.eligible_for_prepositioning is False
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.OBSERVE
     assert "one-off" in score.reason
+
+
+def test_inconsistent_p10_edge_stays_observe_not_candidate():
+    """A positive MEAN can hide a negative worst-decile outcome — that
+    must not be enough to earn PREPOSITION_CANDIDATE."""
+    score = score_direction_for_inventory(_summary(net_profit_per_1000usdt_p10=-1.0), min_expected_reuse_count=3)
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.OBSERVE
+    assert "inconsistent" in score.reason
 
 
 def test_non_positive_edge_not_eligible():
     score = score_direction_for_inventory(_summary(net_profit_per_1000usdt_mean=0.0), min_expected_reuse_count=3)
-    assert score.eligible_for_prepositioning is False
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
     assert "net-positive" in score.reason
 
 
@@ -72,8 +91,14 @@ def test_weak_status_not_eligible_even_with_enough_sightings():
         _summary(status=OpportunityStatus.WEAK, unique_detections=10, continuations=10, net_profit_per_1000usdt_mean=3.0),
         min_expected_reuse_count=3,
     )
-    assert score.eligible_for_prepositioning is False
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
     assert "status too weak" in score.reason
+
+
+def test_watch_status_below_strong_threshold_is_preposition_candidate_not_strong():
+    score = score_direction_for_inventory(_summary(status=OpportunityStatus.WATCH), min_expected_reuse_count=3)
+    assert score.classification == InventoryClassification.PREPOSITION_CANDIDATE
 
 
 def test_higher_edge_scores_higher_all_else_equal():

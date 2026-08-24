@@ -1,5 +1,6 @@
-"""AUTOMATIC CROSS-EXCHANGE INVENTORY MANAGER (user directive,
-2026-08-23) — SIMULATION / READ-ONLY ONLY.
+"""AUTOMATIC CROSS-EXCHANGE INVENTORY MANAGER — V2, FULL DYNAMIC UNIVERSE
+(user directive, 2026-08-23, extended 2026-08-24) — SIMULATION /
+READ-ONLY ONLY.
 
 Closes the exact gap the multi-symbol preflight kept surfacing once both
 real pools were funded (Binance ~102 USDT, Bybit ~64 USDT,
@@ -24,18 +25,23 @@ This module answers three questions, all read-only:
    (InventoryScoreBreakdown, built from app.reporting.altcoin_scan_report's
    already-persisted, time-spanning observation history — NEVER from a
    single live quote, so a one-off vanishing spread can never itself
-   trigger a buy recommendation. This is explicitly scoped to whatever
-   altcoin_scanner.py's own watchlist covers; the full ~240-symbol
-   dynamic universe has no persisted history yet, and this module does
-   not pretend otherwise — see inventory_scores' honest observations
-   count.)
+   trigger a buy recommendation. As of V2, altcoin_scanner.py covers the
+   FULL dynamic Binance∩Bybit universe via its own two-stage scan
+   [app.scanner.fast_discovery], not a fixed watchlist — coverage on any
+   given symbol still depends on it having cleared STAGE A recently
+   enough to accumulate STAGE B history, which is why `observations`
+   stays an honestly-reported number rather than assumed complete.)
 3. Given (1) and (2) plus the hard limits below, what rebalancing WOULD
-   MASTER recommend? (RebalanceRecommendation — every single one carries
-   simulated=True and this module contains no code path that submits an
-   order. Wiring a recommendation to a real Binance/Bybit spot trade is
-   a distinct, separately-authorized future step: "Ne laisse pas
-   l'Inventory Manager convertir réellement les 60 USDT Bybit tant que
-   son comportement et ses limites n'ont pas été vérifiés.")
+   MASTER recommend, classified OBSERVE / PREPOSITION_CANDIDATE /
+   STRONG_PREPOSITION_CANDIDATE / DO_NOT_PREPOSITION? (RebalanceRecommendation
+   — every single one carries simulated=True and this module contains no
+   code path that submits an order. Wiring a recommendation to a real
+   Binance/Bybit spot trade is a distinct, separately-authorized future
+   step: "Ne laisse pas l'Inventory Manager convertir réellement les 60
+   USDT Bybit tant que son comportement et ses limites n'ont pas été
+   vérifiés." INVENTORY_MANAGER_MODE/AUTO_REAL_REBALANCE in
+   app.config.settings exist only to be surfaced on every report — this
+   codebase never flips them itself.)
 
 Hard limits (app.config.settings): MAX_INVENTORY_PER_ASSET_USDT,
 MAX_TOTAL_INVENTORY_EXPOSURE_USDT, MAX_REBALANCE_SIZE_USDT,
@@ -53,6 +59,7 @@ tests/test_inventory_manager_isolation.py for the mechanical proof.
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +82,17 @@ logger = logging.getLogger(__name__)
 QUOTE_ASSET = "USDT"
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_MAX_RANKER_SYMBOLS = 30  # same latency-bound reasoning as live_preflight's max_symbols=60 — kept smaller since this report also does a valuation pass
+
+# Round, stated-up-front threshold (same discipline as altcoin_scan_report's
+# own STRONG_* constants) — not fitted after the fact to flip any symbol.
+STRONG_PREPOSITION_SCORE_THRESHOLD = 50.0  # out of 100
+
+
+class InventoryClassification(StrEnum):
+    OBSERVE = "OBSERVE"
+    PREPOSITION_CANDIDATE = "PREPOSITION_CANDIDATE"
+    STRONG_PREPOSITION_CANDIDATE = "STRONG_PREPOSITION_CANDIDATE"
+    DO_NOT_PREPOSITION = "DO_NOT_PREPOSITION"
 
 
 @dataclass(slots=True)
@@ -99,14 +117,21 @@ class OpportunityInventoryCheck:
 
 @dataclass(slots=True)
 class InventoryScoreBreakdown:
-    """INVENTORY_SCORE (item 3 of the directive) — frequency, net edge,
+    """INVENTORY_SCORE (item 3/4 of the directive) — frequency, net edge,
     persistence, liquidity, volatility and expected reuse, each a real
     figure from app.reporting.altcoin_scan_report's persisted history,
-    never a single scan tick."""
+    never a single scan tick. median/p10 edge (not just the mean) and
+    net_positive_rate_pct are what let classification tell a
+    consistently-profitable symbol apart from one whose average is
+    positive only because of one lucky tick."""
 
     symbol: str
     base_asset: str
     observations: int
+    sightings: int  # independent detections + continuations — "how many separate times has this repeated"
+    net_positive_rate_pct: float
+    median_net_edge_per_1000usdt: float
+    p10_net_edge_per_1000usdt: float  # worst-case-but-not-outlier edge
     frequency_score: float
     net_edge_score: float
     persistence_score: float
@@ -114,8 +139,8 @@ class InventoryScoreBreakdown:
     volatility_score: float
     expected_reuse_score: float
     total_score: float  # 0-100
-    expected_reuse_count: int
-    eligible_for_prepositioning: bool
+    expected_reuse_label: str  # "LOW" | "MEDIUM" | "HIGH" — a stated heuristic bucket, never a fabricated precise forecast
+    classification: InventoryClassification
     reason: str
 
 
@@ -126,7 +151,14 @@ class RebalanceRecommendation:
     asset: str
     recommended_notional_usdt: float
     current_holding_usdt_equiv: float
+    capital_required_usdt: float
     inventory_score: float | None
+    classification: str | None
+    sightings: int | None
+    net_positive_rate_pct: float | None
+    median_net_edge: float | None
+    p10_net_edge: float | None
+    expected_reuse_label: str | None
     reason: str
     simulated: bool  # ALWAYS True in this phase — see module docstring
 
@@ -180,6 +212,22 @@ def _to_opportunity_check(r: RankedOpportunity) -> OpportunityInventoryCheck:
     )
 
 
+def _expected_reuse_label(sightings: int, min_expected_reuse_count: int) -> str:
+    """A stated heuristic bucket, not a predictive forecast — this
+    module has no genuine model of FUTURE reuse probability, only a
+    HISTORICAL sightings count, and labeling it as a vague bucket rather
+    than inventing a fake precise number is the honest choice."""
+    if sightings < min_expected_reuse_count * 2:
+        return "LOW"
+    if sightings < min_expected_reuse_count * 5:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def is_preposition_eligible(s: InventoryScoreBreakdown) -> bool:
+    return s.classification in (InventoryClassification.PREPOSITION_CANDIDATE, InventoryClassification.STRONG_PREPOSITION_CANDIDATE)
+
+
 def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_count: int) -> InventoryScoreBreakdown:
     """Same normalization convention as altcoin_scan_report.market_priority_score
     (each sub-score capped to [0, 1] against the same STRONG_* reference
@@ -187,15 +235,32 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
     weighted sum, not a product — a product of six sub-1.0 terms
     collapses almost everything toward zero and stops being a usable
     ranking signal; a weighted sum stays interpretable as a 0-100 score
-    while still being driven by the same real inputs."""
+    while still being driven by the same real inputs.
+
+    Classification is a 4-tier ladder (item 6 of the V2 directive), each
+    tier strictly harder to reach than the last:
+      DO_NOT_PREPOSITION — no real basis at all (too little history, no
+        net-positive average edge, or status never cleared WATCH/STRONG).
+      OBSERVE — a positive AVERAGE edge exists but isn't trustworthy yet:
+        either it hasn't repeated enough times (avoids the one-off-spread
+        trap explicitly called out in the directive) or the P10
+        (worst-decile) edge is still negative, meaning the average is
+        being carried by a few good ticks rather than being consistent.
+      PREPOSITION_CANDIDATE — clears every bar: enough independent
+        sightings AND a positive worst-decile edge, i.e. consistently
+        profitable, not just profitable on average.
+      STRONG_PREPOSITION_CANDIDATE — the same, at STRONG status and a
+        score above STRONG_PREPOSITION_SCORE_THRESHOLD — recommend_rebalance
+        funds these first purely by sorting on total_score, no special
+        casing needed."""
     base_asset = summary.symbol.split("/")[0]
     frequency_score = min(1.0, summary.unique_detections / 10.0)
     net_edge_score = min(1.0, max(0.0, summary.net_profit_per_1000usdt_mean / STRONG_MIN_NET_PROFIT_PER_1000USDT))
     persistence_score = min(1.0, summary.mean_persistence_seconds / STRONG_MIN_PERSISTENCE_SECONDS) if summary.mean_persistence_seconds > 0 else 0.0
     liquidity_score = 1.0 if summary.observations >= MIN_OBSERVATIONS_TO_JUDGE else summary.observations / MIN_OBSERVATIONS_TO_JUDGE
     volatility_score = min(1.0, max(0.0, summary.gross_spread_max_pct - summary.gross_spread_mean_pct) / 1.0)
-    expected_reuse_count = summary.unique_detections + summary.continuations
-    expected_reuse_score = min(1.0, expected_reuse_count / (min_expected_reuse_count * 3))
+    sightings = summary.unique_detections + summary.continuations
+    expected_reuse_score = min(1.0, sightings / (min_expected_reuse_count * 3))
 
     total_score = 100.0 * (
         0.30 * net_edge_score
@@ -206,30 +271,36 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
         + 0.10 * expected_reuse_score
     )
 
-    # Never pre-position for a one-off, already-disappearing spread: a
-    # symbol needs MIN_EXPECTED_REUSE_COUNT independent sightings
-    # (new-detection + continuation rows, spanning real elapsed time)
-    # before it's even eligible, on top of the usual STRONG/WATCH bar.
     if summary.observations < MIN_OBSERVATIONS_TO_JUDGE:
-        eligible = False
+        classification = InventoryClassification.DO_NOT_PREPOSITION
         reason = f"insufficient history ({summary.observations} observation(s), need >= {MIN_OBSERVATIONS_TO_JUDGE})"
-    elif expected_reuse_count < min_expected_reuse_count:
-        eligible = False
-        reason = f"seen only {expected_reuse_count} time(s) — need >= {min_expected_reuse_count} independent sightings, never pre-position for a one-off spread"
     elif summary.net_profit_per_1000usdt_mean <= 0:
-        eligible = False
+        classification = InventoryClassification.DO_NOT_PREPOSITION
         reason = "no net-positive edge after real fees"
     elif summary.status not in (OpportunityStatus.STRONG, OpportunityStatus.WATCH):
-        eligible = False
+        classification = InventoryClassification.DO_NOT_PREPOSITION
         reason = f"status too weak ({summary.status.value})"
+    elif sightings < min_expected_reuse_count:
+        classification = InventoryClassification.OBSERVE
+        reason = f"positive average edge but seen only {sightings} time(s) — need >= {min_expected_reuse_count} independent sightings, never pre-position for a one-off spread"
+    elif summary.net_profit_per_1000usdt_p10 <= 0:
+        classification = InventoryClassification.OBSERVE
+        reason = f"edge inconsistent — worst-decile (P10) outcome ({summary.net_profit_per_1000usdt_p10:.2f}/1000usdt) is still unprofitable, watching for more consistency"
+    elif summary.status == OpportunityStatus.STRONG and total_score >= STRONG_PREPOSITION_SCORE_THRESHOLD:
+        classification = InventoryClassification.STRONG_PREPOSITION_CANDIDATE
+        reason = f"consistently net-positive ({sightings} sightings, P10 edge {summary.net_profit_per_1000usdt_p10:.2f}/1000usdt, STRONG status, score {total_score:.0f}/100)"
     else:
-        eligible = True
-        reason = f"recurring net-positive edge, {expected_reuse_count} sightings, status {summary.status.value}"
+        classification = InventoryClassification.PREPOSITION_CANDIDATE
+        reason = f"net-positive and consistent enough ({sightings} sightings, P10 edge {summary.net_profit_per_1000usdt_p10:.2f}/1000usdt, score {total_score:.0f}/100)"
 
     return InventoryScoreBreakdown(
         symbol=summary.symbol,
         base_asset=base_asset,
         observations=summary.observations,
+        sightings=sightings,
+        net_positive_rate_pct=summary.positive_rate_pct,
+        median_net_edge_per_1000usdt=summary.net_profit_per_1000usdt_median,
+        p10_net_edge_per_1000usdt=summary.net_profit_per_1000usdt_p10,
         frequency_score=frequency_score,
         net_edge_score=net_edge_score,
         persistence_score=persistence_score,
@@ -237,8 +308,8 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
         volatility_score=volatility_score,
         expected_reuse_score=expected_reuse_score,
         total_score=total_score,
-        expected_reuse_count=expected_reuse_count,
-        eligible_for_prepositioning=eligible,
+        expected_reuse_label=_expected_reuse_label(sightings, min_expected_reuse_count),
+        classification=classification,
         reason=reason,
     )
 
@@ -271,7 +342,7 @@ def recommend_rebalance(
         if usdt_value <= 0:
             continue
         s = score_by_asset.get(asset)
-        if s is not None and s.eligible_for_prepositioning:
+        if s is not None and is_preposition_eligible(s):
             continue
         reason = "no recent qualifying opportunity history for this asset" if s is None else s.reason
         recommendations.append(
@@ -281,7 +352,14 @@ def recommend_rebalance(
                 asset=asset,
                 recommended_notional_usdt=round(usdt_value, 2),
                 current_holding_usdt_equiv=round(usdt_value, 2),
+                capital_required_usdt=round(usdt_value, 2),
                 inventory_score=s.total_score if s is not None else None,
+                classification=s.classification.value if s is not None else None,
+                sightings=s.sightings if s is not None else None,
+                net_positive_rate_pct=s.net_positive_rate_pct if s is not None else None,
+                median_net_edge=s.median_net_edge_per_1000usdt if s is not None else None,
+                p10_net_edge=s.p10_net_edge_per_1000usdt if s is not None else None,
+                expected_reuse_label=s.expected_reuse_label if s is not None else None,
                 reason=f"reconvert to USDT — {reason}",
                 simulated=True,
             )
@@ -293,7 +371,7 @@ def recommend_rebalance(
     remaining_usdt_by_exchange = {"binance": binance_usdt, "bybit": bybit_usdt}
 
     eligible_sorted = sorted(
-        (s for s in scores if s.eligible_for_prepositioning and s.base_asset in missing_by_asset),
+        (s for s in scores if is_preposition_eligible(s) and s.base_asset in missing_by_asset),
         key=lambda s: s.total_score,
         reverse=True,
     )
@@ -317,8 +395,15 @@ def recommend_rebalance(
                 asset=s.base_asset,
                 recommended_notional_usdt=round(size, 2),
                 current_holding_usdt_equiv=round(already_held, 2),
+                capital_required_usdt=round(size, 2),
                 inventory_score=s.total_score,
-                reason=f"recurring net-positive opportunity ({s.expected_reuse_count}x seen, status feeds score {s.total_score:.0f}/100), currently blocking execution on {exchange} — INVENTORY_MISSING",
+                classification=s.classification.value,
+                sightings=s.sightings,
+                net_positive_rate_pct=s.net_positive_rate_pct,
+                median_net_edge=s.median_net_edge_per_1000usdt,
+                p10_net_edge=s.p10_net_edge_per_1000usdt,
+                expected_reuse_label=s.expected_reuse_label,
+                reason=f"{s.classification.value}: {s.reason} — currently blocking execution on {exchange} (INVENTORY_MISSING)",
                 simulated=True,
             )
         )

@@ -133,6 +133,30 @@ class Settings(BaseSettings):
     max_rebalance_size_usdt: float = 5.0
     min_expected_reuse_count: int = 3
 
+    # INVENTORY MANAGER V2 — FULL DYNAMIC UNIVERSE (user directive,
+    # 2026-08-24). Explicit, self-documenting mode flags surfaced on every
+    # V2 report/endpoint — none of these are switches this codebase ever
+    # flips itself; a real rebalance stays impossible regardless of their
+    # values because app.execution.inventory_manager still contains no
+    # order-placement code path at all (see
+    # tests/test_inventory_manager_isolation.py).
+    inventory_manager_mode: str = "SIMULATION"
+    auto_real_rebalance: bool = False
+
+    # Two-stage scanner (altcoin_scanner.py, item 2 of the V2 directive):
+    # STAGE A cheaply ranks the FULL dynamic Binance∩Bybit universe from
+    # two bulk-ticker calls (no per-symbol network I/O); only the top
+    # candidates are promoted to STAGE B's full dual-leg validation
+    # (real fees/depth/slippage — the expensive part). Bounding STAGE B's
+    # per-cycle count is what keeps cycle time roughly constant as the
+    # universe grows, rather than scaling linearly with it (the full
+    # ~240-symbol universe scanned synchronously and unconditionally
+    # measured 4m40s live, see app.execution.live_ranker's own note).
+    full_universe_scan_max_stage_b_per_cycle: int = 25
+    full_universe_scan_min_raw_spread_pct: float = 0.1
+    full_universe_scan_momentum_top_up: int = 5
+    full_universe_scan_interval_seconds: float = 30.0
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -22,6 +22,8 @@ from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
 from app.reporting.altcoin_scan_report import AltcoinScanReport, DirectionSummary, build_altcoin_scan_report, market_priority_score
 from app.reporting.dual_leg_edge import DualLegEdgeReport, build_dual_leg_edge_report
+from app.reporting.full_universe_discovery_report import build_full_market_discovery_report
+from app.reporting.inventory_manager_v2_report import build_inventory_manager_v2_report, render_v2_report_text
 from app.reporting.live_validation_score import build_live_validation_score
 from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
 from app.reporting.real_trading_summary import build_real_trading_summary
@@ -636,8 +638,11 @@ async def live_inventory(session: AsyncSession = Depends(get_session), max_symbo
         "inventory_scores": [
             {
                 "symbol": s.symbol, "base_asset": s.base_asset, "observations": s.observations,
-                "total_score": s.total_score, "expected_reuse_count": s.expected_reuse_count,
-                "eligible_for_prepositioning": s.eligible_for_prepositioning, "reason": s.reason,
+                "sightings": s.sightings, "net_positive_rate_pct": s.net_positive_rate_pct,
+                "median_net_edge_per_1000usdt": s.median_net_edge_per_1000usdt,
+                "p10_net_edge_per_1000usdt": s.p10_net_edge_per_1000usdt,
+                "total_score": s.total_score, "expected_reuse_label": s.expected_reuse_label,
+                "classification": s.classification.value, "reason": s.reason,
             }
             for s in report.inventory_scores
         ],
@@ -646,14 +651,102 @@ async def live_inventory(session: AsyncSession = Depends(get_session), max_symbo
                 "action": r.action, "exchange": r.exchange, "asset": r.asset,
                 "recommended_notional_usdt": r.recommended_notional_usdt,
                 "current_holding_usdt_equiv": r.current_holding_usdt_equiv,
-                "inventory_score": r.inventory_score, "reason": r.reason, "simulated": r.simulated,
+                "capital_required_usdt": r.capital_required_usdt,
+                "inventory_score": r.inventory_score, "classification": r.classification,
+                "sightings": r.sightings, "net_positive_rate_pct": r.net_positive_rate_pct,
+                "median_net_edge": r.median_net_edge, "p10_net_edge": r.p10_net_edge,
+                "expected_reuse_label": r.expected_reuse_label,
+                "reason": r.reason, "why": r.reason, "simulated": r.simulated,
             }
             for r in report.rebalance_candidates
         ],
         "inventory_pnl_usd": report.inventory_pnl_usd,
         "inventory_pnl_note": report.inventory_pnl_note,
         "simulation_only": report.simulation_only,
+        "inventory_manager_mode": get_settings().inventory_manager_mode,
+        "auto_real_rebalance": get_settings().auto_real_rebalance,
         "real_orders_placed": 0,
+    }
+
+
+def _serialize_top10(discovery) -> list[dict]:
+    return [
+        {
+            "symbol": s.symbol, "buy_exchange": s.buy_exchange, "sell_exchange": s.sell_exchange,
+            "net_profit_per_1000usdt_mean": s.net_profit_per_1000usdt_mean,
+            "net_profit_per_1000usdt_median": s.net_profit_per_1000usdt_median,
+            "net_profit_per_1000usdt_p10": s.net_profit_per_1000usdt_p10,
+            "status": s.status.value,
+        }
+        for s in discovery.top_10_opportunities
+    ]
+
+
+@router.get("/live/full-universe-discovery")
+async def live_full_universe_discovery(session: AsyncSession = Depends(get_session), hours: float = 24.0) -> dict:
+    """INVENTORY MANAGER V2 — FULL DYNAMIC UNIVERSE (user directive,
+    2026-08-24), item 9 "FULL MARKET DISCOVERY". Read-only, no order.
+    STAGE A/B counters reflect altcoin_scanner.py's latest cycle (a
+    separate process — see FullUniverseScanStatusRecord's own
+    docstring); repeating-edge count and top-10 come from persisted
+    history over the requested lookback window."""
+    settings = get_settings()
+    report = await build_full_market_discovery_report(session, min_expected_reuse_count=settings.min_expected_reuse_count, lookback_hours=hours)
+    return {
+        "common_pairs": report.common_pairs,
+        "pairs_fast_scanned": report.pairs_fast_scanned,
+        "pairs_deep_validated": report.pairs_deep_validated,
+        "pairs_with_raw_edge": report.pairs_with_raw_edge,
+        "pairs_net_positive_edges": report.pairs_net_positive_edges,
+        "pairs_with_repeating_net_edge": report.pairs_with_repeating_net_edge,
+        "top_10_opportunities": _serialize_top10(report),
+        "scan_status_available": report.scan_status_available,
+        "scan_status_age_seconds": report.scan_status_age_seconds,
+        "cycle_duration_seconds": report.cycle_duration_seconds,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/inventory-v2-report")
+async def live_inventory_v2_report(session: AsyncSession = Depends(get_session), max_symbols: int = 30, as_text: bool = False):
+    """INVENTORY MANAGER V2 — FINAL REPORT (user directive, 2026-08-24),
+    item 10. Read-only, no order. READY TO ENABLE AUTOMATIC REAL
+    INVENTORY MANAGEMENT is always NO in this build — see
+    app.reporting.inventory_manager_v2_report's own docstring for why
+    that is a structural gate, never a data-driven verdict. Pass
+    as_text=true for the exact plain-text report format requested."""
+    report = await build_inventory_manager_v2_report(session, max_ranker_symbols=max_symbols)
+    if as_text:
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(render_v2_report_text(report))
+
+    def _rec(r) -> dict:
+        return {
+            "asset": r.asset, "exchange": r.exchange, "action": r.action,
+            "recommended_amount_usdt": r.recommended_notional_usdt, "capital_required_usdt": r.capital_required_usdt,
+            "inventory_score": r.inventory_score, "classification": r.classification, "sightings": r.sightings,
+            "net_positive_rate_pct": r.net_positive_rate_pct, "median_net_edge": r.median_net_edge,
+            "p10_net_edge": r.p10_net_edge, "expected_reuse": r.expected_reuse_label, "why": r.reason,
+        }
+
+    return {
+        "common_universe": report.common_universe,
+        "pairs_actually_scanned": report.pairs_actually_scanned,
+        "pairs_with_raw_edge": report.pairs_with_raw_edge,
+        "pairs_net_positive_after_costs": report.pairs_net_positive_after_costs,
+        "pairs_with_repeating_net_edge": report.pairs_with_repeating_net_edge,
+        "top_10_symbols": report.top_10_symbols,
+        "strong_inventory_candidates": report.strong_inventory_candidates,
+        "recommended_bybit_inventory": [_rec(r) for r in report.recommended_bybit_inventory],
+        "recommended_binance_inventory": [_rec(r) for r in report.recommended_binance_inventory],
+        "total_recommended_capital_locked_usdt": report.total_recommended_capital_locked_usdt,
+        "real_inventory_orders": report.real_inventory_orders,
+        "ready_to_enable_automatic_real_inventory_management": report.ready_to_enable_automatic_real_inventory_management,
+        "ready_reason": report.ready_reason,
+        "inventory_manager_mode": report.inventory_manager_mode,
+        "auto_real_rebalance": report.auto_real_rebalance,
+        "report_text": render_v2_report_text(report),
     }
 
 

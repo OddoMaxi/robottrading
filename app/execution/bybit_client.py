@@ -198,6 +198,19 @@ class BybitClient(ExchangeClient):
                 data = await response.json()
         return _parse_book_ticker(data, symbol)
 
+    async def get_all_tickers(self) -> dict:
+        """GET /v5/market/tickers?category=spot with no symbol — public,
+        EVERY Bybit Spot symbol's bid/ask/volume/24h-change in ONE call.
+        Same STAGE A role as BinanceAccountClient.get_all_tickers_24hr."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/v5/market/tickers",
+                params={"category": "spot"},
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                return await response.json()
+
     async def get_order_book_depth(self, symbol: str, limit: int = 50) -> dict:
         async with aiohttp.ClientSession() as session:
             async with session.get(
