@@ -335,3 +335,28 @@ async def test_build_inventory_report_no_holdings_means_zero_locked_capital(monk
     report = await build_inventory_report(session=object(), binance_read=FakeBinanceRead(usdt=100.0), bybit_read=FakeBybitRead())
     assert report.capital_locked_in_inventory_usdt == 0.0
     assert report.rebalance_candidates == []
+
+
+async def test_since_passed_to_scan_report_is_tz_naive(monkeypatch):
+    """Regression: AltcoinScanObservationRecord.observed_at is stored
+    tz-naive (app.api.routes.scanner_altcoin_report's own convention) —
+    asyncpg raises DataError ("can't subtract offset-naive and
+    offset-aware datetimes") if since= is passed tz-aware. Caught live
+    against the real VPS database (2026-08-24) after the unit tests,
+    which all monkeypatch build_altcoin_scan_report and so never
+    exercised the real asyncpg comparison, missed it."""
+    monkeypatch.setattr(inv_module, "rank_live_opportunities", _fake_async([]))
+
+    captured = {}
+
+    async def _capture(session, since=None, until=None):
+        captured["since"] = since
+        from app.reporting.altcoin_scan_report import AltcoinScanReport
+
+        return AltcoinScanReport(window_start=None, window_end=None, total_observations=0, best_direction_by_symbol=[])
+
+    monkeypatch.setattr(inv_module, "build_altcoin_scan_report", _capture)
+
+    await build_inventory_report(session=object(), binance_read=FakeBinanceRead(usdt=100.0), bybit_read=FakeBybitRead())
+    assert captured["since"] is not None
+    assert captured["since"].tzinfo is None

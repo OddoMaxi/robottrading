@@ -370,7 +370,11 @@ async def build_inventory_report(
     inventory_missing = [c for c in opportunity_checks if c.reason == "INVENTORY_MISSING"]
     prepositioned_assets = sorted({c.required_base_asset for c in opportunity_checks if c.inventory_ready})
 
-    since = datetime.now(UTC) - lookback
+    # AltcoinScanObservationRecord.observed_at is stored tz-naive; asyncpg
+    # rejects comparing it to a tz-aware bound (see
+    # app.api.routes.scanner_altcoin_report's own since= convention) —
+    # strip tzinfo after computing the UTC-relative window, never before.
+    since = (datetime.now(UTC) - lookback).replace(tzinfo=None)
     scan_report = await build_altcoin_scan_report(session, since=since)
     inventory_scores = [score_direction_for_inventory(s, settings.min_expected_reuse_count) for s in scan_report.best_direction_by_symbol]
     inventory_scores.sort(key=lambda s: s.total_score, reverse=True)
