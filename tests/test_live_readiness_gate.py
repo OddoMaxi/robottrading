@@ -135,3 +135,51 @@ async def test_gate_is_ready_when_every_condition_including_capital_is_met():
     assert report.capital_pre_positioned is True
     assert report.ready_for_first_real_arbitrage is True
     assert report.proposed_first_trade_size_usdt is not None
+
+
+async def test_gate_checks_the_actual_reference_symbols_base_asset_not_lunc():
+    """Regression for the real bug caught 2026-08-24: for a non-LUNC
+    reference_symbol, bybit_lunc_balance must reflect THAT symbol's base
+    asset (e.g. RVN), never a hardcoded LUNC lookup — a wallet holding
+    zero LUNC but plenty of RVN must still pass when checking RVNUSDT."""
+
+    class RvnBinance(ReadOnlyBinance):
+        async def get_api_restrictions(self):
+            return SimpleNamespace(enable_spot_and_margin_trading=True, enable_withdrawals=False)
+
+        async def get_exchange_info(self, symbols=None):
+            return {
+                "symbols": [
+                    {
+                        "symbol": "RVNUSDT", "status": "TRADING", "baseAsset": "RVN", "quoteAsset": "USDT",
+                        "baseAssetPrecision": 0, "quoteAssetPrecision": 8, "orderTypes": ["MARKET"], "isSpotTradingAllowed": True,
+                        "filters": [
+                            {"filterType": "LOT_SIZE", "minQty": "1", "maxQty": "9e9", "stepSize": "1"},
+                            {"filterType": "NOTIONAL", "minNotional": "5.00"},
+                        ],
+                    }
+                ]
+            }
+
+        async def get_book_ticker(self, symbol):
+            return {"bidPrice": "0.003400", "askPrice": "0.003411"}
+
+    class RvnBybit(TradeCapableBybit):
+        async def get_wallet_balance(self):
+            # zero LUNC, plenty of RVN — the exact real-world shape after
+            # pre-positioning RVN inventory for a non-LUNC candidate.
+            return {"result": {"list": [{"coin": [
+                {"coin": "LUNC", "availableToWithdraw": "0"},
+                {"coin": "RVN", "availableToWithdraw": "3082.3"},
+            ]}]}}
+
+    report = await build_first_live_gate_report(binance_client=RvnBinance(), bybit_client=RvnBybit(), reference_symbol="RVNUSDT")
+    assert report.bybit_lunc_balance == 3082.3  # actually RVN's balance, despite the field's legacy name
+    assert report.capital_pre_positioned is True
+    assert report.ready_for_first_real_arbitrage is True
+
+
+async def test_gate_still_checks_lunc_for_the_lunc_default():
+    """The fix must not regress the original, still-default-used case."""
+    report = await build_first_live_gate_report(binance_client=TradeCapableBinance(), bybit_client=TradeCapableBybit(), reference_symbol="LUNCUSDT")
+    assert report.bybit_lunc_balance == 950000.0

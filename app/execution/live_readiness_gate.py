@@ -38,7 +38,7 @@ class FirstLiveGateReport:
     withdrawals_disabled: bool
     withdrawals_detail: str
     binance_usdt_balance: float | None
-    bybit_lunc_balance: float | None
+    bybit_lunc_balance: float | None  # misleadingly named (Phase 3A holdover) — actually the CURRENT reference_symbol's base-asset balance on Bybit, not always literally LUNC
     max_live_notional_usdt: float
     leg_risk_protection_pass: bool
     leg_risk_protection_detail: str
@@ -134,7 +134,16 @@ async def build_first_live_gate_report(
         wallet = await bybit.get_wallet_balance()
         from app.execution.bybit_client import parse_wallet_balance
 
-        bybit_lunc_balance = parse_wallet_balance(wallet, "LUNC")
+        # BUG FIX (user directive, 2026-08-24, RVN live control): this was
+        # still hardcoded to "LUNC" despite the function's own docstring
+        # claiming reference_symbol generalization — for any non-LUNC
+        # reference_symbol (e.g. "RVNUSDT"), it was comparing the REQUIRED
+        # quantity of the real reference asset (smallest_size.lunc_qty,
+        # itself correctly derived from reference_symbol) against the
+        # HELD quantity of an unrelated asset (LUNC). Never caught before
+        # because every prior real check used the LUNCUSDT default.
+        reference_base_asset = reference_symbol.removesuffix("USDT")
+        bybit_lunc_balance = parse_wallet_balance(wallet, reference_base_asset)
     except Exception:
         bybit_lunc_balance = None
 
