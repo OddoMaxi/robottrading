@@ -218,6 +218,19 @@ async def test_filled_records_real_price_qty_fee(monkeypatch):
     assert result.pre_purchase_net_edge_usd > 0  # the fixture is set up as a genuinely positive spread
 
 
+async def test_order_link_id_stays_within_bybits_36_character_limit(monkeypatch):
+    """Regression (2026-08-24): the previous f"inventory-{attempt_id}"
+    format was 46 characters — 10 over Bybit's documented orderLinkId
+    max of 36 — and is the prime suspect for two real retCode=170003
+    "unknown parameter" rejections."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    trade = FakeBybitTrade(fill_status="Filled", fill_qty=2919.7)
+    result = await _executor(bybit_trade=trade).constitute_inventory(SYMBOL, "binance", "bybit", 10.0)
+    assert result.order_client_id is not None
+    assert len(result.order_client_id) <= 36
+    assert trade.submitted_orders[0][3] == result.order_client_id
+
+
 async def test_bybit_buy_transmits_the_raw_usdt_notional_not_a_converted_base_qty(monkeypatch):
     """Bybit BUY caller fix (2026-08-24): bybit_live_trade_client.place_
     market_order now sends marketUnit="quoteCoin" for every Buy, meaning

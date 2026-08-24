@@ -306,7 +306,14 @@ class InventoryConstitutionExecutor:
             required_qty = compute_required_inventory_qty(quote.executable_qty, sell_market.taker_fee_rate, sell_market.step_size)
             result.required_base_qty = required_qty
 
-            client_order_id = f"inventory-{attempt_id}"
+            # Bybit's orderLinkId has a documented 36-character max — a
+            # full "inventory-{uuid4}" (46 chars) silently exceeded it
+            # and is the prime suspect for the real retCode=170003
+            # "unknown parameter" rejections (2026-08-24). attempt_id.hex
+            # (32 hex chars, no hyphens) truncated to 24 keeps this well
+            # under the limit while remaining effectively collision-proof
+            # at max_concurrent_inventory_operations=1.
+            client_order_id = f"inv-{attempt_id.hex[:24]}"
             result.order_client_id = client_order_id
             result.submitted_at = time.time()
             try:

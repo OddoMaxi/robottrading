@@ -188,6 +188,32 @@ async def test_both_legs_filled_computes_actual_pnl(monkeypatch):
     assert guard.in_flight_count == 0
 
 
+async def test_buy_and_sell_client_order_ids_stay_within_bybits_36_character_limit(monkeypatch):
+    """Regression (2026-08-24): the previous f"live-{attempt_id}-buy"/
+    f"live-{attempt_id}-sell" formats were 45/46 characters — over
+    Bybit's documented orderLinkId max of 36 — and are the prime suspect
+    for two real retCode=170003 "unknown parameter" rejections. Both
+    exchanges receive the exact same id, so this must hold regardless of
+    which leg lands on Bybit."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    result = await _executor().execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert len(result.buy_client_order_id) <= 36
+    assert len(result.sell_client_order_id) <= 36
+
+
+async def test_neutralization_order_link_id_stays_within_bybits_36_character_limit(monkeypatch):
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    bybit_trade = FakeBybitTrade(raise_on_submit=True)
+    binance_trade = FakeBinanceTrade()
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
+    neutralize_client_order_id = binance_trade.submitted_orders[1][2]
+    assert len(neutralize_client_order_id) <= 36
+
+
 async def test_buy_leg_rejected_with_zero_fill_is_no_fill_not_neutralized(monkeypatch):
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)

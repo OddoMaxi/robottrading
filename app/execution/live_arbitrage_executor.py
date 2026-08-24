@@ -327,7 +327,10 @@ class LiveArbitrageExecutor:
         "fix" a one-leg-filled state by retrying the other exchange's
         leg, which could double the position if the original attempt
         actually succeeded after all under an ambiguous response."""
-        neutralize_id = f"neutralize-{attempt_id}"
+        # Bybit's orderLinkId has a documented 36-character max — see the
+        # matching fix note on buy_client_order_id/sell_client_order_id
+        # below (2026-08-24, real retCode=170003 rejections).
+        neutralize_id = f"neu-{attempt_id.hex[:24]}"
         try:
             await self._place_market_sell(exchange, symbol, qty, neutralize_id)
         except Exception as exc:
@@ -402,7 +405,14 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
-            buy_client_order_id = f"live-{attempt_id}-buy"
+            # Bybit's orderLinkId has a documented 36-character max — a
+            # full "live-{uuid4}-buy" (45 chars) silently exceeded it and
+            # is the prime suspect for the real retCode=170003 "unknown
+            # parameter" rejections (2026-08-24). attempt_id.hex (32 hex
+            # chars, no hyphens) truncated to 24 keeps every variant
+            # (buy/sell/neutralize) well under the limit while remaining
+            # effectively collision-proof at max_concurrent_live_arbitrages=1.
+            buy_client_order_id = f"buy-{attempt_id.hex[:24]}"
             result.buy_client_order_id = buy_client_order_id
             result.buy_submitted_at = time.time()
             try:
@@ -453,7 +463,7 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
-            sell_client_order_id = f"live-{attempt_id}-sell"
+            sell_client_order_id = f"sell-{attempt_id.hex[:24]}"
             result.sell_client_order_id = sell_client_order_id
             result.sell_submitted_at = time.time()
             try:
