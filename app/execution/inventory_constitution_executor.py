@@ -45,7 +45,7 @@ from enum import StrEnum
 from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.binance_filters import parse_symbol_rules as parse_binance_symbol_rules
 from app.execution.binance_filters import round_down_to_step
-from app.execution.binance_live_trade_client import BinanceLiveTradeClient
+from app.execution.binance_live_trade_client import BinanceLiveTradeClient, aggregate_binance_trades
 from app.execution.bybit_client import BybitClient
 from app.execution.bybit_live_trade_client import BybitLiveTradeClient
 from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
@@ -308,9 +308,30 @@ class InventoryConstitutionExecutor:
         base_asset = symbol.removesuffix(QUOTE_ASSET)
         if exchange == "binance":
             result = await self._binance_trade.get_order_status(symbol, orig_client_order_id=client_order_id)
-            gross_qty = result.executed_qty
-            avg_price = result.average_fill_price()
-            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(result.total_fees_by_asset(), base_asset, avg_price, "inventory-constitution")
+            if not result.is_terminal or result.executed_qty <= 0:
+                # Not yet resolved, or resolved with zero fill -- no real
+                # trades to fetch; get_order_status's own qty/status are
+                # already reliable for this case (there is no fee to mis-report).
+                return _NormalizedFillStatus(
+                    order_id=str(result.order_id), is_terminal=result.is_terminal, is_filled=result.is_filled,
+                    filled_qty=result.executed_qty, net_base_qty=result.executed_qty,
+                    avg_fill_price=result.average_fill_price(),
+                    fee_asset=None, fee_amount=0.0, fee_usd_equivalent=0.0,
+                    raw_status=result.status,
+                )
+            # FIX 1 (user directive, 2026-08-24, after a real SAND
+            # inventory buy on Binance charged 0.237 SAND in fees that
+            # this branch silently missed -- get_order_status's own
+            # single-order endpoint never returns fills at all; the same
+            # fix already applied to live_arbitrage_executor's own
+            # _get_status, mirrored here: fetch the REAL trades via
+            # get_order_trades (the account trade-history endpoint) once
+            # the order is terminal and filled.
+            trades = await self._binance_trade.get_order_trades(symbol, result.order_id)
+            aggregated = aggregate_binance_trades(trades)
+            gross_qty = aggregated.gross_base_qty if trades else result.executed_qty
+            avg_price = aggregated.actual_effective_price if trades else result.average_fill_price()
+            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(aggregated.fees_by_asset, base_asset, avg_price, "inventory-constitution")
             return _NormalizedFillStatus(
                 order_id=str(result.order_id), is_terminal=result.is_terminal, is_filled=result.is_filled,
                 filled_qty=gross_qty, net_base_qty=net_base_qty_after_fee(gross_qty, fee_asset, fee_amount, base_asset),

@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 import app.execution.inventory_constitution_executor as executor_module
+from app.execution.binance_live_trade_client import BinanceTrade
 from app.execution.bybit_live_trade_client import BybitOrderAck, BybitOrderStatus
 from app.execution.inventory_constitution_executor import (
     InventoryConstitutionExecutor,
@@ -462,3 +465,182 @@ async def test_in_flight_count_not_incremented_when_refused(monkeypatch):
     monkeypatch.setattr(executor_module, "inventory_guard", guard)
     await _executor().constitute_inventory(SYMBOL, "binance", "bybit", 10.0)
     assert guard.in_flight_count == 0
+
+
+# ---- FIX 1 (user directive, 2026-08-24): Binance-side inventory fee
+# accounting ----------------------------------------------------------------
+#
+# Every test above constitutes inventory ON BYBIT (buy_exchange_for_
+# arbitrage="binance", sell_exchange="bybit") -- FakeBinanceTrade even
+# raises if place_market_order is ever called on it, by design. That
+# means the Binance branch of _get_status was NEVER exercised by this
+# suite, and it still called get_order_status() (GET /api/v3/order,
+# which never returns fills) instead of get_order_trades()
+# (GET /api/v3/myTrades) -- exactly the bug already fixed in
+# live_arbitrage_executor.py's own _get_status, but never mirrored here.
+# A real SAND inventory buy on Binance (2026-08-24) charged 0.237 SAND
+# in fees that were silently reported as fee_asset=None, fee_amount=0,
+# net_filled_qty=237.0 (should have been 236.763) as a direct result.
+
+SAND_SYMBOL = "SANDUSDT"
+
+SAND_EXCHANGE_INFO_FIXTURE = {
+    "symbols": [
+        {
+            "symbol": "SANDUSDT", "status": "TRADING", "baseAsset": "SAND", "quoteAsset": "USDT",
+            "baseAssetPrecision": 0, "quoteAssetPrecision": 8, "orderTypes": ["MARKET"], "isSpotTradingAllowed": True,
+            "filters": [
+                {"filterType": "LOT_SIZE", "minQty": "1", "maxQty": "9e9", "stepSize": "1"},
+                {"filterType": "NOTIONAL", "minNotional": "5.00"},
+            ],
+        }
+    ]
+}
+
+
+class BinanceSellSideRead:
+    """Binance as the SELL leg (bids populated) -- real observed SAND
+    prices from the 2026-08-24 incident. The module-level FakeBinanceRead
+    above only ever populates asks (Binance as the BUY leg), which is
+    exactly why this direction went untested."""
+
+    async def get_book_ticker(self, symbol):
+        return {"bidPrice": "0.04215", "askPrice": "0.04220"}
+
+    async def get_order_book_depth(self, symbol, limit=20):
+        return {"asks": [], "bids": [["0.04215", "5000"], ["0.04210", "5000"]]}
+
+    async def get_exchange_info(self, symbols=None):
+        return SAND_EXCHANGE_INFO_FIXTURE
+
+    async def get_trade_fee(self, symbol):
+        return type("Fee", (), {"maker_fee_rate": 0.001, "taker_fee_rate": 0.001})()
+
+
+class BybitBuySideRead:
+    """Bybit as the BUY leg (asks populated) -- real observed SAND prices."""
+
+    async def get_book_ticker(self, symbol):
+        return type("Ticker", (), {"bid_price": 0.04160, "ask_price": 0.04166})()
+
+    async def get_order_book_depth(self, symbol, limit=50):
+        return {"result": {"a": [["0.04166", "5000"], ["0.04170", "5000"]], "b": []}}
+
+    async def get_symbol_rules(self, symbol):
+        return type("Rules", (), {"is_tradable": True, "min_order_qty": 1.0, "qty_step": 1.0, "tick_size": 0.00001, "min_order_amt": 1.0})()
+
+    async def get_fee_rate(self, symbol):
+        return type("Fee", (), {"maker_fee_rate": 0.001, "taker_fee_rate": 0.001})()
+
+
+class FakeBinanceInventoryTrade:
+    """Fake Binance live-trade client exercising the FIX 1 code path:
+    get_order_status (no fills, ever) followed by get_order_trades (the
+    real fee/qty source) once the order is terminal and filled."""
+
+    def __init__(self, order_id=4469131954, executed_qty=237.0, trades=None, raise_on_submit=False):
+        self.order_id = order_id
+        self.executed_qty = executed_qty
+        self.trades = trades if trades is not None else []
+        self.raise_on_submit = raise_on_submit
+        self.submitted_orders = []
+
+    async def place_market_order(self, symbol, side, client_order_id=None, quote_order_qty=None, quantity=None):
+        if self.raise_on_submit:
+            raise RuntimeError("simulated network failure")
+        self.submitted_orders.append((symbol, side, client_order_id, quote_order_qty, quantity))
+
+    async def get_order_status(self, symbol, orig_client_order_id=None):
+        return SimpleNamespace(
+            order_id=self.order_id, is_terminal=True, is_filled=self.executed_qty > 0,
+            executed_qty=self.executed_qty, status="FILLED" if self.executed_qty > 0 else "REJECTED",
+            average_fill_price=lambda: (0.04216 if self.executed_qty > 0 else None),
+            total_fees_by_asset=lambda: {},  # deliberately empty -- get_order_status never has real fee data
+        )
+
+    async def get_order_trades(self, symbol, order_id):
+        return self.trades
+
+
+def _sand_real_trades():
+    """The exact real trade fills observed for the SAND inventory
+    constitution incident (2026-08-24), fetched via a direct
+    GET /api/v3/myTrades call: two fills totaling 237.0 gross, 0.237 SAND
+    in fees -- a normal ~0.1% Binance base-asset fee, not zero."""
+    return [
+        BinanceTrade(trade_id=257366462, order_id=4469131954, price=0.04216, qty=121.0, quote_qty=5.10136, commission=0.121, commission_asset="SAND"),
+        BinanceTrade(trade_id=257366463, order_id=4469131954, price=0.04216, qty=116.0, quote_qty=4.89056, commission=0.116, commission_asset="SAND"),
+    ]
+
+
+def _binance_side_executor(binance_trade):
+    return InventoryConstitutionExecutor(
+        binance_read=BinanceSellSideRead(), binance_trade=binance_trade,
+        bybit_read=BybitBuySideRead(), bybit_trade=FakeBybitTrade(),
+    )
+
+
+async def test_binance_inventory_buy_with_base_asset_fee_reports_real_net_qty(monkeypatch):
+    """Test 1 (user directive, 2026-08-24): a real Binance inventory buy
+    that charges its fee in the base asset (not USDT, not zero) must
+    report the TRUE net quantity via get_order_trades, not the gross
+    fill as if get_order_status's own (fill-less) data were authoritative."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    binance_trade = FakeBinanceInventoryTrade(executed_qty=237.0, trades=_sand_real_trades())
+    result = await _binance_side_executor(binance_trade).constitute_inventory(SAND_SYMBOL, "bybit", "binance", 10.0)
+    assert result.outcome == InventoryConstitutionOutcome.FILLED
+    assert result.filled_qty == 237.0
+    assert result.fee_asset == "SAND"
+    assert result.fee_amount == pytest.approx(0.237)
+
+
+async def test_binance_inventory_net_qty_after_fee(monkeypatch):
+    """Test 2 (user directive, 2026-08-24): net_filled_qty must be the
+    fee-reduced quantity actually held, not the gross fill."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    binance_trade = FakeBinanceInventoryTrade(executed_qty=237.0, trades=_sand_real_trades())
+    result = await _binance_side_executor(binance_trade).constitute_inventory(SAND_SYMBOL, "bybit", "binance", 10.0)
+    assert result.net_filled_qty == pytest.approx(236.763)
+    assert result.net_filled_qty < result.filled_qty
+
+
+async def test_sand_incident_exact_replay(monkeypatch):
+    """Test 4 (user directive, 2026-08-24) -- the exact real incident:
+    gross fill = 237.0 SAND, real fee = 0.237 SAND, real net inventory =
+    236.763 SAND. Before FIX 1 this reported fee_asset=None, fee_amount=0,
+    net_filled_qty=237.0 (silently wrong, confirmed via a direct
+    GET /api/v3/myTrades query against the real order after the fact)."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    binance_trade = FakeBinanceInventoryTrade(executed_qty=237.0, trades=_sand_real_trades())
+    result = await _binance_side_executor(binance_trade).constitute_inventory(SAND_SYMBOL, "bybit", "binance", 10.0)
+    assert result.filled_qty == 237.0
+    assert result.net_filled_qty == pytest.approx(236.763)
+    assert result.fee_asset == "SAND"
+    assert result.fee_amount == pytest.approx(0.237)
+    assert result.fee_usd_equivalent == pytest.approx(0.237 * result.avg_fill_price)
+    assert result.fee_usd == result.fee_usd_equivalent
+
+
+async def test_binance_inventory_zero_fee_leaves_net_qty_equal_to_gross(monkeypatch):
+    """Regression guard: when Binance genuinely charges no fee (an empty
+    trades-fee map), net_filled_qty must stay equal to the gross fill --
+    FIX 1 must not overcorrect into always assuming a base-asset fee."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    zero_fee_trades = [BinanceTrade(trade_id=1, order_id=999, price=0.04216, qty=237.0, quote_qty=237.0 * 0.04216, commission=0.0, commission_asset="SAND")]
+    binance_trade = FakeBinanceInventoryTrade(executed_qty=237.0, trades=zero_fee_trades)
+    result = await _binance_side_executor(binance_trade).constitute_inventory(SAND_SYMBOL, "bybit", "binance", 10.0)
+    assert result.fee_asset is None
+    assert result.fee_amount == 0.0
+    assert result.net_filled_qty == pytest.approx(237.0)
+
+
+async def test_binance_inventory_no_order_trades_falls_back_to_order_status_qty(monkeypatch):
+    """Graceful degradation (matches live_arbitrage_executor's own
+    fallback): if myTrades comes back empty despite a filled order (a
+    race where trade records haven't propagated yet), fall back to
+    get_order_status's own qty rather than reporting a zero fill."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    binance_trade = FakeBinanceInventoryTrade(executed_qty=237.0, trades=[])
+    result = await _binance_side_executor(binance_trade).constitute_inventory(SAND_SYMBOL, "bybit", "binance", 10.0)
+    assert result.outcome == InventoryConstitutionOutcome.FILLED
+    assert result.filled_qty == 237.0
