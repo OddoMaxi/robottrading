@@ -133,7 +133,13 @@ def test_settings_defaults_are_the_locked_down_ones():
     # "nothing allowed" (app.execution.live_guard treats empty specially).
     assert defaults.live_symbol_allowlist == []
     assert set(defaults.live_allowed_directions) == {"BINANCE_BUY_BYBIT_SELL", "BYBIT_BUY_BINANCE_SELL"}
-    assert defaults.max_notional_per_leg_usdt == 5.0
+    # Raised 5 -> 10 USDT (user directive, 2026-08-24, real-size audit
+    # item 1) after the audit found Binance's own min_notional=5.0 plus
+    # step-size rounding rejected every real opportunity at 5 USDT
+    # regardless of profitability — a mechanical gate, not a loosened
+    # safety limit. 10 USDT matches the pre-existing micro_live_cap_usdt/
+    # max_live_capital_usdt caps exactly.
+    assert defaults.max_notional_per_leg_usdt == 10.0
     assert defaults.max_concurrent_live_arbitrages == 1
     assert defaults.withdrawals_required is False
 

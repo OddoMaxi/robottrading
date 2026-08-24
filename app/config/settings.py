@@ -102,8 +102,16 @@ class Settings(BaseSettings):
     # Phase 3, item 6: start small and require explicit authorization to
     # raise — this codebase never raises it itself (see
     # app.reporting.live_validation_score for the recommendation-only
-    # ELIGIBLE_FOR_SIZE_INCREASE signal).
-    max_notional_per_leg_usdt: float = 5.0
+    # ELIGIBLE_FOR_SIZE_INCREASE signal). Raised 5 -> 10 USDT (user
+    # directive, 2026-08-24, real-size audit item 1): at 5 USDT, Binance's
+    # own min_notional=5.0 combined with step-size rounding made the
+    # ACTUAL executed notional fall just under 5.0, rejecting every real
+    # opportunity found regardless of profitability — a mechanical
+    # rounding gate, not a market or safety concern. 10 USDT exactly
+    # matches the pre-existing micro_live_cap_usdt/max_live_capital_usdt
+    # caps above (both already 10.0), so this doesn't loosen any other
+    # gate — it makes the three consistent with each other.
+    max_notional_per_leg_usdt: float = 10.0
     max_concurrent_live_arbitrages: int = 1
     # Self-documenting assertion, not a remotely-enforceable setting (this
     # app has no way to change what's provisioned on the exchange side) —
