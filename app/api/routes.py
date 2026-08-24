@@ -647,6 +647,15 @@ async def live_inventory(session: AsyncSession = Depends(get_session), max_symbo
                 "total_score": s.total_score, "expected_reuse_label": s.expected_reuse_label,
                 "expected_additional_executable_trades": s.expected_additional_executable_trades,
                 "classification": s.classification.value, "reason": s.reason,
+                # FINAL SIMPLIFICATION (2026-08-24) — classification is now
+                # driven by this short-term regime, not by the 1h/24h
+                # analytics fields below (kept for information only).
+                "short_term_regime": s.short_term_regime,
+                "edge_now_net_profit_per_1000usdt": s.edge_now_net_profit_per_1000usdt,
+                "confirmations_recent": s.confirmations_recent,
+                "current_streak_seconds": s.current_streak_seconds,
+                "mean_net_profit_1h_usdt": s.mean_net_profit_1h_usdt,
+                "mean_net_profit_24h_usdt": s.mean_net_profit_24h_usdt,
             }
             for s in report.inventory_scores
         ],

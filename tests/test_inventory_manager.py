@@ -12,6 +12,7 @@ from app.execution.inventory_manager import (
 )
 from app.execution.live_ranker import PrePositioningCheck, RankedOpportunity
 from app.reporting.altcoin_scan_report import DirectionSummary, OpportunityStatus
+from app.reporting.short_term_regime import ShortTermRegime, ShortTermRegimeSummary
 
 
 def _summary(**overrides) -> DirectionSummary:
@@ -42,63 +43,115 @@ def _summary(**overrides) -> DirectionSummary:
     return DirectionSummary(**base)
 
 
-# ---- score_direction_for_inventory ----------------------------------
+def _short_term(regime=ShortTermRegime.CONFIRMED_SHORT_TERM, **overrides) -> ShortTermRegimeSummary:
+    base = dict(
+        symbol="ZRO/USDT",
+        buy_exchange="binance",
+        sell_exchange="bybit",
+        edge_now_positive=True,
+        edge_now_net_profit_per_1000usdt=3.0,
+        current_streak_seconds=20.0,
+        windows={},
+        confirmations_recent=3,
+        regime=regime,
+        regime_reason="test fixture",
+    )
+    base.update(overrides)
+    return ShortTermRegimeSummary(**base)
 
 
-def test_strong_recurring_symbol_is_eligible():
+# ---- score_direction_for_inventory (FINAL SIMPLIFICATION — regime-driven) --
+#
+# Classification is now driven entirely by short_term.regime, not by the
+# 24h summary (item 2/6 of the 2026-08-24 "FINAL SIMPLIFICATION"
+# directive: the 24h/1h window is analytics-only and must never veto a
+# currently-confirmed short-term opportunity — this is exactly what
+# wrongly blocked the real RVN opportunity this directive fixes).
+
+
+def test_no_short_term_data_defaults_to_do_not_preposition():
     score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3)
-    assert is_preposition_eligible(score) is True
-    assert score.classification == InventoryClassification.STRONG_PREPOSITION_CANDIDATE
-    assert 0.0 < score.total_score <= 100.0
-    assert score.base_asset == "ZRO"
-
-
-def test_insufficient_observations_not_eligible():
-    score = score_direction_for_inventory(_summary(observations=2), min_expected_reuse_count=3)
     assert is_preposition_eligible(score) is False
     assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
-    assert "insufficient history" in score.reason
+    assert score.short_term_regime == "NO_DATA"
 
 
-def test_one_off_opportunity_never_earns_prepositioning():
+def test_no_edge_regime_is_do_not_preposition():
+    score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.NO_EDGE, edge_now_positive=False))
+    assert is_preposition_eligible(score) is False
+    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
+
+
+def test_flash_regime_is_observe_not_candidate():
     """Directive's own words: never buy just to chase a spread that's
-    already disappearing — a symbol seen only once or twice must not
-    qualify even if everything else about it looks great."""
-    score = score_direction_for_inventory(_summary(unique_detections=1, continuations=0), min_expected_reuse_count=3)
-    assert is_preposition_eligible(score) is False
-    assert score.classification == InventoryClassification.OBSERVE
-    assert "one-off" in score.reason
-
-
-def test_inconsistent_p10_edge_stays_observe_not_candidate():
-    """A positive MEAN can hide a negative worst-decile outcome — that
-    must not be enough to earn PREPOSITION_CANDIDATE."""
-    score = score_direction_for_inventory(_summary(net_profit_per_1000usdt_p10=-1.0), min_expected_reuse_count=3)
-    assert is_preposition_eligible(score) is False
-    assert score.classification == InventoryClassification.OBSERVE
-    assert "inconsistent" in score.reason
-
-
-def test_non_positive_edge_not_eligible():
-    score = score_direction_for_inventory(_summary(net_profit_per_1000usdt_mean=0.0), min_expected_reuse_count=3)
-    assert is_preposition_eligible(score) is False
-    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
-    assert "net-positive" in score.reason
-
-
-def test_weak_status_not_eligible_even_with_enough_sightings():
+    already disappearing — positive right now but not yet independently
+    confirmed enough times must not qualify for real capital yet."""
     score = score_direction_for_inventory(
-        _summary(status=OpportunityStatus.WEAK, unique_detections=10, continuations=10, net_profit_per_1000usdt_mean=3.0),
-        min_expected_reuse_count=3,
+        _summary(), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.FLASH, confirmations_recent=1, regime_reason="edge positive now but only 1 confirmation(s)")
     )
     assert is_preposition_eligible(score) is False
-    assert score.classification == InventoryClassification.DO_NOT_PREPOSITION
-    assert "status too weak" in score.reason
+    assert score.classification == InventoryClassification.OBSERVE
+    assert "confirmation" in score.reason
 
 
-def test_watch_status_below_strong_threshold_is_preposition_candidate_not_strong():
-    score = score_direction_for_inventory(_summary(status=OpportunityStatus.WATCH), min_expected_reuse_count=3)
+def test_confirmed_short_term_regime_is_preposition_candidate():
+    """Item 4: CONFIRMED_SHORT_TERM must already be tradable — it is not
+    made to wait for multi-minute persistence."""
+    score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.CONFIRMED_SHORT_TERM))
+    assert is_preposition_eligible(score) is True
     assert score.classification == InventoryClassification.PREPOSITION_CANDIDATE
+
+
+def test_persistent_regime_is_strong_preposition_candidate():
+    score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.PERSISTENT))
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.STRONG_PREPOSITION_CANDIDATE
+
+
+def test_strong_persistent_regime_is_strong_preposition_candidate():
+    score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.STRONG_PERSISTENT))
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.STRONG_PREPOSITION_CANDIDATE
+
+
+def test_negative_24h_mean_does_not_block_confirmed_short_term():
+    """The exact RVN regression this directive fixes: a negative 24h mean
+    must NEVER by itself veto a symbol that is CONFIRMED_SHORT_TERM right
+    now."""
+    score = score_direction_for_inventory(
+        _summary(net_profit_per_1000usdt_mean=-5.0), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.CONFIRMED_SHORT_TERM)
+    )
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.PREPOSITION_CANDIDATE
+    assert score.mean_net_profit_24h_usdt == -5.0  # still recorded as analytics, just not a gate
+
+
+def test_negative_24h_p10_does_not_block_confirmed_short_term():
+    score = score_direction_for_inventory(
+        _summary(net_profit_per_1000usdt_p10=-9.0), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.CONFIRMED_SHORT_TERM)
+    )
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.PREPOSITION_CANDIDATE
+
+
+def test_weak_24h_status_does_not_block_confirmed_short_term():
+    """status (OpportunityStatus, itself derived from 24h data) is no
+    longer part of the classification decision at all."""
+    score = score_direction_for_inventory(
+        _summary(status=OpportunityStatus.WEAK), min_expected_reuse_count=3, short_term=_short_term(regime=ShortTermRegime.CONFIRMED_SHORT_TERM)
+    )
+    assert is_preposition_eligible(score) is True
+    assert score.classification == InventoryClassification.PREPOSITION_CANDIDATE
+
+
+def test_score_breakdown_carries_the_short_term_fields():
+    st = _short_term(regime=ShortTermRegime.PERSISTENT, edge_now_net_profit_per_1000usdt=7.5, confirmations_recent=5, current_streak_seconds=310.0, mean_net_profit_1h_usdt=2.0)
+    score = score_direction_for_inventory(_summary(), min_expected_reuse_count=3, short_term=st)
+    assert score.short_term_regime == "PERSISTENT"
+    assert score.edge_now_net_profit_per_1000usdt == 7.5
+    assert score.confirmations_recent == 5
+    assert score.current_streak_seconds == 310.0
+    assert score.mean_net_profit_1h_usdt == 2.0
 
 
 def test_higher_edge_scores_higher_all_else_equal():
@@ -166,7 +219,7 @@ def _missing_check(asset="ZRO", sell_exchange="bybit") -> OpportunityInventoryCh
 
 
 def test_buys_inventory_for_top_eligible_missing_candidate():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[_missing_check("ZRO")], current_inventory_usdt_value={},
         binance_usdt=50.0, bybit_usdt=50.0,
@@ -183,7 +236,7 @@ def test_no_buy_recommended_when_not_currently_missing():
     """An asset with a great score but nothing currently blocking it
     (not in `missing`) gets no recommendation — MASTER never buys
     speculative inventory just because a symbol scores well."""
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[], current_inventory_usdt_value={},
         binance_usdt=50.0, bybit_usdt=50.0,
@@ -193,7 +246,10 @@ def test_no_buy_recommended_when_not_currently_missing():
 
 
 def test_no_buy_recommended_for_ineligible_symbol_even_if_missing():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT", unique_detections=1, continuations=0), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(
+        _summary(symbol="ZRO/USDT"), min_expected_reuse_count=3,
+        short_term=_short_term(regime=ShortTermRegime.FLASH, confirmations_recent=1),
+    )
     recs = recommend_rebalance(
         scores=[score], missing=[_missing_check("ZRO")], current_inventory_usdt_value={},
         binance_usdt=50.0, bybit_usdt=50.0,
@@ -203,7 +259,7 @@ def test_no_buy_recommended_for_ineligible_symbol_even_if_missing():
 
 
 def test_buy_size_never_exceeds_max_rebalance_size():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[_missing_check("ZRO")], current_inventory_usdt_value={},
         binance_usdt=100.0, bybit_usdt=100.0,
@@ -214,7 +270,7 @@ def test_buy_size_never_exceeds_max_rebalance_size():
 
 
 def test_buy_size_never_exceeds_max_inventory_per_asset_headroom():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[_missing_check("ZRO")], current_inventory_usdt_value={"ZRO": 8.0},
         binance_usdt=100.0, bybit_usdt=100.0,
@@ -226,8 +282,8 @@ def test_buy_size_never_exceeds_max_inventory_per_asset_headroom():
 
 def test_total_exposure_cap_stops_further_buys():
     scores = [
-        score_direction_for_inventory(_summary(symbol="ZRO/USDT", net_profit_per_1000usdt_mean=5.0), min_expected_reuse_count=3),
-        score_direction_for_inventory(_summary(symbol="STX/USDT", net_profit_per_1000usdt_mean=4.0), min_expected_reuse_count=3),
+        score_direction_for_inventory(_summary(symbol="ZRO/USDT", net_profit_per_1000usdt_mean=5.0), min_expected_reuse_count=3, short_term=_short_term(symbol="ZRO/USDT")),
+        score_direction_for_inventory(_summary(symbol="STX/USDT", net_profit_per_1000usdt_mean=4.0), min_expected_reuse_count=3, short_term=_short_term(symbol="STX/USDT")),
     ]
     recs = recommend_rebalance(
         scores=scores, missing=[_missing_check("ZRO"), _missing_check("STX")], current_inventory_usdt_value={},
@@ -241,7 +297,7 @@ def test_total_exposure_cap_stops_further_buys():
 
 
 def test_never_recommends_buying_more_than_available_usdt_on_that_exchange():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[_missing_check("ZRO", sell_exchange="bybit")], current_inventory_usdt_value={},
         binance_usdt=100.0, bybit_usdt=1.5,  # starved sell-exchange
@@ -265,7 +321,7 @@ def test_sells_stale_inventory_no_longer_eligible():
 
 
 def test_no_sell_recommended_for_still_eligible_holding():
-    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3)
+    score = score_direction_for_inventory(_summary(symbol="ZRO/USDT"), min_expected_reuse_count=3, short_term=_short_term())
     recs = recommend_rebalance(
         scores=[score], missing=[], current_inventory_usdt_value={"ZRO": 6.0},
         binance_usdt=50.0, bybit_usdt=50.0,
@@ -331,6 +387,7 @@ async def test_build_inventory_report_end_to_end(monkeypatch):
 
     report_stub = AltcoinScanReport(window_start=None, window_end=None, total_observations=20, best_direction_by_symbol=[_summary(symbol="ZRO/USDT")])
     monkeypatch.setattr(inv_module, "build_altcoin_scan_report", _fake_async(report_stub))
+    monkeypatch.setattr(inv_module, "build_short_term_regimes", _fake_async({("ZRO/USDT", "binance", "bybit"): _short_term(symbol="ZRO/USDT")}))
 
     report = await build_inventory_report(
         session=object(),
@@ -356,6 +413,7 @@ async def test_build_inventory_report_no_holdings_means_zero_locked_capital(monk
         inv_module, "build_altcoin_scan_report",
         _fake_async(AltcoinScanReport(window_start=None, window_end=None, total_observations=0, best_direction_by_symbol=[])),
     )
+    monkeypatch.setattr(inv_module, "build_short_term_regimes", _fake_async({}))
 
     report = await build_inventory_report(session=object(), binance_read=FakeBinanceRead(usdt=100.0), bybit_read=FakeBybitRead())
     assert report.capital_locked_in_inventory_usdt == 0.0
@@ -381,6 +439,7 @@ async def test_since_passed_to_scan_report_is_tz_naive(monkeypatch):
         return AltcoinScanReport(window_start=None, window_end=None, total_observations=0, best_direction_by_symbol=[])
 
     monkeypatch.setattr(inv_module, "build_altcoin_scan_report", _capture)
+    monkeypatch.setattr(inv_module, "build_short_term_regimes", _fake_async({}))
 
     await build_inventory_report(session=object(), binance_read=FakeBinanceRead(usdt=100.0), bybit_read=FakeBybitRead())
     assert captured["since"] is not None

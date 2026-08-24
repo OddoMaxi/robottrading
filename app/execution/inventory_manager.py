@@ -72,20 +72,17 @@ from app.reporting.altcoin_scan_report import (
     STRONG_MIN_NET_PROFIT_PER_1000USDT,
     STRONG_MIN_PERSISTENCE_SECONDS,
     DirectionSummary,
-    OpportunityStatus,
     build_altcoin_scan_report,
 )
+from app.reporting.short_term_regime import ShortTermRegime, ShortTermRegimeSummary, build_short_term_regimes
 from app.scanner.market_snapshot import MultiExchangeSnapshotFetcher
 
 logger = logging.getLogger(__name__)
 
 QUOTE_ASSET = "USDT"
 DEFAULT_LOOKBACK = timedelta(hours=24)
+ONE_HOUR_LOOKBACK = timedelta(hours=1)  # informational-only comparison window (item 6/12) — never a gate, see score_direction_for_inventory
 DEFAULT_MAX_RANKER_SYMBOLS = 30  # same latency-bound reasoning as live_preflight's max_symbols=60 — kept smaller since this report also does a valuation pass
-
-# Round, stated-up-front threshold (same discipline as altcoin_scan_report's
-# own STRONG_* constants) — not fitted after the fact to flip any symbol.
-STRONG_PREPOSITION_SCORE_THRESHOLD = 50.0  # out of 100
 
 
 class InventoryClassification(StrEnum):
@@ -151,6 +148,18 @@ class InventoryScoreBreakdown:
     expected_additional_executable_trades: int
     classification: InventoryClassification
     reason: str
+    # FINAL SIMPLIFICATION (user directive, 2026-08-24) — classification
+    # is now DRIVEN by the short-term regime (app.reporting.
+    # short_term_regime), not by the 1h/24h mean. These fields surface
+    # exactly what drove the decision; the 1h/24h means are kept purely
+    # informational (item 2: "conserve les données ... pas comme hard
+    # gate").
+    short_term_regime: str = "NO_DATA"
+    edge_now_net_profit_per_1000usdt: float | None = None
+    confirmations_recent: int = 0
+    current_streak_seconds: float = 0.0
+    mean_net_profit_1h_usdt: float | None = None
+    mean_net_profit_24h_usdt: float | None = None
 
 
 @dataclass(slots=True)
@@ -238,31 +247,45 @@ def is_preposition_eligible(s: InventoryScoreBreakdown) -> bool:
     return s.classification in (InventoryClassification.PREPOSITION_CANDIDATE, InventoryClassification.STRONG_PREPOSITION_CANDIDATE)
 
 
-def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_count: int) -> InventoryScoreBreakdown:
-    """Same normalization convention as altcoin_scan_report.market_priority_score
+def score_direction_for_inventory(
+    summary: DirectionSummary,
+    min_expected_reuse_count: int,
+    short_term: ShortTermRegimeSummary | None = None,
+) -> InventoryScoreBreakdown:
+    """FINAL SIMPLIFICATION (user directive, 2026-08-24) — this is
+    short-term cross-exchange arbitrage: an opportunity can be excellent
+    for seconds or a few minutes, and classification must reflect the
+    CURRENT regime, not a 1h/24h average that was never the right time
+    horizon for this strategy (that mismatch is exactly what wrongly
+    blocked a genuinely good, currently-confirmed RVN opportunity — see
+    app.reporting.short_term_regime's own docstring).
+
+    Classification is now DRIVEN by short_term.regime (a strictly
+    harder-to-reach ladder: NO_EDGE < FLASH < CONFIRMED_SHORT_TERM <
+    PERSISTENT/STRONG_PERSISTENT — see classify_short_term_regime):
+      DO_NOT_PREPOSITION — no positive edge right now (or no recent data
+        at all to judge from).
+      OBSERVE — positive right now (FLASH) but not yet independently
+        confirmed enough times to rule out a one-off spread.
+      PREPOSITION_CANDIDATE — CONFIRMED_SHORT_TERM: enough independent
+        recent confirmations AND positive right now. Already tradable —
+        never made to wait for multi-minute persistence.
+      STRONG_PREPOSITION_CANDIDATE — PERSISTENT or STRONG_PERSISTENT: the
+        edge has held continuously for 5+ / 15+ minutes. Higher
+        confidence, can justify more inventory later, but is NOT a
+        prerequisite for the first small trade.
+
+    summary (the 24h-window DirectionSummary) now only feeds total_score
+    — a continuous ranking signal used to prioritize AMONG regime-eligible
+    candidates in recommend_rebalance — and is NEVER able to force
+    DO_NOT_PREPOSITION on its own (item 2: "conserve les données 1h/24h
+    pour analytics/risk scoring, mais pas comme hard gate"). Same
+    normalization convention as altcoin_scan_report.market_priority_score
     (each sub-score capped to [0, 1] against the same STRONG_* reference
     thresholds already validated in that module) but combined as a
     weighted sum, not a product — a product of six sub-1.0 terms
     collapses almost everything toward zero and stops being a usable
-    ranking signal; a weighted sum stays interpretable as a 0-100 score
-    while still being driven by the same real inputs.
-
-    Classification is a 4-tier ladder (item 6 of the V2 directive), each
-    tier strictly harder to reach than the last:
-      DO_NOT_PREPOSITION — no real basis at all (too little history, no
-        net-positive average edge, or status never cleared WATCH/STRONG).
-      OBSERVE — a positive AVERAGE edge exists but isn't trustworthy yet:
-        either it hasn't repeated enough times (avoids the one-off-spread
-        trap explicitly called out in the directive) or the P10
-        (worst-decile) edge is still negative, meaning the average is
-        being carried by a few good ticks rather than being consistent.
-      PREPOSITION_CANDIDATE — clears every bar: enough independent
-        sightings AND a positive worst-decile edge, i.e. consistently
-        profitable, not just profitable on average.
-      STRONG_PREPOSITION_CANDIDATE — the same, at STRONG status and a
-        score above STRONG_PREPOSITION_SCORE_THRESHOLD — recommend_rebalance
-        funds these first purely by sorting on total_score, no special
-        casing needed."""
+    ranking signal."""
     base_asset = summary.symbol.split("/")[0]
     frequency_score = min(1.0, summary.unique_detections / 10.0)
     net_edge_score = min(1.0, max(0.0, summary.net_profit_per_1000usdt_mean / STRONG_MIN_NET_PROFIT_PER_1000USDT))
@@ -281,27 +304,21 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
         + 0.10 * expected_reuse_score
     )
 
-    if summary.observations < MIN_OBSERVATIONS_TO_JUDGE:
+    if short_term is None:
         classification = InventoryClassification.DO_NOT_PREPOSITION
-        reason = f"insufficient history ({summary.observations} observation(s), need >= {MIN_OBSERVATIONS_TO_JUDGE})"
-    elif summary.net_profit_per_1000usdt_mean <= 0:
+        reason = "no recent short-term observation available — cannot judge the current regime"
+    elif short_term.regime == ShortTermRegime.NO_EDGE:
         classification = InventoryClassification.DO_NOT_PREPOSITION
-        reason = "no net-positive edge after real fees"
-    elif summary.status not in (OpportunityStatus.STRONG, OpportunityStatus.WATCH):
-        classification = InventoryClassification.DO_NOT_PREPOSITION
-        reason = f"status too weak ({summary.status.value})"
-    elif sightings < min_expected_reuse_count:
+        reason = short_term.regime_reason
+    elif short_term.regime == ShortTermRegime.FLASH:
         classification = InventoryClassification.OBSERVE
-        reason = f"positive average edge but seen only {sightings} time(s) — need >= {min_expected_reuse_count} independent sightings, never pre-position for a one-off spread"
-    elif summary.net_profit_per_1000usdt_p10 <= 0:
-        classification = InventoryClassification.OBSERVE
-        reason = f"edge inconsistent — worst-decile (P10) outcome ({summary.net_profit_per_1000usdt_p10:.2f}/1000usdt) is still unprofitable, watching for more consistency"
-    elif summary.status == OpportunityStatus.STRONG and total_score >= STRONG_PREPOSITION_SCORE_THRESHOLD:
-        classification = InventoryClassification.STRONG_PREPOSITION_CANDIDATE
-        reason = f"consistently net-positive ({sightings} sightings, P10 edge {summary.net_profit_per_1000usdt_p10:.2f}/1000usdt, STRONG status, score {total_score:.0f}/100)"
-    else:
+        reason = short_term.regime_reason
+    elif short_term.regime == ShortTermRegime.CONFIRMED_SHORT_TERM:
         classification = InventoryClassification.PREPOSITION_CANDIDATE
-        reason = f"net-positive and consistent enough ({sightings} sightings, P10 edge {summary.net_profit_per_1000usdt_p10:.2f}/1000usdt, score {total_score:.0f}/100)"
+        reason = short_term.regime_reason
+    else:  # PERSISTENT or STRONG_PERSISTENT
+        classification = InventoryClassification.STRONG_PREPOSITION_CANDIDATE
+        reason = short_term.regime_reason
 
     return InventoryScoreBreakdown(
         symbol=summary.symbol,
@@ -322,6 +339,12 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
         expected_additional_executable_trades=sightings,
         classification=classification,
         reason=reason,
+        short_term_regime=short_term.regime.value if short_term is not None else "NO_DATA",
+        edge_now_net_profit_per_1000usdt=short_term.edge_now_net_profit_per_1000usdt if short_term is not None else None,
+        confirmations_recent=short_term.confirmations_recent if short_term is not None else 0,
+        current_streak_seconds=short_term.current_streak_seconds if short_term is not None else 0.0,
+        mean_net_profit_1h_usdt=short_term.mean_net_profit_1h_usdt if short_term is not None else None,
+        mean_net_profit_24h_usdt=summary.net_profit_per_1000usdt_mean,
     )
 
 
@@ -474,7 +497,22 @@ async def build_inventory_report(
     # strip tzinfo after computing the UTC-relative window, never before.
     since = (datetime.now(UTC) - lookback).replace(tzinfo=None)
     scan_report = await build_altcoin_scan_report(session, since=since)
-    inventory_scores = [score_direction_for_inventory(s, settings.min_expected_reuse_count) for s in scan_report.best_direction_by_symbol]
+
+    # Informational-only 1h comparison window (item 6/12) — populated onto
+    # the short-term summary below, never used to gate classification.
+    since_1h = (datetime.now(UTC) - ONE_HOUR_LOOKBACK).replace(tzinfo=None)
+    scan_report_1h = await build_altcoin_scan_report(session, since=since_1h)
+    mean_1h_by_key = {(s.symbol, s.buy_exchange, s.sell_exchange): s.net_profit_per_1000usdt_mean for s in scan_report_1h.best_direction_by_symbol}
+
+    short_term_regimes = await build_short_term_regimes(session, min_confirmations=settings.min_expected_reuse_count)
+
+    inventory_scores = []
+    for s in scan_report.best_direction_by_symbol:
+        key = (s.symbol, s.buy_exchange, s.sell_exchange)
+        short_term = short_term_regimes.get(key)
+        if short_term is not None:
+            short_term.mean_net_profit_1h_usdt = mean_1h_by_key.get(key)
+        inventory_scores.append(score_direction_for_inventory(s, settings.min_expected_reuse_count, short_term=short_term))
     inventory_scores.sort(key=lambda s: s.total_score, reverse=True)
 
     fetcher = MultiExchangeSnapshotFetcher(binance=binance_read, bybit=bybit_read)

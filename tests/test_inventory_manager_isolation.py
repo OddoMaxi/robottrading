@@ -22,6 +22,7 @@ DISCOVERY_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "full_universe_
 MISSED_OPPORTUNITY_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "missed_opportunity_report.py"
 CAPITAL_BOTTLENECK_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "capital_bottleneck_report.py"
 OBSERVATION_WINDOW_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "observation_window_report.py"
+SHORT_TERM_REGIME_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "short_term_regime.py"
 ALL_MODULE_PATHS = (
     INVENTORY_MODULE_PATH,
     V2_REPORT_MODULE_PATH,
@@ -29,6 +30,7 @@ ALL_MODULE_PATHS = (
     MISSED_OPPORTUNITY_REPORT_MODULE_PATH,
     CAPITAL_BOTTLENECK_REPORT_MODULE_PATH,
     OBSERVATION_WINDOW_REPORT_MODULE_PATH,
+    SHORT_TERM_REGIME_MODULE_PATH,
 )
 
 FORBIDDEN_MODULE_PREFIXES = (

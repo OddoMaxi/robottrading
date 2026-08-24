@@ -918,6 +918,15 @@ class InventoryScoreRow:
     expected_reuse_label: str
     classification: str
     reason: str
+    # FINAL SIMPLIFICATION (2026-08-24) — classification is driven by
+    # short_term_regime now; the two mean_net_profit_* fields are
+    # informational/analytics only, never a gate.
+    short_term_regime: str = "NO_DATA"
+    edge_now_net_profit_per_1000usdt: float | None = None
+    confirmations_recent: int = 0
+    current_streak_seconds: float = 0.0
+    mean_net_profit_1h_usdt: float | None = None
+    mean_net_profit_24h_usdt: float | None = None
 
 
 @dataclass(slots=True)
@@ -967,6 +976,12 @@ async def fetch_inventory_manager_summary() -> InventoryManagerDashboardSummary:
                 median_net_edge_per_1000usdt=s["median_net_edge_per_1000usdt"],
                 p10_net_edge_per_1000usdt=s["p10_net_edge_per_1000usdt"], total_score=s["total_score"],
                 expected_reuse_label=s["expected_reuse_label"], classification=s["classification"], reason=s["reason"],
+                short_term_regime=s.get("short_term_regime", "NO_DATA"),
+                edge_now_net_profit_per_1000usdt=s.get("edge_now_net_profit_per_1000usdt"),
+                confirmations_recent=s.get("confirmations_recent", 0),
+                current_streak_seconds=s.get("current_streak_seconds", 0.0),
+                mean_net_profit_1h_usdt=s.get("mean_net_profit_1h_usdt"),
+                mean_net_profit_24h_usdt=s.get("mean_net_profit_24h_usdt"),
             )
             for s in payload.get("inventory_scores", [])
         ]
