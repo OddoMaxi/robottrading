@@ -18,7 +18,7 @@ import hashlib
 import hmac
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
 import aiohttp
@@ -58,9 +58,16 @@ class BybitOrderStatus:
     order_status: str  # Bybit's own string
     cum_exec_qty: float
     cum_exec_value: float
+    # cum_exec_fee is Bybit-deprecated for spot ("Use cumFeeDetail
+    # instead" per their own v5 docs) and NEVER carries a currency —
+    # kept only for raw/debug visibility. cum_fee_detail (2026-08-24
+    # fix, after the first real fill mislabeled a 2.9179 RVN fee as
+    # $2.9179) is the authoritative, currency-aware source: never
+    # assume a Bybit fee is in USDT.
     cum_exec_fee: float
     avg_price: float | None
     raw: dict
+    cum_fee_detail: dict[str, float] = field(default_factory=dict)
 
     @property
     def is_filled(self) -> bool:
@@ -74,6 +81,12 @@ class BybitOrderStatus:
     def is_terminal(self) -> bool:
         return self.order_status in TERMINAL_STATUSES
 
+    def total_fees_by_asset(self) -> dict[str, float]:
+        """Mirrors BinanceOrderResult.total_fees_by_asset()'s name/shape
+        for symmetry — callers must resolve currency from this, never
+        from the bare, currency-less cum_exec_fee."""
+        return dict(self.cum_fee_detail)
+
 
 def _parse_order_ack(data: dict) -> BybitOrderAck:
     result = data.get("result", {})
@@ -83,6 +96,8 @@ def _parse_order_ack(data: dict) -> BybitOrderAck:
 def _parse_order_status(data: dict) -> BybitOrderStatus | None:
     for entry in data.get("result", {}).get("list", []):
         avg_price = entry.get("avgPrice")
+        fee_detail_raw = entry.get("cumFeeDetail") or {}
+        cum_fee_detail = {str(asset): float(amount) for asset, amount in fee_detail_raw.items()}
         return BybitOrderStatus(
             order_id=str(entry.get("orderId", "")),
             order_link_id=str(entry.get("orderLinkId", "")),
@@ -94,6 +109,7 @@ def _parse_order_status(data: dict) -> BybitOrderStatus | None:
             cum_exec_fee=float(entry.get("cumExecFee", 0.0) or 0.0),
             avg_price=float(avg_price) if avg_price else None,
             raw=entry,
+            cum_fee_detail=cum_fee_detail,
         )
     return None
 

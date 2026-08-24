@@ -65,10 +65,41 @@ logger = logging.getLogger(__name__)
 LEG_CONFIRMATION_TIMEOUT_SECONDS = 15.0
 LEG_POLL_INTERVAL_SECONDS = 0.5
 EXCHANGES = ("binance", "bybit")
+QUOTE_ASSET = "USDT"  # every symbol in this codebase is USDT-quoted (app.execution.inventory_manager's own convention)
 
 
 def direction_for(buy_exchange: str, sell_exchange: str) -> str:
     return f"{buy_exchange.upper()}_BUY_{sell_exchange.upper()}_SELL"
+
+
+def resolve_fee(fees_by_asset: dict[str, float], base_asset: str, avg_fill_price: float | None, log_prefix: str) -> tuple[str | None, float, float | None]:
+    """Pure function. Duplicated from app.execution.inventory_constitution_executor
+    on purpose (see module docstring — these two files deliberately do not
+    share code). Returns (fee_asset, fee_amount, fee_usd_equivalent) —
+    NEVER assumes a currency (2026-08-24 fix, after the first real Bybit
+    fill mislabeled a 2.9179 RVN fee as $2.9179)."""
+    nonzero = {asset: amount for asset, amount in fees_by_asset.items() if amount}
+    if not nonzero:
+        return None, 0.0, 0.0
+    if len(nonzero) > 1:
+        logger.warning("%s: order fee charged in multiple assets, cannot compute a single USD equivalent: %s", log_prefix, nonzero)
+        return None, 0.0, None
+    (fee_asset, fee_amount), = nonzero.items()
+    if fee_asset == QUOTE_ASSET:
+        return fee_asset, fee_amount, fee_amount
+    if fee_asset == base_asset and avg_fill_price is not None and avg_fill_price > 0:
+        return fee_asset, fee_amount, fee_amount * avg_fill_price
+    logger.warning("%s: order fee charged in unrecognized asset %s, cannot compute a USD equivalent without a price for it", log_prefix, fee_asset)
+    return fee_asset, fee_amount, None
+
+
+def net_base_qty_after_fee(gross_qty: float, fee_asset: str | None, fee_amount: float, base_asset: str) -> float:
+    """Pure function, duplicated from inventory_constitution_executor.py.
+    The base-asset quantity actually held after a fill — only reduced by
+    the fee when the fee itself was charged in that SAME base asset."""
+    if fee_asset == base_asset:
+        return max(0.0, gross_qty - fee_amount)
+    return gross_qty
 
 
 class ArbitrageOutcome(StrEnum):
@@ -99,9 +130,13 @@ class LiveArbitrageResult:
     buy_client_order_id: str | None = None
     buy_exchange_order_id: str | None = None
     buy_status: str | None = None
-    buy_filled_qty: float = 0.0
+    buy_filled_qty: float = 0.0  # GROSS, exactly as reported by the exchange
+    buy_net_filled_qty: float = 0.0  # ACTUALLY held after the buy fill — see net_base_qty_after_fee
     buy_avg_fill_price: float | None = None
-    buy_fees_usd: float | None = None
+    buy_fee_asset: str | None = None  # never assume a Bybit/Binance fee is in USDT
+    buy_fee_amount: float | None = None
+    buy_fee_usd_equivalent: float | None = None
+    buy_fees_usd: float | None = None  # backward-compat alias — equal to buy_fee_usd_equivalent from this fix onward
     buy_submitted_at: float | None = None
     buy_confirmed_at: float | None = None
 
@@ -110,7 +145,10 @@ class LiveArbitrageResult:
     sell_status: str | None = None
     sell_filled_qty: float = 0.0
     sell_avg_fill_price: float | None = None
-    sell_fees_usd: float | None = None
+    sell_fee_asset: str | None = None
+    sell_fee_amount: float | None = None
+    sell_fee_usd_equivalent: float | None = None
+    sell_fees_usd: float | None = None  # backward-compat alias — equal to sell_fee_usd_equivalent from this fix onward
     sell_submitted_at: float | None = None
     sell_confirmed_at: float | None = None
 
@@ -129,9 +167,12 @@ class _NormalizedOrderStatus:
     order_id: str
     is_terminal: bool
     is_filled: bool
-    filled_qty: float
+    filled_qty: float  # GROSS — as reported by the exchange
+    net_base_qty: float  # ACTUALLY held after the fill — see net_base_qty_after_fee
     avg_fill_price: float | None
-    fee_usd: float
+    fee_asset: str | None
+    fee_amount: float
+    fee_usd_equivalent: float | None
     raw_status: str
 
 
@@ -269,42 +310,39 @@ class LiveArbitrageExecutor:
             await self._bybit_trade.place_market_order(symbol, "Sell", qty=qty, order_link_id=client_order_id)
 
     async def _get_status(self, exchange: str, symbol: str, client_order_id: str) -> _NormalizedOrderStatus | None:
+        base_asset = symbol.removesuffix(QUOTE_ASSET)
         if exchange == "binance":
             result = await self._binance_trade.get_order_status(symbol, orig_client_order_id=client_order_id)
-            fees_by_asset = result.total_fees_by_asset()
-            non_usdt_fees = {a: v for a, v in fees_by_asset.items() if a != "USDT"}
-            if non_usdt_fees:
-                # Binance can charge the fee in a non-quote asset (BNB
-                # discount, or the base asset) — summing those alongside a
-                # USDT amount would silently produce a wrong USD total, so
-                # they're excluded here and logged instead of pretending
-                # the total is precise.
-                logger.warning("live-arbitrage: %s order fee(s) charged in non-USDT asset(s), excluded: %s", exchange, non_usdt_fees)
+            gross_qty = result.executed_qty
+            avg_price = result.average_fill_price()
+            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(result.total_fees_by_asset(), base_asset, avg_price, "live-arbitrage")
             return _NormalizedOrderStatus(
                 order_id=str(result.order_id),
                 is_terminal=result.is_terminal,
                 is_filled=result.is_filled,
-                filled_qty=result.executed_qty,
-                avg_fill_price=result.average_fill_price(),
-                fee_usd=fees_by_asset.get("USDT", 0.0),
+                filled_qty=gross_qty,
+                net_base_qty=net_base_qty_after_fee(gross_qty, fee_asset, fee_amount, base_asset),
+                avg_fill_price=avg_price,
+                fee_asset=fee_asset, fee_amount=fee_amount, fee_usd_equivalent=fee_usd_equivalent,
                 raw_status=result.status,
             )
         else:
             status = await self._bybit_trade.get_order_status(symbol, order_link_id=client_order_id)
             if status is None:
                 return None
-            # Assumes Bybit charged the fee in the quote asset (USDT) —
-            # Bybit's spot response doesn't break fees out by asset the
-            # way Binance's does; a VIP tier or promo that changed this
-            # would silently skew actual_net_pnl_usd, which is why
-            # prediction_error_usd is also recorded as a tell to investigate.
+            gross_qty = status.cum_exec_qty
+            # Never assume Bybit charged the fee in the quote asset (USDT)
+            # — the first real fill (2026-08-24) charged it in RVN, the
+            # base asset, mislabeling a $0.01 fee as $2.9179.
+            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(status.total_fees_by_asset(), base_asset, status.avg_price, "live-arbitrage")
             return _NormalizedOrderStatus(
                 order_id=status.order_id,
                 is_terminal=status.is_terminal,
                 is_filled=status.is_filled,
-                filled_qty=status.cum_exec_qty,
+                filled_qty=gross_qty,
+                net_base_qty=net_base_qty_after_fee(gross_qty, fee_asset, fee_amount, base_asset),
                 avg_fill_price=status.avg_price,
-                fee_usd=status.cum_exec_fee,
+                fee_asset=fee_asset, fee_amount=fee_amount, fee_usd_equivalent=fee_usd_equivalent,
                 raw_status=status.order_status,
             )
 
@@ -437,8 +475,12 @@ class LiveArbitrageExecutor:
             result.buy_exchange_order_id = buy_status.order_id
             result.buy_status = buy_status.raw_status
             result.buy_filled_qty = buy_status.filled_qty
+            result.buy_net_filled_qty = buy_status.net_base_qty
             result.buy_avg_fill_price = buy_status.avg_fill_price
-            result.buy_fees_usd = buy_status.fee_usd
+            result.buy_fee_asset = buy_status.fee_asset
+            result.buy_fee_amount = buy_status.fee_amount
+            result.buy_fee_usd_equivalent = buy_status.fee_usd_equivalent
+            result.buy_fees_usd = buy_status.fee_usd_equivalent  # backward-compat alias, now correctly currency-aware
             result.buy_confirmed_at = time.time()
 
             if buy_status.filled_qty <= 0:
@@ -447,10 +489,15 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
+            # FIX 1 (user directive, 2026-08-24): size the sell leg off
+            # what is ACTUALLY held (net of any base-asset buy fee), never
+            # the gross exchange-reported fill — selling the gross amount
+            # when the fee reduced the real balance would either fail
+            # outright or (worse) succeed against dust rounding.
             sell_step = await self._get_step_size(sell_exchange, symbol)
-            sell_qty = round_down_to_step(buy_status.filled_qty, sell_step[0]) if sell_step is not None else 0.0
+            sell_qty = round_down_to_step(buy_status.net_base_qty, sell_step[0]) if sell_step is not None else 0.0
             if sell_step is None or sell_qty < sell_step[1] or sell_qty <= 0:
-                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.net_base_qty, attempt_id)
                 if neutralize_result is None or not neutralize_result.is_filled:
                     live_guard.engage_kill_switch(f"neutralization failed after buy fill too small to hedge on {sell_exchange}, attempt {attempt_id}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
@@ -469,7 +516,7 @@ class LiveArbitrageExecutor:
             try:
                 await self._place_market_sell(sell_exchange, symbol, sell_qty, sell_client_order_id)
             except Exception as exc:
-                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.net_base_qty, attempt_id)
                 if neutralize_result is None or not neutralize_result.is_filled:
                     live_guard.engage_kill_switch(f"neutralization failed after sell leg submission error, attempt {attempt_id}: {exc}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
@@ -495,11 +542,14 @@ class LiveArbitrageExecutor:
             result.sell_status = sell_status.raw_status
             result.sell_filled_qty = sell_status.filled_qty
             result.sell_avg_fill_price = sell_status.avg_fill_price
-            result.sell_fees_usd = sell_status.fee_usd
+            result.sell_fee_asset = sell_status.fee_asset
+            result.sell_fee_amount = sell_status.fee_amount
+            result.sell_fee_usd_equivalent = sell_status.fee_usd_equivalent
+            result.sell_fees_usd = sell_status.fee_usd_equivalent  # backward-compat alias, now correctly currency-aware
             result.sell_confirmed_at = time.time()
 
             if sell_status.filled_qty <= 0:
-                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.filled_qty, attempt_id)
+                neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.net_base_qty, attempt_id)
                 if neutralize_result is None or not neutralize_result.is_filled:
                     live_guard.engage_kill_switch(f"neutralization failed after sell leg rejected, attempt {attempt_id}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
@@ -516,8 +566,9 @@ class LiveArbitrageExecutor:
             # the sell exchange only partially filled) is a leftover
             # naked position on the BUY exchange (that's where it was
             # acquired) and must be neutralized there too — never left
-            # unhedged just because MOST of the arbitrage worked.
-            raw_residual_qty = buy_status.filled_qty - sell_status.filled_qty
+            # unhedged just because MOST of the arbitrage worked. Based
+            # on net_base_qty (what's actually held), not the gross fill.
+            raw_residual_qty = buy_status.net_base_qty - sell_status.filled_qty
             if raw_residual_qty > 0:
                 buy_step = await self._get_step_size(buy_exchange, symbol)
                 if buy_step is not None:
@@ -529,8 +580,18 @@ class LiveArbitrageExecutor:
                     if residual_qty > 0 and residual_qty >= buy_step[1] and residual_qty * (result.buy_avg_fill_price or 0) > 0.01:
                         await self._neutralize(buy_exchange, symbol, residual_qty, attempt_id)
 
-            buy_cost_usd = (result.buy_avg_fill_price or 0) * buy_status.filled_qty + (result.buy_fees_usd or 0)
-            sell_proceeds_usd = (result.sell_avg_fill_price or 0) * sell_status.filled_qty - (result.sell_fees_usd or 0)
+            # FIX 1 (user directive, 2026-08-24): only ADD the fee to the
+            # USDT cost/proceeds when it was actually charged in USDT — a
+            # base-asset fee never touched the USDT balance at all (it
+            # already shows up as a smaller net_base_qty, which naturally
+            # reduces what there was to sell); adding it again here would
+            # double-count it (this is exactly how the first real Bybit
+            # fill's 2.9179 RVN fee would have inflated the apparent cost
+            # by ~$2.92 instead of the real ~$0.01).
+            buy_fee_in_usdt = result.buy_fee_usd_equivalent if result.buy_fee_asset == QUOTE_ASSET else 0.0
+            sell_fee_in_usdt = result.sell_fee_usd_equivalent if result.sell_fee_asset == QUOTE_ASSET else 0.0
+            buy_cost_usd = (result.buy_avg_fill_price or 0) * buy_status.filled_qty + (buy_fee_in_usdt or 0)
+            sell_proceeds_usd = (result.sell_avg_fill_price or 0) * sell_status.filled_qty - (sell_fee_in_usdt or 0)
             result.actual_net_pnl_usd = sell_proceeds_usd - buy_cost_usd
             result.prediction_error_usd = (
                 result.actual_net_pnl_usd - result.predicted_net_profit_usd if result.predicted_net_profit_usd is not None else None

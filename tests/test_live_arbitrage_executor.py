@@ -67,11 +67,13 @@ class FakeBybitRead:
 
 
 class FakeBinanceTrade:
-    def __init__(self, fill_status="FILLED", fill_qty=183000.0, never_terminal=False, raise_on_submit=False):
+    def __init__(self, fill_status="FILLED", fill_qty=183000.0, never_terminal=False, raise_on_submit=False, fee_asset="USDT", fee_amount=0.01):
         self.fill_status = fill_status
         self.fill_qty = fill_qty
         self.never_terminal = never_terminal
         self.raise_on_submit = raise_on_submit
+        self.fee_asset = fee_asset
+        self.fee_amount = fee_amount
         self.submitted_orders = []
 
     async def place_market_order(self, symbol, side, client_order_id, quantity=None, quote_order_qty=None):
@@ -97,16 +99,18 @@ class FakeBinanceTrade:
         return BinanceOrderResult(
             symbol=symbol, order_id=1, client_order_id=orig_client_order_id or "", status=self.fill_status,
             executed_qty=self.fill_qty, cumulative_quote_qty=self.fill_qty * 0.0000546,
-            fills=[BinanceOrderFill(price=0.0000546, qty=self.fill_qty, commission=0.01, commission_asset="USDT")], raw={},
+            fills=[BinanceOrderFill(price=0.0000546, qty=self.fill_qty, commission=self.fee_amount, commission_asset=self.fee_asset)], raw={},
         )
 
 
 class FakeBybitTrade:
-    def __init__(self, fill_status="Filled", fill_qty=183000.0, never_terminal=False, raise_on_submit=False):
+    def __init__(self, fill_status="Filled", fill_qty=183000.0, never_terminal=False, raise_on_submit=False, fee_asset="USDT", fee_amount=0.01):
         self.fill_status = fill_status
         self.fill_qty = fill_qty
         self.never_terminal = never_terminal
         self.raise_on_submit = raise_on_submit
+        self.fee_asset = fee_asset
+        self.fee_amount = fee_amount
         self.submitted_orders = []
 
     async def place_market_order(self, symbol, side, qty, order_link_id):
@@ -129,7 +133,8 @@ class FakeBybitTrade:
         return BybitOrderStatus(
             order_id="bybit-1", order_link_id=order_link_id or "", symbol=symbol, side="Sell",
             order_status=self.fill_status, cum_exec_qty=self.fill_qty, cum_exec_value=self.fill_qty * 0.0000560,
-            cum_exec_fee=0.01, avg_price=0.0000560, raw={},
+            cum_exec_fee=self.fee_amount, avg_price=0.0000560, raw={},
+            cum_fee_detail={self.fee_asset: self.fee_amount} if self.fee_asset else {},
         )
 
 
@@ -212,6 +217,59 @@ async def test_neutralization_order_link_id_stays_within_bybits_36_character_lim
     assert result.outcome == ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
     neutralize_client_order_id = binance_trade.submitted_orders[1][2]
     assert len(neutralize_client_order_id) <= 36
+
+
+# ---- fee currency + net qty sizing (FIX 1, user directive, 2026-08-24) ----
+#
+# Regression coverage for the first real Bybit fill (2917.9 RVN gross,
+# 2.9179 RVN fee, 2914.9821 RVN net) — a base-asset buy fee must reduce
+# what the SELL leg is sized against, and must never be double-counted
+# into the USDT cost (it never touched the USDT balance at all).
+
+
+async def test_buy_fee_in_base_asset_sizes_the_sell_leg_off_net_qty(monkeypatch):
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0, fee_asset="LUNC", fee_amount=100.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.buy_filled_qty == 183000.0  # GROSS, as reported
+    assert result.buy_net_filled_qty == pytest.approx(182900.0)  # NET of the 100 LUNC fee
+    assert result.buy_fee_asset == "LUNC"
+    sell_qty_requested = bybit_trade.submitted_orders[0][2]
+    assert sell_qty_requested == pytest.approx(182900.0)  # sized off NET, never the gross 183000.0
+
+
+async def test_pnl_does_not_double_count_a_base_asset_buy_fee(monkeypatch):
+    """A LUNC-denominated buy fee already shows up as a smaller
+    buy_net_filled_qty (and therefore a smaller sell leg / smaller
+    proceeds) — adding fee_usd_equivalent to buy_cost_usd on top of that
+    would double-count it, inflating the apparent cost by the fee's
+    USD-equivalent value a second time."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0, fee_asset="LUNC", fee_amount=100.0)
+    bybit_trade = FakeBybitTrade(fill_qty=182900.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    expected_buy_cost_usd = result.buy_avg_fill_price * result.buy_filled_qty  # NO added fee — it was never in USDT
+    expected_sell_proceeds_usd = result.sell_avg_fill_price * result.sell_filled_qty - (result.sell_fees_usd or 0)
+    assert result.actual_net_pnl_usd == pytest.approx(expected_sell_proceeds_usd - expected_buy_cost_usd)
+
+
+async def test_pnl_still_subtracts_a_quote_asset_buy_fee(monkeypatch):
+    """The opposite, already-existing case must still work: a USDT buy
+    fee DOES reduce the net P&L, since it's a real extra USDT cost."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0, fee_asset="USDT", fee_amount=0.05)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    expected_buy_cost_usd = result.buy_avg_fill_price * result.buy_filled_qty + 0.05
+    expected_sell_proceeds_usd = result.sell_avg_fill_price * result.sell_filled_qty - (result.sell_fees_usd or 0)
+    assert result.actual_net_pnl_usd == pytest.approx(expected_sell_proceeds_usd - expected_buy_cost_usd)
 
 
 async def test_buy_leg_rejected_with_zero_fill_is_no_fill_not_neutralized(monkeypatch):

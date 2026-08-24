@@ -26,6 +26,44 @@ FILLED_STATUS_FIXTURE = {
     }
 }
 
+FILLED_STATUS_FEE_IN_BASE_ASSET_FIXTURE = {
+    "result": {
+        "list": [
+            {
+                "orderId": "order-rvn-1",
+                "orderLinkId": "link-rvn-1",
+                "symbol": "RVNUSDT",
+                "side": "Buy",
+                "orderStatus": "Filled",
+                "cumExecQty": "2917.9",
+                "cumExecValue": "10.0",
+                "cumExecFee": "2.9179",  # deprecated, currency-less — must NOT be trusted as USDT
+                "avgPrice": "0.003427",
+                "cumFeeDetail": {"RVN": "2.9179"},
+            }
+        ]
+    }
+}
+
+FILLED_STATUS_FEE_IN_QUOTE_ASSET_FIXTURE = {
+    "result": {
+        "list": [
+            {
+                "orderId": "order-rvn-2",
+                "orderLinkId": "link-rvn-2",
+                "symbol": "RVNUSDT",
+                "side": "Sell",
+                "orderStatus": "Filled",
+                "cumExecQty": "2914.9821",
+                "cumExecValue": "9.99",
+                "cumExecFee": "0.01",
+                "avgPrice": "0.003429",
+                "cumFeeDetail": {"USDT": "0.01"},
+            }
+        ]
+    }
+}
+
 NEW_STATUS_FIXTURE = {
     "result": {
         "list": [
@@ -60,6 +98,28 @@ def test_parse_filled_order_status():
     assert status.is_terminal is True
     assert status.cum_exec_qty == 183150.0
     assert status.avg_price == 0.0000549
+
+
+def test_parse_filled_order_status_without_cum_fee_detail_defaults_to_empty():
+    """A response shape without cumFeeDetail at all (older/partial
+    payload) must not crash — total_fees_by_asset() returns {}, never a
+    guess."""
+    status = _parse_order_status(FILLED_STATUS_FIXTURE)
+    assert status.total_fees_by_asset() == {}
+
+
+def test_parse_order_status_captures_fee_charged_in_the_base_asset():
+    """Regression (2026-08-24): the first real Bybit fill charged its
+    fee in RVN (the base asset), which cum_exec_fee alone cannot reveal
+    — cumFeeDetail is the only currency-aware source."""
+    status = _parse_order_status(FILLED_STATUS_FEE_IN_BASE_ASSET_FIXTURE)
+    assert status.total_fees_by_asset() == {"RVN": 2.9179}
+    assert status.cum_exec_fee == 2.9179  # still parsed for raw/debug visibility, just never trusted alone
+
+
+def test_parse_order_status_captures_fee_charged_in_the_quote_asset():
+    status = _parse_order_status(FILLED_STATUS_FEE_IN_QUOTE_ASSET_FIXTURE)
+    assert status.total_fees_by_asset() == {"USDT": 0.01}
 
 
 def test_parse_new_order_status_is_not_terminal():

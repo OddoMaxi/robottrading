@@ -554,9 +554,12 @@ class LiveArbitrageExecutionRecord(Base):
     buy_client_order_id: Mapped[str | None]
     buy_exchange_order_id: Mapped[str | None]
     buy_status: Mapped[str | None]
-    buy_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+    buy_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))  # GROSS, as reported by the exchange
+    buy_net_filled_qty: Mapped[float | None] = mapped_column(Numeric(30, 6))  # ACTUALLY held after the fill (2026-08-24 fix)
     buy_avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
-    buy_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    buy_fee_asset: Mapped[str | None]  # never assumed — read directly from the exchange (2026-08-24 fix); NULL on rows persisted before this fix
+    buy_fee_amount: Mapped[float | None] = mapped_column(Numeric(30, 12))  # raw amount, in buy_fee_asset units
+    buy_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))  # USD-equivalent — correctly currency-aware from this fix onward
     buy_latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
 
     sell_client_order_id: Mapped[str | None]
@@ -564,6 +567,8 @@ class LiveArbitrageExecutionRecord(Base):
     sell_status: Mapped[str | None]
     sell_filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
     sell_avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
+    sell_fee_asset: Mapped[str | None]
+    sell_fee_amount: Mapped[float | None] = mapped_column(Numeric(30, 12))
     sell_fees_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
     sell_latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
 
@@ -608,13 +613,17 @@ class InventoryConstitutionRecord(Base):
     order_client_id: Mapped[str | None]
     order_exchange_id: Mapped[str | None]
     order_status: Mapped[str | None]
-    filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+    filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))  # GROSS, as reported by the exchange
+    net_filled_qty: Mapped[float | None] = mapped_column(Numeric(30, 6))  # ACTUALLY held after the fill (2026-08-24 fix)
     avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
-    fee_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    fee_asset: Mapped[str | None]  # never assumed — read directly from the exchange (2026-08-24 fix); NULL on rows persisted before this fix, including the first real fill (id=4, 2026-08-24 15:25 UTC — see repository note)
+    fee_amount: Mapped[float | None] = mapped_column(Numeric(30, 12))  # raw amount, in fee_asset units
+    fee_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))  # USD-equivalent — correctly currency-aware from this fix onward
     latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
 
     post_fill_net_edge_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
     edge_still_valid_after_fill: Mapped[bool | None]
+    max_safe_arbitrage_notional_usdt: Mapped[float | None] = mapped_column(Numeric(20, 6))  # FIX 2, 2026-08-24 — the CAP is a ceiling, not a mandatory size
     ready_for_arbitrage: Mapped[bool] = mapped_column(default=False)
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
