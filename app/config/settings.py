@@ -165,6 +165,20 @@ class Settings(BaseSettings):
     full_universe_scan_momentum_top_up: int = 5
     full_universe_scan_interval_seconds: float = 30.0
 
+    # AUTOMATIC INVENTORY CONSTITUTION (user directive, 2026-08-24) —
+    # hard default OFF, exactly like live_trading_enabled: this codebase
+    # never flips it itself. A SEPARATE authorization from
+    # live_trading_enabled on purpose — buying inventory and executing
+    # the arbitrage that inventory unblocks are two independently
+    # authorized actions (see app.execution.inventory_guard's own
+    # docstring). SPOT only, Binance+Bybit only: enforced structurally
+    # (app.execution.inventory_constitution_executor only ever imports
+    # the two Spot live-trade clients, never a margin/futures client,
+    # none of which exist anywhere in this codebase).
+    inventory_constitution_enabled: bool = False
+    max_inventory_constitution_usdt_per_asset: float = 10.0
+    max_concurrent_inventory_operations: int = 1
+
 
 @lru_cache
 def get_settings() -> Settings:

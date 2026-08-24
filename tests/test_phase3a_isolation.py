@@ -10,6 +10,15 @@ live_arbitrage_executor, which itself checks app.execution.live_guard.
 live_guard.assert_arbitrage_allowed() before ever calling into either
 live-trade client — and main.py's automatic detection loop never imports
 any of it.
+
+Extended 2026-08-24 (user directive — automatic inventory constitution):
+a SECOND, deliberately separate authorized caller,
+app.execution.inventory_constitution_executor, was added — it checks
+app.execution.inventory_guard.inventory_guard.
+assert_inventory_constitution_allowed() before ever calling into either
+live-trade client, exactly mirroring live_arbitrage_executor's own
+discipline. Still exactly two authorized callers, never more; main.py
+still imports neither.
 """
 
 import ast
@@ -19,6 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = REPO_ROOT / "app"
 MAIN_ENTRYPOINT = REPO_ROOT / "main.py"
 EXECUTOR = APP_DIR / "execution" / "live_arbitrage_executor.py"
+INVENTORY_EXECUTOR = APP_DIR / "execution" / "inventory_constitution_executor.py"
+AUTHORIZED_EXECUTORS = (EXECUTOR, INVENTORY_EXECUTOR)
 DANGEROUS_MODULES = ("binance_live_trade_client", "bybit_live_trade_client")
 
 
@@ -37,25 +48,25 @@ def _imported_module_names(source: str) -> set[str]:
 def test_main_py_never_imports_the_live_trade_clients_or_executor():
     source = MAIN_ENTRYPOINT.read_text()
     imported = _imported_module_names(source)
-    forbidden = DANGEROUS_MODULES + ("live_arbitrage_executor",)
+    forbidden = DANGEROUS_MODULES + ("live_arbitrage_executor", "inventory_constitution_executor")
     violations = [name for name in imported if any(mod in name for mod in forbidden)]
     assert not violations, f"main.py imports live-trading-capable module(s): {violations}"
 
 
-def test_only_the_executor_imports_the_live_trade_clients():
-    """Every .py file under app/ EXCEPT live_arbitrage_executor.py itself
+def test_only_the_two_authorized_executors_import_the_live_trade_clients():
+    """Every .py file under app/ EXCEPT the two authorized executors
     (and the read-only live_readiness_gate, which must NOT import the
     trade-capable clients either) must not import
     binance_live_trade_client or bybit_live_trade_client."""
     violations = []
     for path in APP_DIR.rglob("*.py"):
-        if path == EXECUTOR:
+        if path in AUTHORIZED_EXECUTORS:
             continue
         imported = _imported_module_names(path.read_text())
         for module_name in imported:
             if any(dangerous in module_name for dangerous in DANGEROUS_MODULES):
                 violations.append(f"{path.relative_to(REPO_ROOT)} imports {module_name}")
-    assert not violations, "Only live_arbitrage_executor.py may import a live-trade client:\n" + "\n".join(violations)
+    assert not violations, "Only live_arbitrage_executor.py or inventory_constitution_executor.py may import a live-trade client:\n" + "\n".join(violations)
 
 
 def test_live_readiness_gate_never_imports_trade_capable_clients():
@@ -102,13 +113,37 @@ def test_execute_one_arbitrage_checks_live_guard_before_any_order_call():
     )
 
 
+def test_constitute_inventory_checks_inventory_guard_before_any_order_call():
+    """Same structural proof as above, for the second authorized
+    executor: inventory_guard.assert_inventory_constitution_allowed must
+    be checked before _place_market_buy is ever reachable."""
+    source = INVENTORY_EXECUTOR.read_text()
+    tree = ast.parse(source)
+    func = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "constitute_inventory"
+    )
+    calls_in_order = [
+        node.func.attr
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in ("assert_inventory_constitution_allowed", "_place_market_buy")
+    ]
+    assert "assert_inventory_constitution_allowed" in calls_in_order, (
+        "constitute_inventory never calls inventory_guard.assert_inventory_constitution_allowed"
+    )
+    first_order_call_index = min(i for i, name in enumerate(calls_in_order) if name == "_place_market_buy")
+    assert calls_in_order.index("assert_inventory_constitution_allowed") < first_order_call_index, (
+        "assert_inventory_constitution_allowed must be checked before the order-submission call"
+    )
+
+
 def test_no_loop_wraps_a_place_market_order_call():
     """Structural anti-blind-retry check: place_market_order must never
-    be called from inside a for/while loop anywhere in the executor —
-    every submission is a single, deliberate call with a unique id, never
-    an automatic retry loop that could double a position."""
-    source = EXECUTOR.read_text()
-    tree = ast.parse(source)
+    be called from inside a for/while loop anywhere in either authorized
+    executor — every submission is a single, deliberate call with a
+    unique id, never an automatic retry loop that could double a
+    position."""
 
     def _contains_call(node: ast.AST, name: str) -> bool:
         return any(
@@ -116,8 +151,9 @@ def test_no_loop_wraps_a_place_market_order_call():
         )
 
     violations = [
-        node.lineno
-        for node in ast.walk(tree)
+        f"{path.name}:{node.lineno}"
+        for path in AUTHORIZED_EXECUTORS
+        for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, (ast.For, ast.While)) and _contains_call(node, "place_market_order")
     ]
     assert not violations, f"place_market_order is called inside a loop at line(s) {violations} — retry-loop risk"
@@ -142,6 +178,12 @@ def test_settings_defaults_are_the_locked_down_ones():
     assert defaults.max_notional_per_leg_usdt == 10.0
     assert defaults.max_concurrent_live_arbitrages == 1
     assert defaults.withdrawals_required is False
+    # AUTOMATIC INVENTORY CONSTITUTION (user directive, 2026-08-24) —
+    # same hard-off-by-default discipline as live_trading_enabled above;
+    # this codebase never flips it itself.
+    assert defaults.inventory_constitution_enabled is False
+    assert defaults.max_inventory_constitution_usdt_per_asset == 10.0
+    assert defaults.max_concurrent_inventory_operations == 1
 
 
 def test_live_guard_singleton_still_starts_disabled():
@@ -149,6 +191,14 @@ def test_live_guard_singleton_still_starts_disabled():
 
     assert live_guard.live_trading_enabled is False
     assert live_guard.in_flight_count == 0
+
+
+def test_inventory_guard_singleton_still_starts_disabled():
+    from app.execution.inventory_guard import inventory_guard
+
+    assert inventory_guard.inventory_constitution_enabled is False
+    assert inventory_guard.in_flight_count == 0
+    assert inventory_guard.kill_switch_engaged is False
 
 
 def test_main_py_never_hardcodes_real_orders_placed_to_true_phase3a():

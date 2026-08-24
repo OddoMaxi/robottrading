@@ -577,6 +577,49 @@ class LiveArbitrageExecutionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
+class InventoryConstitutionRecord(Base):
+    """AUTOMATIC INVENTORY CONSTITUTION LEDGER (user directive,
+    2026-08-24). One row per REAL attempt made by
+    app.execution.inventory_constitution_executor.InventoryConstitutionExecutor
+    — this table stays EMPTY until INVENTORY_CONSTITUTION_ENABLED is
+    explicitly True for one specific, individually authorized call
+    (never automatic). Records the real price/quantity/fees Bybit or
+    Binance actually returned for the fill — never a paper or estimated
+    figure. Written by
+    app.database.repository.save_inventory_constitution_result."""
+
+    __tablename__ = "inventory_constitution_executions"
+    __table_args__ = (Index("ix_inventory_constitution_executions_started_at", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, index=True)
+    symbol: Mapped[str]
+    buy_exchange_for_arbitrage: Mapped[str]
+    sell_exchange: Mapped[str]
+    outcome: Mapped[str]
+    reason: Mapped[str | None]
+    started_at: Mapped[datetime]
+    completed_at: Mapped[datetime | None]
+
+    pre_purchase_net_edge_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    required_base_qty: Mapped[float | None] = mapped_column(Numeric(30, 6))
+    requested_notional_usdt: Mapped[float | None] = mapped_column(Numeric(20, 6))
+
+    order_client_id: Mapped[str | None]
+    order_exchange_id: Mapped[str | None]
+    order_status: Mapped[str | None]
+    filled_qty: Mapped[float] = mapped_column(Numeric(30, 6))
+    avg_fill_price: Mapped[float | None] = mapped_column(Numeric(30, 12))
+    fee_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    latency_ms: Mapped[float | None] = mapped_column(Numeric(14, 3))
+
+    post_fill_net_edge_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    edge_still_valid_after_fill: Mapped[bool | None]
+    ready_for_arbitrage: Mapped[bool] = mapped_column(default=False)
+
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+
+
 class AltcoinScanObservationRecord(Base):
     """ALTCOIN SCANNER (user directive, 2026-08-23). One row per
     (symbol, buy_exchange, sell_exchange) evaluated on each scan cycle of

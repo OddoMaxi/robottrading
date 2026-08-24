@@ -14,6 +14,7 @@ from app.database.models import (
     DualLegObservationRecord,
     Exchange,
     FullUniverseScanStatusRecord,
+    InventoryConstitutionRecord,
     LiveArbitrageExecutionRecord,
     MicroLiveObservationRecord,
     MissedOpportunitySummaryRecord,
@@ -421,6 +422,49 @@ async def save_live_arbitrage_execution(session: AsyncSession, result) -> LiveAr
         actual_realized_spread_pct=_realized_spread_pct(result.buy_avg_fill_price, result.sell_avg_fill_price),
         actual_net_pnl_usd=result.actual_net_pnl_usd,
         prediction_error_usd=result.prediction_error_usd,
+    )
+    session.add(record)
+    await session.flush()
+    return record
+
+
+async def save_inventory_constitution_result(session: AsyncSession, result) -> InventoryConstitutionRecord:
+    """AUTOMATIC INVENTORY CONSTITUTION LEDGER (user directive,
+    2026-08-24). Persists one app.execution.inventory_constitution_executor.
+    InventoryConstitutionResult (not type-hinted directly, same
+    database<->execution import-cycle avoidance as the other save_*
+    functions here) — for EVERY outcome, not just FILLED, so the ledger
+    has no silent gap for an attempt that was actually made."""
+
+    def _latency_ms(submitted_at: float | None, confirmed_at: float | None) -> float | None:
+        if submitted_at is None or confirmed_at is None:
+            return None
+        return (confirmed_at - submitted_at) * 1000
+
+    record = InventoryConstitutionRecord(
+        attempt_id=result.attempt_id,
+        symbol=result.symbol,
+        buy_exchange_for_arbitrage=result.buy_exchange_for_arbitrage,
+        sell_exchange=result.sell_exchange,
+        outcome=result.outcome.value if hasattr(result.outcome, "value") else str(result.outcome),
+        reason=result.reason,
+        started_at=datetime.fromtimestamp(result.started_at, tz=UTC).replace(tzinfo=None),
+        completed_at=(
+            datetime.fromtimestamp(result.completed_at, tz=UTC).replace(tzinfo=None) if result.completed_at is not None else None
+        ),
+        pre_purchase_net_edge_usd=result.pre_purchase_net_edge_usd,
+        required_base_qty=result.required_base_qty,
+        requested_notional_usdt=result.requested_notional_usdt,
+        order_client_id=result.order_client_id,
+        order_exchange_id=result.order_exchange_id,
+        order_status=result.order_status,
+        filled_qty=result.filled_qty,
+        avg_fill_price=result.avg_fill_price,
+        fee_usd=result.fee_usd,
+        latency_ms=_latency_ms(result.submitted_at, result.confirmed_at),
+        post_fill_net_edge_usd=result.post_fill_net_edge_usd,
+        edge_still_valid_after_fill=result.edge_still_valid_after_fill,
+        ready_for_arbitrage=result.ready_for_arbitrage,
     )
     session.add(record)
     await session.flush()
