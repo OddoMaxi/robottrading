@@ -1034,6 +1034,7 @@ def render_reality_page() -> None:
     render_phase2e_real_edge_section()
     render_real_trading_section()
     render_full_market_discovery_section()
+    render_missed_and_capital_section()
     render_inventory_manager_section()
 
 
@@ -1478,8 +1479,8 @@ def render_full_market_discovery_section() -> None:
             {"label": "Paires communes (univers)", "value": f"{summary.common_pairs}"},
             {"label": "Paires scannées (STAGE A)", "value": f"{summary.pairs_fast_scanned}"},
             {"label": "Paires validées en profondeur (STAGE B)", "value": f"{summary.pairs_deep_validated}"},
-            {"label": "Paires avec edge brut", "value": f"{summary.pairs_with_raw_edge}"},
-            {"label": "Edges nets positifs (après coûts)", "value": f"{summary.pairs_net_positive_edges}"},
+            {"label": "Paires avec spread brut (STAGE A, estimation)", "value": f"{summary.pairs_raw_spread_stage_a}"},
+            {"label": "Edges nets positifs (STAGE B, réel, LIVE only)", "value": f"{summary.pairs_net_positive_stage_b_live}"},
             {"label": "Edges récurrents", "value": f"{summary.pairs_with_repeating_net_edge}"},
             {"label": "Dernier cycle scanner", "value": age_str, "sub": f"durée {cycle_str}"},
         ]
@@ -1497,6 +1498,57 @@ def render_full_market_discovery_section() -> None:
                 )
     else:
         st.caption("Pas encore d'historique suffisant pour un classement TOP 10.")
+
+
+def render_missed_and_capital_section() -> None:
+    missed = data.get_missed_opportunities_summary_cached()
+    capital = data.get_capital_bottleneck_summary_cached()
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">MISSED OPPORTUNITIES & CAPITAL BOTTLENECK</div>', unsafe_allow_html=True)
+
+    if not missed.reachable and not capital.reachable:
+        st.caption("Moteur injoignable — analyse indisponible.")
+        return
+
+    current_tier = next((t for t in capital.tiers if t.total_capital_usdt == 160.0), None)
+    render_stat_cards(
+        [
+            {"label": "Opportunités manquées (total)", "value": f"{missed.total_missed}" if missed.reachable else "—"},
+            {"label": "Raison principale", "value": missed.primary_cause or "NONE" if missed.reachable else "—"},
+            {"label": "Profit théorique non réalisé", "value": f"{missed.total_theoretical_profit_usd:+.4f} $" if missed.reachable else "—", "sub": "THEORETICAL_NOT_REALIZED"},
+            {"label": "Capital bottleneck (160 USDT)", "value": ("OUI" if capital.current_capital_bottleneck else "NON") if capital.reachable else "—"},
+            {"label": "300 USDT aiderait", "value": ("OUI" if capital.would_300_materially_help else "NON") if capital.reachable else "—"},
+            {"label": "500 USDT aiderait", "value": ("OUI" if capital.would_500_materially_help else "NON") if capital.reachable else "—"},
+            {"label": "Inventory bottleneck (160 USDT)", "value": f"{current_tier.missed_for_inventory}" if current_tier else "—", "sub": "exécutable côté capital, bloqué côté inventaire"},
+        ]
+    )
+
+    if missed.reachable and missed.causes:
+        with st.expander(f"Pourquoi manquées — détail par cause ({len(missed.causes)})"):
+            for c in sorted(missed.causes, key=lambda c: c.count, reverse=True):
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{c.cause}</span>'
+                    f'<span class="v">{c.count} fois · {c.theoretical_profit_usd_total:+.4f} $ théorique non réalisé</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+    if capital.reachable and capital.tiers:
+        with st.expander("Simulation multi-capital (160 / 300 / 500 / 1000 USDT)"):
+            for t in capital.tiers:
+                st.markdown(
+                    f'<div class="simple-perf-row"><span class="k">{t.total_capital_usdt:.0f} USDT '
+                    f'(Binance {t.binance_allocation_usdt:.0f} / Bybit {t.bybit_allocation_usdt:.0f})</span>'
+                    f'<span class="v">{t.executable_profitable_opportunities} exécutables · manqué capital {t.missed_for_capital} · '
+                    f'manqué inventaire {t.missed_for_inventory} · utilisation {t.capital_utilization_pct:.0f}% · '
+                    f'P&L simulé {t.simulated_net_pnl_usd:+.4f} $</span></div>',
+                    unsafe_allow_html=True,
+                )
+        st.caption(f"300 USDT : {capital.would_300_evidence}")
+        st.caption(f"500 USDT : {capital.would_500_evidence}")
+
+    st.caption(
+        "Toutes les valeurs de profit ici sont THEORETICAL_NOT_REALIZED — aucun ordre réel n'a jamais été placé pour les obtenir, "
+        "et cette simulation ne peut en placer aucun."
+    )
 
 
 def render_inventory_manager_section() -> None:

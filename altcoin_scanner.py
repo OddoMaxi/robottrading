@@ -47,15 +47,22 @@ import time
 from datetime import UTC, datetime
 
 from app.config.settings import get_settings
-from app.database.repository import save_altcoin_scan_observation, upsert_full_universe_scan_status
+from app.database.repository import (
+    LIVE_MARKET_EXCHANGES,
+    save_altcoin_scan_observation,
+    upsert_full_universe_scan_status,
+    upsert_missed_opportunity_summaries,
+)
 from app.database.session import async_session_factory
 from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.bybit_client import BybitClient
 from app.execution.live_universe import live_universe_builder
+from app.reporting.dual_leg_edge import recommend_safety_margin_usd
 from app.scanner.continuity_tracker import ContinuityTracker
 from app.scanner.cross_exchange_scanner import scan_symbol
 from app.scanner.fast_discovery import discover_candidates, parse_binance_bulk_tickers, parse_bybit_bulk_tickers
 from app.scanner.market_snapshot import MultiExchangeSnapshotFetcher
+from app.scanner.missed_opportunity_tracker import EdgeDisappearanceTracker, MissedOpportunityTracker, classify_miss
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger("altcoin_scanner")
@@ -91,6 +98,8 @@ async def run_one_cycle(
     binance_read: BinanceAccountClient,
     bybit_read: BybitClient,
     tracker: ContinuityTracker,
+    edge_disappearance: EdgeDisappearanceTracker,
+    missed: MissedOpportunityTracker,
 ) -> int:
     settings = get_settings()
     cycle_start = time.time()
@@ -122,14 +131,23 @@ async def run_one_cycle(
     stage_b_symbols = sorted({c.symbol for c in discovery.candidates})
     stage_b_results = await _run_stage_b(fetcher, stage_b_symbols)  # network I/O done before opening the DB session
 
+    # Data-derived safety margin (item 5) from THIS cycle's own net-profit
+    # distribution — same established methodology as
+    # app.reporting.dual_leg_edge.recommend_safety_margin_usd (1
+    # population stdev), computed fresh each cycle, never a fitted or
+    # invented constant.
+    all_quotes = [dq for direction_quotes in stage_b_results.values() for dq in direction_quotes]
+    safety_margin_usd = recommend_safety_margin_usd([dq.quote.net_profit_usd for dq in all_quotes])
+
     total = 0
-    net_positive = 0
+    net_positive_live = 0
     async with async_session_factory() as session:
         for symbol, direction_quotes in stage_b_results.items():
             for dq in direction_quotes:
                 is_positive = dq.quote.executable and dq.quote.net_profit_usd > 0
-                if is_positive:
-                    net_positive += 1
+                is_live = dq.buy_exchange in LIVE_MARKET_EXCHANGES and dq.sell_exchange in LIVE_MARKET_EXCHANGES
+                if is_positive and is_live:
+                    net_positive_live += 1
                 status = tracker.observe(dq.symbol, dq.buy_exchange, dq.sell_exchange, is_positive)
                 persistence = tracker.current_persistence_seconds(dq.symbol, dq.buy_exchange, dq.sell_exchange)
                 try:
@@ -138,6 +156,19 @@ async def run_one_cycle(
                 except Exception:
                     logger.exception("failed to persist observation for %s %s->%s", dq.symbol, dq.buy_exchange, dq.sell_exchange)
 
+                # Missed-opportunity classification is LIVE-scope only
+                # (item 2) — an OKX-involving quote must never contribute
+                # to a count that could influence the Inventory Manager.
+                if not is_live:
+                    continue
+                disappeared_profit = edge_disappearance.observe(dq.symbol, dq.buy_exchange, dq.sell_exchange, is_positive, dq.quote.net_profit_usd)
+                if disappeared_profit is not None:
+                    missed.record("EDGE_DISAPPEARED", disappeared_profit)
+                    continue  # this tick's own cause (if any) is a separate, independent event from the one that just disappeared
+                cause, theoretical_profit = classify_miss(dq.quote, safety_margin_usd=safety_margin_usd)
+                if cause is not None:
+                    missed.record(cause, theoretical_profit)
+
         cycle_duration = time.time() - cycle_start
         try:
             await upsert_full_universe_scan_status(
@@ -145,13 +176,23 @@ async def run_one_cycle(
                 updated_at=now,
                 common_pairs_count=len(universe.common_symbols),
                 pairs_fast_scanned=discovery.fast_scanned_count,
-                pairs_with_raw_edge=discovery.raw_edge_count,
+                pairs_raw_spread_stage_a=discovery.raw_edge_count,
                 pairs_deep_validated=len(stage_b_symbols),
-                pairs_net_positive=net_positive,
+                pairs_net_positive_stage_b_live=net_positive_live,
                 cycle_duration_seconds=cycle_duration,
             )
         except Exception:
             logger.exception("failed to upsert full_universe_scan_status")
+
+        try:
+            snapshot = missed.snapshot()
+            await upsert_missed_opportunity_summaries(
+                session,
+                {cause: (acc.count, acc.theoretical_profit_usd_total) for cause, acc in snapshot.items()},
+                updated_at=now,
+            )
+        except Exception:
+            logger.exception("failed to upsert missed_opportunity_summary")
 
         await session.commit()
     return total
@@ -165,10 +206,12 @@ async def main() -> None:
     bybit_read = BybitClient()
     fetcher = MultiExchangeSnapshotFetcher(binance=binance_read, bybit=bybit_read)
     tracker = ContinuityTracker()
+    edge_disappearance = EdgeDisappearanceTracker()
+    missed = MissedOpportunityTracker()
 
     while True:
         try:
-            count = await run_one_cycle(fetcher, binance_read, bybit_read, tracker)
+            count = await run_one_cycle(fetcher, binance_read, bybit_read, tracker, edge_disappearance, missed)
             logger.info("scan cycle complete: %d direction-observations persisted", count)
         except asyncio.CancelledError:
             raise

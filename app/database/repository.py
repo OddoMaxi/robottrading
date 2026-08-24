@@ -16,6 +16,7 @@ from app.database.models import (
     FullUniverseScanStatusRecord,
     LiveArbitrageExecutionRecord,
     MicroLiveObservationRecord,
+    MissedOpportunitySummaryRecord,
     OpportunityRecord,
     PriceSnapshot,
     SimulatedTradeRecord,
@@ -426,6 +427,9 @@ async def save_live_arbitrage_execution(session: AsyncSession, result) -> LiveAr
     return record
 
 
+LIVE_MARKET_EXCHANGES = ("binance", "bybit")  # the only exchanges with a real trade client — see item 2, 2026-08-24
+
+
 async def save_altcoin_scan_observation(
     session: AsyncSession,
     direction_quote,
@@ -436,12 +440,17 @@ async def save_altcoin_scan_observation(
     """ALTCOIN SCANNER (user directive, 2026-08-23). Persists one
     (symbol, buy_exchange, sell_exchange) observation from
     app.scanner.cross_exchange_scanner.DirectionQuote. Written by the
-    standalone altcoin_scanner.py process — never by main.py."""
+    standalone altcoin_scanner.py process — never by main.py.
+
+    market_scope is derived, never passed in, so it can't drift from the
+    row's own buy_exchange/sell_exchange (item 2, 2026-08-24: "aucune
+    opportunité impliquant OKX ne doit apparaître comme LIVE")."""
     quote = direction_quote.quote
     reference_notional_usd = quote.executable_qty * quote.buy_execution_price
     net_profit_per_1000usdt = (
         quote.net_profit_usd / reference_notional_usd * 1000 if reference_notional_usd > 0 else 0.0
     )
+    market_scope = "live" if direction_quote.buy_exchange in LIVE_MARKET_EXCHANGES and direction_quote.sell_exchange in LIVE_MARKET_EXCHANGES else "research"
     record = AltcoinScanObservationRecord(
         symbol=direction_quote.symbol,
         buy_exchange=direction_quote.buy_exchange,
@@ -465,6 +474,7 @@ async def save_altcoin_scan_observation(
         rejection_reason=quote.reason,
         continuity_status=continuity_status,
         persistence_seconds=persistence_seconds,
+        market_scope=market_scope,
     )
     session.add(record)
     await session.flush()
@@ -476,9 +486,9 @@ async def upsert_full_universe_scan_status(
     updated_at: datetime,
     common_pairs_count: int,
     pairs_fast_scanned: int,
-    pairs_with_raw_edge: int,
+    pairs_raw_spread_stage_a: int,
     pairs_deep_validated: int,
-    pairs_net_positive: int,
+    pairs_net_positive_stage_b_live: int,
     cycle_duration_seconds: float,
 ) -> FullUniverseScanStatusRecord:
     """INVENTORY MANAGER V2 (user directive, 2026-08-24). Always id=1 —
@@ -491,8 +501,8 @@ async def upsert_full_universe_scan_status(
         session.add(
             FullUniverseScanStatusRecord(
                 id=1, updated_at=updated_at, common_pairs_count=common_pairs_count,
-                pairs_fast_scanned=pairs_fast_scanned, pairs_with_raw_edge=pairs_with_raw_edge,
-                pairs_deep_validated=pairs_deep_validated, pairs_net_positive=pairs_net_positive,
+                pairs_fast_scanned=pairs_fast_scanned, pairs_raw_spread_stage_a=pairs_raw_spread_stage_a,
+                pairs_deep_validated=pairs_deep_validated, pairs_net_positive_stage_b_live=pairs_net_positive_stage_b_live,
                 cycle_duration_seconds=cycle_duration_seconds,
             )
         )
@@ -500,9 +510,9 @@ async def upsert_full_universe_scan_status(
         existing.updated_at = updated_at
         existing.common_pairs_count = common_pairs_count
         existing.pairs_fast_scanned = pairs_fast_scanned
-        existing.pairs_with_raw_edge = pairs_with_raw_edge
+        existing.pairs_raw_spread_stage_a = pairs_raw_spread_stage_a
         existing.pairs_deep_validated = pairs_deep_validated
-        existing.pairs_net_positive = pairs_net_positive
+        existing.pairs_net_positive_stage_b_live = pairs_net_positive_stage_b_live
         existing.cycle_duration_seconds = cycle_duration_seconds
     await session.flush()
     result = await session.get(FullUniverseScanStatusRecord, 1)
@@ -512,3 +522,34 @@ async def upsert_full_universe_scan_status(
 
 async def get_full_universe_scan_status(session: AsyncSession) -> FullUniverseScanStatusRecord | None:
     return await session.get(FullUniverseScanStatusRecord, 1)
+
+
+async def upsert_missed_opportunity_summaries(
+    session: AsyncSession,
+    summaries: dict[str, tuple[int, float]],  # cause -> (count, theoretical_profit_usd_total)
+    updated_at: datetime,
+) -> None:
+    """MISSED PROFITABLE OPPORTUNITIES (V2.1, user directive, 2026-08-24,
+    item 5). One upsert per cause — cause is the primary key, so this
+    never grows past len(ALL_CAUSES) rows. Written by altcoin_scanner.py
+    each cycle from its cumulative in-process MissedOpportunityTracker;
+    also called by the engine process for the three balance/concurrency
+    causes it alone can observe (see app.reporting.missed_opportunity_report)."""
+    for cause, (count, theoretical_profit_usd_total) in summaries.items():
+        existing = await session.get(MissedOpportunitySummaryRecord, cause)
+        if existing is None:
+            session.add(
+                MissedOpportunitySummaryRecord(
+                    cause=cause, count=count, theoretical_profit_usd_total=theoretical_profit_usd_total, updated_at=updated_at,
+                )
+            )
+        else:
+            existing.count = count
+            existing.theoretical_profit_usd_total = theoretical_profit_usd_total
+            existing.updated_at = updated_at
+    await session.flush()
+
+
+async def get_missed_opportunity_summaries(session: AsyncSession) -> list[MissedOpportunitySummaryRecord]:
+    result = await session.execute(select(MissedOpportunitySummaryRecord))
+    return list(result.scalars().all())

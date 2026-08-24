@@ -1024,8 +1024,8 @@ class FullMarketDiscoverySummary:
     common_pairs: int = 0
     pairs_fast_scanned: int = 0
     pairs_deep_validated: int = 0
-    pairs_with_raw_edge: int = 0
-    pairs_net_positive_edges: int = 0
+    pairs_raw_spread_stage_a: int = 0
+    pairs_net_positive_stage_b_live: int = 0
     pairs_with_repeating_net_edge: int = 0
     top_10_opportunities: list[TopOpportunityRow] = field(default_factory=list)
     scan_status_available: bool = False
@@ -1056,8 +1056,8 @@ async def fetch_full_market_discovery_summary() -> FullMarketDiscoverySummary:
             common_pairs=payload["common_pairs"],
             pairs_fast_scanned=payload["pairs_fast_scanned"],
             pairs_deep_validated=payload["pairs_deep_validated"],
-            pairs_with_raw_edge=payload["pairs_with_raw_edge"],
-            pairs_net_positive_edges=payload["pairs_net_positive_edges"],
+            pairs_raw_spread_stage_a=payload["pairs_raw_spread_stage_a"],
+            pairs_net_positive_stage_b_live=payload["pairs_net_positive_stage_b_live"],
             pairs_with_repeating_net_edge=payload["pairs_with_repeating_net_edge"],
             top_10_opportunities=top10,
             scan_status_available=payload["scan_status_available"],
@@ -1071,6 +1071,107 @@ async def fetch_full_market_discovery_summary() -> FullMarketDiscoverySummary:
 @st.cache_data(ttl=15, show_spinner=False)
 def get_full_market_discovery_summary_cached() -> FullMarketDiscoverySummary:
     return asyncio.run(fetch_full_market_discovery_summary())
+
+
+@dataclass(slots=True)
+class MissedCauseSummary:
+    cause: str
+    count: int
+    theoretical_profit_usd_total: float
+
+
+@dataclass(slots=True)
+class MissedOpportunitySummary:
+    reachable: bool
+    causes: list[MissedCauseSummary] = field(default_factory=list)
+    total_missed: int = 0
+    total_theoretical_profit_usd: float = 0.0
+    primary_cause: str | None = None
+
+
+async def fetch_missed_opportunities_summary() -> MissedOpportunitySummary:
+    """MISSED PROFITABLE OPPORTUNITIES (V2.1, user directive, 2026-08-24,
+    item 5) — same HTTP-to-the-engine pattern as every other live-state
+    fetcher here. Never raises — an unreachable engine reports
+    reachable=False."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/live/missed-opportunities", timeout=aiohttp.ClientTimeout(total=30)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        causes = [
+            MissedCauseSummary(cause=c["cause"], count=c["count"], theoretical_profit_usd_total=c["theoretical_profit_usd_total"])
+            for c in payload.get("causes", [])
+        ]
+        return MissedOpportunitySummary(
+            reachable=True, causes=causes, total_missed=payload["total_missed"],
+            total_theoretical_profit_usd=payload["total_theoretical_profit_usd"], primary_cause=payload["primary_cause"],
+        )
+    except Exception:
+        return MissedOpportunitySummary(reachable=False)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def get_missed_opportunities_summary_cached() -> MissedOpportunitySummary:
+    return asyncio.run(fetch_missed_opportunities_summary())
+
+
+@dataclass(slots=True)
+class CapitalTierSummary:
+    total_capital_usdt: float
+    binance_allocation_usdt: float
+    bybit_allocation_usdt: float
+    executable_profitable_opportunities: int
+    missed_for_capital: int
+    missed_for_inventory: int
+    capital_utilization_pct: float
+    simulated_net_pnl_usd: float
+
+
+@dataclass(slots=True)
+class CapitalBottleneckSummary:
+    reachable: bool
+    tiers: list[CapitalTierSummary] = field(default_factory=list)
+    current_capital_bottleneck: bool = False
+    would_300_materially_help: bool = False
+    would_300_evidence: str = ""
+    would_500_materially_help: bool = False
+    would_500_evidence: str = ""
+
+
+async def fetch_capital_bottleneck_summary() -> CapitalBottleneckSummary:
+    """CAPITAL BOTTLENECK ANALYSIS (V2.1, user directive, 2026-08-24, item
+    6) — same HTTP-to-the-engine pattern as every other live-state
+    fetcher here. Never raises — an unreachable engine reports
+    reachable=False."""
+    base_url = get_settings().engine_api_base_url
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/live/capital-bottleneck", timeout=aiohttp.ClientTimeout(total=30)) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        tiers = [
+            CapitalTierSummary(
+                total_capital_usdt=t["total_capital_usdt"], binance_allocation_usdt=t["binance_allocation_usdt"],
+                bybit_allocation_usdt=t["bybit_allocation_usdt"], executable_profitable_opportunities=t["executable_profitable_opportunities"],
+                missed_for_capital=t["missed_for_capital"], missed_for_inventory=t["missed_for_inventory"],
+                capital_utilization_pct=t["capital_utilization_pct"], simulated_net_pnl_usd=t["simulated_net_pnl_usd"],
+            )
+            for t in payload.get("tiers", [])
+        ]
+        return CapitalBottleneckSummary(
+            reachable=True, tiers=tiers, current_capital_bottleneck=payload["current_capital_bottleneck"],
+            would_300_materially_help=payload["would_300_materially_help"], would_300_evidence=payload["would_300_evidence"],
+            would_500_materially_help=payload["would_500_materially_help"], would_500_evidence=payload["would_500_evidence"],
+        )
+    except Exception:
+        return CapitalBottleneckSummary(reachable=False)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_capital_bottleneck_summary_cached() -> CapitalBottleneckSummary:
+    return asyncio.run(fetch_capital_bottleneck_summary())
 
 
 async def fetch_execution_funnel(hours: float = 24.0) -> ExecutionFunnelReport:

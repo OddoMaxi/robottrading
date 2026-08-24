@@ -140,6 +140,15 @@ class InventoryScoreBreakdown:
     expected_reuse_score: float
     total_score: float  # 0-100
     expected_reuse_label: str  # "LOW" | "MEDIUM" | "HIGH" — a stated heuristic bucket, never a fabricated precise forecast
+    # V2.1 (user directive, 2026-08-24, item 7) — "if this asset were
+    # pre-positioned starting now, roughly how many of the trades we
+    # already observed being blocked would additionally have executed":
+    # the simplest honest projection is that the SAME historical rate
+    # (sightings) continues, since nothing more sophisticated is
+    # justified by one lookback window's worth of data. Never a fitted
+    # statistical forecast — just the plain count restated as a
+    # forward-looking estimate.
+    expected_additional_executable_trades: int
     classification: InventoryClassification
     reason: str
 
@@ -159,6 +168,7 @@ class RebalanceRecommendation:
     median_net_edge: float | None
     p10_net_edge: float | None
     expected_reuse_label: str | None
+    expected_additional_executable_trades: int | None
     reason: str
     simulated: bool  # ALWAYS True in this phase — see module docstring
 
@@ -309,6 +319,7 @@ def score_direction_for_inventory(summary: DirectionSummary, min_expected_reuse_
         expected_reuse_score=expected_reuse_score,
         total_score=total_score,
         expected_reuse_label=_expected_reuse_label(sightings, min_expected_reuse_count),
+        expected_additional_executable_trades=sightings,
         classification=classification,
         reason=reason,
     )
@@ -360,6 +371,7 @@ def recommend_rebalance(
                 median_net_edge=s.median_net_edge_per_1000usdt if s is not None else None,
                 p10_net_edge=s.p10_net_edge_per_1000usdt if s is not None else None,
                 expected_reuse_label=s.expected_reuse_label if s is not None else None,
+                expected_additional_executable_trades=s.expected_additional_executable_trades if s is not None else None,
                 reason=f"reconvert to USDT — {reason}",
                 simulated=True,
             )
@@ -403,6 +415,7 @@ def recommend_rebalance(
                 median_net_edge=s.median_net_edge_per_1000usdt,
                 p10_net_edge=s.p10_net_edge_per_1000usdt,
                 expected_reuse_label=s.expected_reuse_label,
+                expected_additional_executable_trades=s.expected_additional_executable_trades,
                 reason=f"{s.classification.value}: {s.reason} — currently blocking execution on {exchange} (INVENTORY_MISSING)",
                 simulated=True,
             )

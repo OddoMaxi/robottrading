@@ -19,7 +19,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INVENTORY_MODULE_PATH = REPO_ROOT / "app" / "execution" / "inventory_manager.py"
 V2_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "inventory_manager_v2_report.py"
 DISCOVERY_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "full_universe_discovery_report.py"
-ALL_MODULE_PATHS = (INVENTORY_MODULE_PATH, V2_REPORT_MODULE_PATH, DISCOVERY_REPORT_MODULE_PATH)
+MISSED_OPPORTUNITY_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "missed_opportunity_report.py"
+CAPITAL_BOTTLENECK_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "capital_bottleneck_report.py"
+OBSERVATION_WINDOW_REPORT_MODULE_PATH = REPO_ROOT / "app" / "reporting" / "observation_window_report.py"
+ALL_MODULE_PATHS = (
+    INVENTORY_MODULE_PATH,
+    V2_REPORT_MODULE_PATH,
+    DISCOVERY_REPORT_MODULE_PATH,
+    MISSED_OPPORTUNITY_REPORT_MODULE_PATH,
+    CAPITAL_BOTTLENECK_REPORT_MODULE_PATH,
+    OBSERVATION_WINDOW_REPORT_MODULE_PATH,
+)
 
 FORBIDDEN_MODULE_PREFIXES = (
     "app.orchestration",

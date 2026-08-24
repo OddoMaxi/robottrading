@@ -619,6 +619,16 @@ class AltcoinScanObservationRecord(Base):
     continuity_status: Mapped[str]  # "new" | "continuation" | "none"
     persistence_seconds: Mapped[float] = mapped_column(Numeric(14, 3))
 
+    # V2.1 (user directive, 2026-08-24, item 2 "SÉPARER LIVE ET RESEARCH")
+    # — "live" when BOTH legs are in LIVE_EXCHANGES (Binance/Bybit, the
+    # only exchanges with a real trade client); "research" otherwise
+    # (any direction touching OKX). Every LIVE-facing reporting function
+    # (app.reporting.altcoin_scan_report, app.execution.inventory_manager)
+    # filters to market_scope="live" by default — an OKX-involving row
+    # can be displayed as research context but must never count toward a
+    # LIVE metric, a BEST LIVE CANDIDATE, or an Inventory Manager score.
+    market_scope: Mapped[str] = mapped_column(default="live")  # "live" | "research"
+
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -634,7 +644,18 @@ class FullUniverseScanStatusRecord(Base):
     /live/full-universe-discovery endpoint to read the scanner's current
     per-cycle counters. Always exactly one row (id=1), overwritten each
     cycle — this is current status, not a history table (see
-    app.database.repository.upsert_full_universe_scan_status)."""
+    app.database.repository.upsert_full_universe_scan_status).
+
+    V2.1 (user directive, 2026-08-24, item 1 "AUDIT IMMÉDIAT DES
+    MÉTRIQUES") — pairs_raw_spread_stage_a and
+    pairs_net_positive_stage_b_live were previously named pairs_with_
+    raw_edge/pairs_net_positive and could read as directly comparable
+    when they weren't: the first is STAGE A's cheap, fee-free estimate
+    over the Binance/Bybit universe; the second is STAGE B's real,
+    fee-adjusted result, filtered to market_scope="live" (Binance/Bybit
+    only) so an OKX-involving Stage B result can never quietly inflate
+    it. The renamed fields spell out STAGE + cost-basis + population so
+    the two can't be read as one number two ways."""
 
     __tablename__ = "full_universe_scan_status"
 
@@ -642,7 +663,32 @@ class FullUniverseScanStatusRecord(Base):
     updated_at: Mapped[datetime]
     common_pairs_count: Mapped[int]
     pairs_fast_scanned: Mapped[int]
-    pairs_with_raw_edge: Mapped[int]
-    pairs_deep_validated: Mapped[int]
-    pairs_net_positive: Mapped[int]
+    pairs_raw_spread_stage_a: Mapped[int]  # STAGE A, no fees, Binance/Bybit only, pre-cap candidate count
+    pairs_deep_validated: Mapped[int]  # STAGE B, promoted-candidate count actually validated this cycle
+    pairs_net_positive_stage_b_live: Mapped[int]  # STAGE B, real fees, market_scope="live" (Binance/Bybit) only
     cycle_duration_seconds: Mapped[float] = mapped_column(Numeric(10, 3))
+
+
+class MissedOpportunitySummaryRecord(Base):
+    """MISSED PROFITABLE OPPORTUNITIES (V2.1, user directive, 2026-08-24,
+    item 5) — one row per cause (see app.scanner.missed_opportunity_
+    tracker.ALL_CAUSES), cause as the primary key, upserted every scan
+    cycle with the CUMULATIVE count/theoretical-profit since
+    altcoin_scanner.py last started (never since epoch — a process
+    restart resets these, same as ContinuityTracker's own in-memory
+    streaks). Written by altcoin_scanner.py's quote-level classifier
+    (app.scanner.missed_opportunity_tracker.classify_miss); the three
+    balance/concurrency-dependent causes (INVENTORY_MISSING,
+    CAPITAL_BUSY, POSITION_ALREADY_OPEN) are written by the engine
+    process instead, since only it holds live balance/live_guard state —
+    see app.reporting.missed_opportunity_report.
+
+    theoretical_profit_usd_total is explicitly THEORETICAL_NOT_REALIZED
+    — no order was ever placed to earn any of it."""
+
+    __tablename__ = "missed_opportunity_summary"
+
+    cause: Mapped[str] = mapped_column(primary_key=True)
+    count: Mapped[int]
+    theoretical_profit_usd_total: Mapped[float] = mapped_column(Numeric(20, 6))
+    updated_at: Mapped[datetime]

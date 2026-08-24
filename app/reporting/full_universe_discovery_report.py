@@ -26,11 +26,22 @@ DEFAULT_LOOKBACK_HOURS = 24.0
 
 @dataclass(slots=True)
 class FullMarketDiscoveryReport:
+    """V2.1 (user directive, 2026-08-24, item 1 "AUDIT IMMÉDIAT DES
+    MÉTRIQUES") — pairs_raw_spread_stage_a and pairs_net_positive_stage_b_live
+    are named for STAGE + cost-basis + population precisely because they
+    are NOT directly comparable: the first is STAGE A's cheap, fee-free
+    ESTIMATE over the whole Binance/Bybit universe (pre-cap, before STAGE
+    B ever runs); the second is STAGE B's real, fee-adjusted RESULT,
+    filtered to market_scope="live" so an OKX-involving result can never
+    inflate it (item 2). Comparable in POPULATION now (both Binance/Bybit
+    only); still different in STAGE and cost-basis by design — the names
+    say so explicitly rather than leaving that to be assumed."""
+
     common_pairs: int
     pairs_fast_scanned: int  # STAGE A — latest cycle, ~= common_pairs (the whole universe is cheaply checked every cycle)
     pairs_deep_validated: int  # STAGE B — latest cycle, bounded by full_universe_scan_max_stage_b_per_cycle
-    pairs_with_raw_edge: int  # STAGE A candidates clearing the raw-spread floor, latest cycle, pre-cap
-    pairs_net_positive_edges: int  # STAGE B results with real net_profit_usd > 0, latest cycle
+    pairs_raw_spread_stage_a: int  # STAGE A candidates clearing the raw-spread floor, latest cycle, pre-cap, Binance/Bybit only
+    pairs_net_positive_stage_b_live: int  # STAGE B results with real net_profit_usd > 0, latest cycle, market_scope="live" only
     pairs_with_repeating_net_edge: int  # from persisted history over the lookback window, not just the latest cycle
     top_10_opportunities: list[DirectionSummary] = field(default_factory=list)
     scan_status_available: bool = False
@@ -64,8 +75,8 @@ async def build_full_market_discovery_report(
         common_pairs=len(universe.common_symbols),
         pairs_fast_scanned=status.pairs_fast_scanned if status is not None else 0,
         pairs_deep_validated=status.pairs_deep_validated if status is not None else 0,
-        pairs_with_raw_edge=status.pairs_with_raw_edge if status is not None else 0,
-        pairs_net_positive_edges=status.pairs_net_positive if status is not None else 0,
+        pairs_raw_spread_stage_a=status.pairs_raw_spread_stage_a if status is not None else 0,
+        pairs_net_positive_stage_b_live=status.pairs_net_positive_stage_b_live if status is not None else 0,
         pairs_with_repeating_net_edge=len(repeating),
         top_10_opportunities=top10,
         scan_status_available=status is not None,

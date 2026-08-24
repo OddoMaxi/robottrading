@@ -21,11 +21,14 @@ from app.market_data.store import market_data_store
 from app.orchestration.control import master_control
 from app.orchestration.global_allocator import global_allocator
 from app.reporting.altcoin_scan_report import AltcoinScanReport, DirectionSummary, build_altcoin_scan_report, market_priority_score
+from app.reporting.capital_bottleneck_report import build_capital_bottleneck_report
 from app.reporting.dual_leg_edge import DualLegEdgeReport, build_dual_leg_edge_report
 from app.reporting.full_universe_discovery_report import build_full_market_discovery_report
 from app.reporting.inventory_manager_v2_report import build_inventory_manager_v2_report, render_v2_report_text
 from app.reporting.live_validation_score import build_live_validation_score
 from app.reporting.micro_live_edge import DistributionStats, MicroLiveEdgeReport, build_micro_live_edge_report
+from app.reporting.missed_opportunity_report import build_missed_opportunity_report
+from app.reporting.observation_window_report import build_observation_window_report, render_observation_window_text
 from app.reporting.real_trading_summary import build_real_trading_summary
 from app.risk.risk_engine import risk_engine
 from app.simulation.live_stress_test import run_live_stress_test
@@ -642,6 +645,7 @@ async def live_inventory(session: AsyncSession = Depends(get_session), max_symbo
                 "median_net_edge_per_1000usdt": s.median_net_edge_per_1000usdt,
                 "p10_net_edge_per_1000usdt": s.p10_net_edge_per_1000usdt,
                 "total_score": s.total_score, "expected_reuse_label": s.expected_reuse_label,
+                "expected_additional_executable_trades": s.expected_additional_executable_trades,
                 "classification": s.classification.value, "reason": s.reason,
             }
             for s in report.inventory_scores
@@ -656,6 +660,7 @@ async def live_inventory(session: AsyncSession = Depends(get_session), max_symbo
                 "sightings": r.sightings, "net_positive_rate_pct": r.net_positive_rate_pct,
                 "median_net_edge": r.median_net_edge, "p10_net_edge": r.p10_net_edge,
                 "expected_reuse_label": r.expected_reuse_label,
+                "expected_additional_executable_trades": r.expected_additional_executable_trades,
                 "reason": r.reason, "why": r.reason, "simulated": r.simulated,
             }
             for r in report.rebalance_candidates
@@ -696,8 +701,8 @@ async def live_full_universe_discovery(session: AsyncSession = Depends(get_sessi
         "common_pairs": report.common_pairs,
         "pairs_fast_scanned": report.pairs_fast_scanned,
         "pairs_deep_validated": report.pairs_deep_validated,
-        "pairs_with_raw_edge": report.pairs_with_raw_edge,
-        "pairs_net_positive_edges": report.pairs_net_positive_edges,
+        "pairs_raw_spread_stage_a": report.pairs_raw_spread_stage_a,
+        "pairs_net_positive_stage_b_live": report.pairs_net_positive_stage_b_live,
         "pairs_with_repeating_net_edge": report.pairs_with_repeating_net_edge,
         "top_10_opportunities": _serialize_top10(report),
         "scan_status_available": report.scan_status_available,
@@ -733,8 +738,8 @@ async def live_inventory_v2_report(session: AsyncSession = Depends(get_session),
     return {
         "common_universe": report.common_universe,
         "pairs_actually_scanned": report.pairs_actually_scanned,
-        "pairs_with_raw_edge": report.pairs_with_raw_edge,
-        "pairs_net_positive_after_costs": report.pairs_net_positive_after_costs,
+        "pairs_raw_spread_stage_a": report.pairs_raw_spread_stage_a,
+        "pairs_net_positive_stage_b_live": report.pairs_net_positive_stage_b_live,
         "pairs_with_repeating_net_edge": report.pairs_with_repeating_net_edge,
         "top_10_symbols": report.top_10_symbols,
         "strong_inventory_candidates": report.strong_inventory_candidates,
@@ -747,6 +752,82 @@ async def live_inventory_v2_report(session: AsyncSession = Depends(get_session),
         "inventory_manager_mode": report.inventory_manager_mode,
         "auto_real_rebalance": report.auto_real_rebalance,
         "report_text": render_v2_report_text(report),
+    }
+
+
+@router.get("/live/missed-opportunities")
+async def live_missed_opportunities(session: AsyncSession = Depends(get_session), max_symbols: int = 30) -> dict:
+    """MISSED PROFITABLE OPPORTUNITIES (V2.1, user directive, 2026-08-24,
+    item 5). Read-only, no order. Every theoretical_profit_usd_total
+    figure is THEORETICAL_NOT_REALIZED — no order was ever placed to
+    earn it, and nothing here can place one. real_orders_placed always 0."""
+    report = await build_missed_opportunity_report(session, max_ranker_symbols=max_symbols)
+    return {
+        "causes": [
+            {"cause": c.cause, "count": c.count, "theoretical_profit_usd_total": c.theoretical_profit_usd_total}
+            for c in report.causes
+        ],
+        "total_missed": report.total_missed,
+        "total_theoretical_profit_usd": report.total_theoretical_profit_usd,
+        "primary_cause": report.primary_cause,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/capital-bottleneck")
+async def live_capital_bottleneck(session: AsyncSession = Depends(get_session)) -> dict:
+    """CAPITAL BOTTLENECK ANALYSIS (V2.1, user directive, 2026-08-24,
+    item 6). Pure replay simulation over already-observed LIVE
+    (Binance/Bybit) history at 160/300/500/1000 USDT — no real money
+    moves, no order is placed. See
+    app.reporting.capital_bottleneck_report's own docstring for every
+    stated modeling assumption."""
+    report = await build_capital_bottleneck_report(session)
+    return {
+        "tiers": [
+            {
+                "total_capital_usdt": t.total_capital_usdt, "binance_allocation_usdt": t.binance_allocation_usdt,
+                "bybit_allocation_usdt": t.bybit_allocation_usdt, "executable_profitable_opportunities": t.executable_profitable_opportunities,
+                "missed_for_capital": t.missed_for_capital, "missed_for_inventory": t.missed_for_inventory,
+                "capital_utilization_pct": t.capital_utilization_pct, "simulated_net_pnl_usd": t.simulated_net_pnl_usd,
+            }
+            for t in report.tiers
+        ],
+        "current_capital_bottleneck": report.current_capital_bottleneck,
+        "would_300_materially_help": report.would_300_materially_help,
+        "would_300_evidence": report.would_300_evidence,
+        "would_500_materially_help": report.would_500_materially_help,
+        "would_500_evidence": report.would_500_evidence,
+        "real_orders_placed": 0,
+    }
+
+
+@router.get("/live/observation-window-report")
+async def live_observation_window_report(session: AsyncSession = Depends(get_session), max_symbols: int = 30, as_text: bool = False):
+    """V2.1 OBSERVATION WINDOW REPORT (user directive, 2026-08-24, item
+    9). Read-only, no order — real_orders_placed always 0. Pass
+    as_text=true for the exact plain-text report format requested."""
+    report = await build_observation_window_report(session, max_ranker_symbols=max_symbols)
+    if as_text:
+        from fastapi.responses import PlainTextResponse
+
+        return PlainTextResponse(render_observation_window_text(report))
+    return {
+        "binance_bybit_opportunities_detected": report.binance_bybit_opportunities_detected,
+        "net_positive": report.net_positive,
+        "repeating": report.repeating,
+        "executable_with_current_inventory": report.executable_with_current_inventory,
+        "missed_profitable": report.missed_profitable,
+        "primary_missed_reason": report.primary_missed_reason,
+        "best_current_symbol": report.best_current_symbol,
+        "current_capital_bottleneck": report.current_capital_bottleneck,
+        "would_300_materially_help": report.would_300_materially_help,
+        "would_300_evidence": report.would_300_evidence,
+        "would_500_materially_help": report.would_500_materially_help,
+        "would_500_evidence": report.would_500_evidence,
+        "inventory_candidate": report.inventory_candidate,
+        "report_text": render_observation_window_text(report),
+        "real_orders_placed": 0,
     }
 
 

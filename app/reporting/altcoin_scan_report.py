@@ -147,12 +147,16 @@ def _summarize_direction(rows: list[AltcoinScanObservationRecord]) -> DirectionS
     )
 
 
-async def _fetch_observations(session: AsyncSession, since: datetime | None, until: datetime | None) -> list[AltcoinScanObservationRecord]:
+async def _fetch_observations(
+    session: AsyncSession, since: datetime | None, until: datetime | None, market_scope: str | None = "live"
+) -> list[AltcoinScanObservationRecord]:
     stmt = select(AltcoinScanObservationRecord)
     if since is not None:
         stmt = stmt.where(AltcoinScanObservationRecord.observed_at >= since)
     if until is not None:
         stmt = stmt.where(AltcoinScanObservationRecord.observed_at <= until)
+    if market_scope is not None:
+        stmt = stmt.where(AltcoinScanObservationRecord.market_scope == market_scope)
     stmt = stmt.order_by(AltcoinScanObservationRecord.observed_at)
     result = await session.execute(stmt)
     return list(result.scalars().all())
@@ -191,8 +195,15 @@ def market_priority_score(summary: DirectionSummary, gross_spread_volatility_pct
     return volatility_score * liquidity_score * net_spread_score * persistence_score * frequency_score
 
 
-async def build_altcoin_scan_report(session: AsyncSession, since: datetime | None = None, until: datetime | None = None) -> AltcoinScanReport:
-    rows = await _fetch_observations(session, since, until)
+async def build_altcoin_scan_report(
+    session: AsyncSession, since: datetime | None = None, until: datetime | None = None, market_scope: str | None = "live"
+) -> AltcoinScanReport:
+    """market_scope defaults to "live" (Binance/Bybit only, item 2,
+    2026-08-24) — every LIVE-facing caller (Inventory Manager, the live
+    dashboard) gets this for free without having to remember to ask for
+    it. Pass market_scope="research" for the OKX-inclusive view, or None
+    for both scopes combined."""
+    rows = await _fetch_observations(session, since, until, market_scope=market_scope)
     if not rows:
         return AltcoinScanReport(window_start=None, window_end=None, total_observations=0)
 

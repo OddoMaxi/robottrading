@@ -10,14 +10,15 @@ def _rec(action="BUY_INVENTORY", exchange="bybit", asset="ZRO", notional=5.0, cl
         action=action, exchange=exchange, asset=asset, recommended_notional_usdt=notional,
         current_holding_usdt_equiv=0.0, capital_required_usdt=notional, inventory_score=60.0,
         classification=classification, sightings=5, net_positive_rate_pct=80.0, median_net_edge=3.0,
-        p10_net_edge=1.0, expected_reuse_label="MEDIUM", reason="test reason", simulated=True,
+        p10_net_edge=1.0, expected_reuse_label="MEDIUM", expected_additional_executable_trades=5,
+        reason="test reason", simulated=True,
     )
 
 
 def _v2_report(**overrides) -> InventoryManagerV2FinalReport:
     base = dict(
-        common_universe=239, pairs_actually_scanned=239, pairs_with_raw_edge=10,
-        pairs_net_positive_after_costs=3, pairs_with_repeating_net_edge=1,
+        common_universe=239, pairs_actually_scanned=239, pairs_raw_spread_stage_a=10,
+        pairs_net_positive_stage_b_live=3, pairs_with_repeating_net_edge=1,
         top_10_symbols=["ZRO/USDT binance→bybit (3.00/1000usdt)"],
         strong_inventory_candidates=["LUNC"],
         recommended_bybit_inventory=[_rec()],
@@ -37,8 +38,8 @@ def _v2_report(**overrides) -> InventoryManagerV2FinalReport:
 def test_render_includes_all_required_lines():
     text = render_v2_report_text(_v2_report())
     for label in [
-        "COMMON UNIVERSE = 239", "PAIRS ACTUALLY SCANNED = 239", "PAIRS WITH RAW EDGE = 10",
-        "PAIRS NET POSITIVE AFTER COSTS = 3", "PAIRS WITH REPEATING NET EDGE = 1",
+        "COMMON UNIVERSE = 239", "PAIRS ACTUALLY SCANNED = 239", "PAIRS WITH RAW EDGE (STAGE A, Binance/Bybit estimate) = 10",
+        "PAIRS NET POSITIVE AFTER COSTS (STAGE B, Binance/Bybit real) = 3", "PAIRS WITH REPEATING NET EDGE = 1",
         "TOP 10 SYMBOLS =", "STRONG INVENTORY CANDIDATES = LUNC",
         "RECOMMENDED BYBIT INVENTORY =", "RECOMMENDED BINANCE INVENTORY = NONE / NO ACTION",
         "TOTAL RECOMMENDED CAPITAL LOCKED = 5.00 USDT", "REAL INVENTORY ORDERS = 0",
@@ -78,8 +79,8 @@ def _fake_async(value):
 
 async def test_composition_splits_buys_by_exchange_and_sums_capital(monkeypatch):
     discovery = FullMarketDiscoveryReport(
-        common_pairs=100, pairs_fast_scanned=100, pairs_deep_validated=20, pairs_with_raw_edge=8,
-        pairs_net_positive_edges=2, pairs_with_repeating_net_edge=1, top_10_opportunities=[],
+        common_pairs=100, pairs_fast_scanned=100, pairs_deep_validated=20, pairs_raw_spread_stage_a=8,
+        pairs_net_positive_stage_b_live=2, pairs_with_repeating_net_edge=1, top_10_opportunities=[],
     )
     inventory = InventoryManagerReport(
         generated_at=datetime(2026, 8, 24, tzinfo=UTC),
@@ -112,8 +113,8 @@ async def test_composition_never_ready_regardless_of_data(monkeypatch):
     ready_to_enable_automatic_real_inventory_management — that gate is
     structural (no order path exists), not a data verdict."""
     discovery = FullMarketDiscoveryReport(
-        common_pairs=500, pairs_fast_scanned=500, pairs_deep_validated=200, pairs_with_raw_edge=100,
-        pairs_net_positive_edges=50, pairs_with_repeating_net_edge=50, top_10_opportunities=[],
+        common_pairs=500, pairs_fast_scanned=500, pairs_deep_validated=200, pairs_raw_spread_stage_a=100,
+        pairs_net_positive_stage_b_live=50, pairs_with_repeating_net_edge=50, top_10_opportunities=[],
     )
     inventory = InventoryManagerReport(
         generated_at=datetime(2026, 8, 24, tzinfo=UTC),

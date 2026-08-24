@@ -32,13 +32,23 @@ class _FakeUniverseBuilder:
 
 
 class _FakeStatus:
-    def __init__(self, **kwargs):
-        self.pairs_fast_scanned = kwargs.get("pairs_fast_scanned", 0)
-        self.pairs_deep_validated = kwargs.get("pairs_deep_validated", 0)
-        self.pairs_with_raw_edge = kwargs.get("pairs_with_raw_edge", 0)
-        self.pairs_net_positive = kwargs.get("pairs_net_positive", 0)
-        self.cycle_duration_seconds = kwargs.get("cycle_duration_seconds", 1.0)
-        self.updated_at = kwargs.get("updated_at", datetime(2026, 8, 24, tzinfo=UTC).replace(tzinfo=None))
+    """Mirrors FullUniverseScanStatusRecord's exact field names (not a
+    loosely-typed **kwargs passthrough) — a prior version of this fixture
+    used its own ad-hoc names and silently kept passing after the model
+    was renamed (V2.1, item 1), masking a real AttributeError that only
+    showed up live. Keeping this in lockstep with the model is the point."""
+
+    def __init__(
+        self, pairs_fast_scanned=0, pairs_deep_validated=0, pairs_raw_spread_stage_a=0,
+        pairs_net_positive_stage_b_live=0, cycle_duration_seconds=1.0,
+        updated_at=datetime(2026, 8, 24, tzinfo=UTC).replace(tzinfo=None),
+    ):
+        self.pairs_fast_scanned = pairs_fast_scanned
+        self.pairs_deep_validated = pairs_deep_validated
+        self.pairs_raw_spread_stage_a = pairs_raw_spread_stage_a
+        self.pairs_net_positive_stage_b_live = pairs_net_positive_stage_b_live
+        self.cycle_duration_seconds = cycle_duration_seconds
+        self.updated_at = updated_at
 
 
 def _fake_async(value):

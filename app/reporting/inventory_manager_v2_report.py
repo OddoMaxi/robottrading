@@ -27,8 +27,8 @@ from app.reporting.full_universe_discovery_report import FullMarketDiscoveryRepo
 class InventoryManagerV2FinalReport:
     common_universe: int
     pairs_actually_scanned: int
-    pairs_with_raw_edge: int
-    pairs_net_positive_after_costs: int
+    pairs_raw_spread_stage_a: int  # see FullMarketDiscoveryReport's own docstring — STAGE A estimate, Binance/Bybit only
+    pairs_net_positive_stage_b_live: int  # STAGE B real result, market_scope="live" only
     pairs_with_repeating_net_edge: int
     top_10_symbols: list[str] = field(default_factory=list)
     strong_inventory_candidates: list[str] = field(default_factory=list)
@@ -60,8 +60,8 @@ def render_v2_report_text(report: InventoryManagerV2FinalReport) -> str:
     lines = [
         f"COMMON UNIVERSE = {report.common_universe}",
         f"PAIRS ACTUALLY SCANNED = {report.pairs_actually_scanned}",
-        f"PAIRS WITH RAW EDGE = {report.pairs_with_raw_edge}",
-        f"PAIRS NET POSITIVE AFTER COSTS = {report.pairs_net_positive_after_costs}",
+        f"PAIRS WITH RAW EDGE (STAGE A, Binance/Bybit estimate) = {report.pairs_raw_spread_stage_a}",
+        f"PAIRS NET POSITIVE AFTER COSTS (STAGE B, Binance/Bybit real) = {report.pairs_net_positive_stage_b_live}",
         f"PAIRS WITH REPEATING NET EDGE = {report.pairs_with_repeating_net_edge}",
         f"TOP 10 SYMBOLS = {_list_or_none(report.top_10_symbols)}",
         f"STRONG INVENTORY CANDIDATES = {_list_or_none(report.strong_inventory_candidates)}",
@@ -96,8 +96,8 @@ async def build_inventory_manager_v2_report(
     return InventoryManagerV2FinalReport(
         common_universe=discovery.common_pairs,
         pairs_actually_scanned=discovery.pairs_fast_scanned,
-        pairs_with_raw_edge=discovery.pairs_with_raw_edge,
-        pairs_net_positive_after_costs=discovery.pairs_net_positive_edges,
+        pairs_raw_spread_stage_a=discovery.pairs_raw_spread_stage_a,
+        pairs_net_positive_stage_b_live=discovery.pairs_net_positive_stage_b_live,
         pairs_with_repeating_net_edge=discovery.pairs_with_repeating_net_edge,
         top_10_symbols=_format_top10(discovery),
         strong_inventory_candidates=strong,
