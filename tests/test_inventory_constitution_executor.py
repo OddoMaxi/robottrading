@@ -218,6 +218,23 @@ async def test_filled_records_real_price_qty_fee(monkeypatch):
     assert result.pre_purchase_net_edge_usd > 0  # the fixture is set up as a genuinely positive spread
 
 
+async def test_bybit_buy_transmits_the_raw_usdt_notional_not_a_converted_base_qty(monkeypatch):
+    """Bybit BUY caller fix (2026-08-24): bybit_live_trade_client.place_
+    market_order now sends marketUnit="quoteCoin" for every Buy, meaning
+    qty on the wire IS the USDT notional. This caller must pass
+    requested_notional_usdt straight through — never pre-convert it to
+    an estimated base-asset quantity via a book price first (that
+    double-conversion is exactly the caller/client contract mismatch
+    this fix closes)."""
+    monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
+    trade = FakeBybitTrade(fill_status="Filled", fill_qty=2919.7)
+    await _executor(bybit_trade=trade).constitute_inventory(SYMBOL, "binance", "bybit", 10.0)
+    assert len(trade.submitted_orders) == 1
+    symbol, side, qty, order_link_id = trade.submitted_orders[0]
+    assert side == "Buy"
+    assert qty == 10.0  # the raw USDT notional — NOT 10.0 / 0.003420 (an estimated RVN quantity)
+
+
 async def test_filled_and_edge_still_valid_marks_ready_for_arbitrage(monkeypatch):
     monkeypatch.setattr(executor_module, "inventory_guard", _armed_guard())
     trade = FakeBybitTrade(fill_status="Filled", fill_qty=3100.0)  # >= required qty

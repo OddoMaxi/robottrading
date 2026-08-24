@@ -16,6 +16,7 @@ requirement the caller (live_arbitrage_executor) is built around.
 
 import hashlib
 import hmac
+import json
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
@@ -121,23 +122,44 @@ class BybitLiveTradeClient:
 
     async def place_market_order(self, symbol: str, side: str, qty: float, order_link_id: str) -> BybitOrderAck:
         """POST /v5/order/create — SIGNED, category=spot, orderType=Market.
-        qty is the BASE asset quantity for both Buy and Sell on spot
-        (unlike Binance, Bybit spot market orders don't take a separate
-        quote-quantity mode for buys in the same way) — the caller is
-        responsible for rounding qty to the real LOT_SIZE step already
-        fetched via app.execution.bybit_client. Returns only an ACK;
-        call get_order_status next, always."""
-        import json
 
+        qty's meaning depends on side (verified against the current Bybit
+        v5 docs, 2026-08-24, after a real order was rejected with
+        retCode=170003 "An unknown parameter was sent" — the previous
+        version of this method never set marketUnit/isLeverage/orderFilter
+        at all):
+          - side="Buy": qty is the QUOTE-currency (USDT) notional to
+            spend. Sent with marketUnit="quoteCoin" — Bybit fills as much
+            base asset as that USDT amount buys at the real execution
+            price; the caller does not pre-estimate a base quantity from
+            a stale book price. The caller is responsible for rounding
+            qty to the symbol's quote-currency precision.
+          - side="Sell": qty is the BASE-asset quantity to sell. Sent
+            with marketUnit="baseCoin" (same convention as before). The
+            caller is responsible for rounding qty to the real LOT_SIZE
+            step already fetched via app.execution.bybit_client.
+
+        Also sends isLeverage=0 (explicit: non-margin spot) and
+        orderFilter="Order" (explicit: a plain order, not a TP/SL or
+        conditional order) — both optional per Bybit's docs but sent
+        explicitly rather than relying on defaults. Returns only an ACK;
+        call get_order_status next, always."""
         settings = get_settings()
         if not settings.bybit_api_key or not settings.bybit_api_secret:
             raise BybitLiveCredentialsMissing("bybit_api_key/bybit_api_secret not configured")
+        normalized_side = side.capitalize()
+        if normalized_side not in ("Buy", "Sell"):
+            raise ValueError(f"side must be 'Buy' or 'Sell', got {side!r}")
+        market_unit = "quoteCoin" if normalized_side == "Buy" else "baseCoin"
         body = {
             "category": "spot",
             "symbol": symbol,
-            "side": side.capitalize(),
+            "side": normalized_side,
             "orderType": "Market",
             "qty": f"{qty:.8f}".rstrip("0").rstrip("."),
+            "marketUnit": market_unit,
+            "isLeverage": 0,
+            "orderFilter": "Order",
             "orderLinkId": order_link_id,
         }
         body_json = json.dumps(body, separators=(",", ":"))
@@ -154,7 +176,11 @@ class BybitLiveTradeClient:
                 response.raise_for_status()
                 data = await response.json()
         if data.get("retCode") != 0:
-            raise RuntimeError(f"Bybit order-create rejected: retCode={data.get('retCode')} retMsg={data.get('retMsg')}")
+            # Keeps the full response (retExtInfo etc.), not just
+            # retCode/retMsg — the earlier version of this error dropped
+            # everything but those two fields, which was not enough
+            # detail to pin down the exact cause of a real rejection.
+            raise RuntimeError(f"Bybit order-create rejected: retCode={data.get('retCode')} retMsg={data.get('retMsg')} full_response={data}")
         return _parse_order_ack(data)
 
     async def get_order_status(self, symbol: str, order_id: str | None = None, order_link_id: str | None = None) -> BybitOrderStatus | None:

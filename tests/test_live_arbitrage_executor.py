@@ -309,6 +309,90 @@ async def test_reverse_direction_bybit_buy_binance_sell_also_works(monkeypatch):
     assert result.actual_net_pnl_usd is not None
 
 
+async def test_bybit_buy_leg_transmits_the_raw_usdt_notional_not_a_converted_base_qty(monkeypatch):
+    """Bybit BUY caller fix (2026-08-24): bybit_live_trade_client.place_
+    market_order now sends marketUnit="quoteCoin" for every Buy, meaning
+    qty on the wire IS the USDT notional. This caller must pass
+    requested_notional_per_leg_usdt straight through when Bybit is the
+    buy exchange — never pre-convert it to an estimated base-asset
+    quantity via a book price first."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+
+    class CheapBybitRead(FakeBybitRead):
+        async def get_book_ticker(self, symbol):
+            return type("Ticker", (), {"bid_price": 0.00005430, "ask_price": 0.00005440})()
+
+    class RichBinanceRead(FakeBinanceRead):
+        async def get_book_ticker(self, symbol):
+            return {"bidPrice": "0.00005600", "askPrice": "0.00005610"}
+
+        async def get_order_book_depth(self, symbol, limit=20):
+            return {"asks": [], "bids": [[str(p), str(q)] for p, q in DEEP_BIDS]}
+
+    executor = LiveArbitrageExecutor(
+        binance_read=RichBinanceRead(), binance_trade=binance_trade, bybit_read=CheapBybitRead(), bybit_trade=bybit_trade
+    )
+    result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert bybit_trade.submitted_orders[0][1] == "Buy"
+    assert bybit_trade.submitted_orders[0][2] == 10.0  # the raw USDT notional — NOT 10.0 / 0.00005440 (an estimated LUNC quantity)
+
+
+async def test_bybit_sell_leg_still_transmits_a_base_asset_quantity(monkeypatch):
+    """SELL was already correct before this fix and must stay that way —
+    qty is the real base-asset fill quantity from the buy leg, never the
+    USDT notional."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    result = await _executor(binance_trade=binance_trade, bybit_trade=bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert bybit_trade.submitted_orders[0][1] == "Sell"
+    sell_qty = bybit_trade.submitted_orders[0][2]
+    assert sell_qty == pytest.approx(183000.0, rel=0.01)  # the real base-asset fill qty, not a USDT amount (~10)
+
+
+async def test_neither_caller_double_converts_buy_notional_into_a_second_unit(monkeypatch):
+    """Combined regression: across both directions, the qty Bybit
+    receives for a Buy always equals exactly the requested USDT notional
+    passed into execute_one_arbitrage — proving there is no leftover
+    price-based conversion anywhere on the buy path in either direction."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+
+    # binance buy / bybit sell: Bybit never receives a Buy order here.
+    default_bybit_trade = FakeBybitTrade()
+    await _executor(bybit_trade=default_bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+    assert all(order[1] != "Buy" for order in default_bybit_trade.submitted_orders)
+
+    # bybit buy / binance sell: Bybit's Buy order qty must be exactly 10.0, not a price-derived figure.
+    binance_trade = FakeBinanceTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+
+    class CheapBybitRead(FakeBybitRead):
+        async def get_book_ticker(self, symbol):
+            return type("Ticker", (), {"bid_price": 0.00005430, "ask_price": 0.00005440})()
+
+    class RichBinanceRead(FakeBinanceRead):
+        async def get_book_ticker(self, symbol):
+            return {"bidPrice": "0.00005600", "askPrice": "0.00005610"}
+
+        async def get_order_book_depth(self, symbol, limit=20):
+            return {"asks": [], "bids": [[str(p), str(q)] for p, q in DEEP_BIDS]}
+
+    executor = LiveArbitrageExecutor(
+        binance_read=RichBinanceRead(), binance_trade=binance_trade, bybit_read=CheapBybitRead(), bybit_trade=bybit_trade
+    )
+    await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
+    buy_orders = [order for order in bybit_trade.submitted_orders if order[1] == "Buy"]
+    assert len(buy_orders) == 1
+    assert buy_orders[0][2] == 10.0
+
+
 async def test_execute_one_arbitrage_rejects_same_exchange_both_legs():
     executor = LiveArbitrageExecutor()
     with pytest.raises(ValueError):

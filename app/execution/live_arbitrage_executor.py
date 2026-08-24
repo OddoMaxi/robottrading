@@ -251,15 +251,16 @@ class LiveArbitrageExecutor:
         return False, last_result
 
     async def _place_market_buy(self, exchange: str, symbol: str, notional_usdt: float, client_order_id: str) -> None:
+        """Bybit fix (2026-08-24): place_market_order now sends
+        marketUnit="quoteCoin" for every Buy, meaning qty IS the USDT
+        notional itself — passed straight through, never pre-converted
+        to an estimated base-asset quantity via a book price (that
+        conversion is exactly what made the caller's qty mean something
+        different from what the wire payload now says it means)."""
         if exchange == "binance":
             await self._binance_trade.place_market_order(symbol, "BUY", client_order_id=client_order_id, quote_order_qty=notional_usdt)
         else:
-            book = await self._bybit_read.get_book_ticker(symbol)
-            rules = await self._bybit_read.get_symbol_rules(symbol)
-            if book is None or rules is None:
-                raise RuntimeError(f"bybit market data unavailable for {symbol} while sizing the buy leg")
-            qty = round_down_to_step(notional_usdt / book.ask_price, rules.qty_step)
-            await self._bybit_trade.place_market_order(symbol, "Buy", qty=qty, order_link_id=client_order_id)
+            await self._bybit_trade.place_market_order(symbol, "Buy", qty=notional_usdt, order_link_id=client_order_id)
 
     async def _place_market_sell(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
         if exchange == "binance":
