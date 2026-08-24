@@ -53,12 +53,12 @@ from enum import StrEnum
 from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.binance_filters import parse_symbol_rules as parse_binance_symbol_rules
 from app.execution.binance_filters import round_down_to_step
-from app.execution.binance_live_trade_client import BinanceLiveTradeClient
-from app.execution.bybit_client import BybitClient
+from app.execution.binance_live_trade_client import BinanceLiveTradeClient, aggregate_binance_trades
+from app.execution.bybit_client import BybitClient, parse_wallet_balance
 from app.execution.bybit_live_trade_client import BybitLiveTradeClient
 from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
 from app.execution.live_guard import LiveExecutionRefused, live_guard
-from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE
+from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE, _vwap_for_target_qty
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,28 @@ def net_base_qty_after_fee(gross_qty: float, fee_asset: str | None, fee_amount: 
     if fee_asset == base_asset:
         return max(0.0, gross_qty - fee_amount)
     return gross_qty
+
+
+def compute_common_dual_leg_qty(quote_executable_qty: float, sell_exchange_available_qty: float, buy_step_size: float, sell_step_size: float) -> float:
+    """Pure function (item 1, user directive, 2026-08-24, post-incident:
+    common dual-leg sizing). A leg's quantity must NEVER be derived
+    blindly from the other leg's fill — the first real arbitrage
+    attempt bought 3003.5 RVN (sized purely from a USDT notional) and
+    then tried to sell that same 3003.5 on Bybit, which only held
+    2914.9821 real RVN, because the two legs had never been sized
+    against one shared, pre-trade quantity ceiling.
+
+    common_qty is that shared ceiling: never more than
+    quote_executable_qty (already the price/depth/notional-aware
+    minimum of what each leg's own market data supports — see
+    compute_dual_leg_quote.executable_qty) and never more than what the
+    sell exchange actually holds right now. Rounded down to whichever
+    step size is coarser, so the result is valid on both exchanges."""
+    common_qty_raw = min(quote_executable_qty, sell_exchange_available_qty)
+    if common_qty_raw <= 0:
+        return 0.0
+    common_step = max(buy_step_size, sell_step_size)
+    return round_down_to_step(common_qty_raw, common_step) if common_step > 0 else common_qty_raw
 
 
 class ArbitrageOutcome(StrEnum):
@@ -291,17 +313,32 @@ class LiveArbitrageExecutor:
             await asyncio.sleep(LEG_POLL_INTERVAL_SECONDS)
         return False, last_result
 
-    async def _place_market_buy(self, exchange: str, symbol: str, notional_usdt: float, client_order_id: str) -> None:
-        """Bybit fix (2026-08-24): place_market_order now sends
-        marketUnit="quoteCoin" for every Buy, meaning qty IS the USDT
-        notional itself — passed straight through, never pre-converted
-        to an estimated base-asset quantity via a book price (that
-        conversion is exactly what made the caller's qty mean something
-        different from what the wire payload now says it means)."""
+    async def _get_available_base_balance(self, exchange: str, symbol: str) -> float:
+        """Fresh real balance read — never a cached/estimated figure.
+        Used both for pre-trade common_qty sizing and by _neutralize,
+        which must always cap by the real balance immediately before
+        submitting (item 3, user directive, 2026-08-24, post-incident)."""
+        base_asset = symbol.removesuffix(QUOTE_ASSET)
         if exchange == "binance":
-            await self._binance_trade.place_market_order(symbol, "BUY", client_order_id=client_order_id, quote_order_qty=notional_usdt)
+            snapshot = await self._binance_read.get_account_snapshot()
+            return snapshot.balance_of(base_asset) if snapshot is not None else 0.0
+        wallet = await self._bybit_read.get_wallet_balance()
+        return parse_wallet_balance(wallet, base_asset)
+
+    async def _place_market_buy(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
+        """Item 1 fix (2026-08-24, post-incident): the arbitrage buy leg
+        is QUANTITY-capped, never notional-capped — common_qty exists
+        specifically so the buy leg can never acquire more base asset
+        than the sell leg can actually absorb, which only holds if the
+        buy itself is bounded by quantity. (Contrast with
+        app.execution.inventory_constitution_executor's OWN
+        _place_market_buy, deliberately unchanged and still
+        notional-based — inventory constitution has no second leg to
+        stay in sync with.)"""
+        if exchange == "binance":
+            await self._binance_trade.place_market_order(symbol, "BUY", client_order_id=client_order_id, quantity=qty)
         else:
-            await self._bybit_trade.place_market_order(symbol, "Buy", qty=notional_usdt, order_link_id=client_order_id)
+            await self._bybit_trade.place_market_order(symbol, "Buy", qty=qty, order_link_id=client_order_id, market_unit="baseCoin")
 
     async def _place_market_sell(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
         if exchange == "binance":
@@ -313,9 +350,28 @@ class LiveArbitrageExecutor:
         base_asset = symbol.removesuffix(QUOTE_ASSET)
         if exchange == "binance":
             result = await self._binance_trade.get_order_status(symbol, orig_client_order_id=client_order_id)
-            gross_qty = result.executed_qty
-            avg_price = result.average_fill_price()
-            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(result.total_fees_by_asset(), base_asset, avg_price, "live-arbitrage")
+            if not result.is_terminal or result.executed_qty <= 0:
+                # Not yet resolved, or resolved with zero fill — no real
+                # trades to fetch; get_order_status's own qty/status are
+                # already reliable for this case (there is no fee to mis-report).
+                return _NormalizedOrderStatus(
+                    order_id=str(result.order_id), is_terminal=result.is_terminal, is_filled=result.is_filled,
+                    filled_qty=result.executed_qty, net_base_qty=result.executed_qty,
+                    avg_fill_price=result.average_fill_price(),
+                    fee_asset=None, fee_amount=0.0, fee_usd_equivalent=0.0,
+                    raw_status=result.status,
+                )
+            # Item 2 fix (2026-08-24, post-incident): get_order_status's
+            # own endpoint never returns fills, so the first real
+            # arbitrage attempt's buy leg reported fee_asset=None despite
+            # a real ~3 RVN fee having been charged — fetch the REAL
+            # trades for this order via get_order_trades, the only call
+            # that actually exposes commission/commissionAsset/price/qty.
+            trades = await self._binance_trade.get_order_trades(symbol, result.order_id)
+            aggregated = aggregate_binance_trades(trades)
+            gross_qty = aggregated.gross_base_qty if trades else result.executed_qty
+            avg_price = aggregated.actual_effective_price if trades else result.average_fill_price()
+            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(aggregated.fees_by_asset, base_asset, avg_price, "live-arbitrage")
             return _NormalizedOrderStatus(
                 order_id=str(result.order_id),
                 is_terminal=result.is_terminal,
@@ -364,13 +420,37 @@ class LiveArbitrageExecutor:
         immediate market SELL on that SAME exchange — never attempts to
         "fix" a one-leg-filled state by retrying the other exchange's
         leg, which could double the position if the original attempt
-        actually succeeded after all under an ambiguous response."""
+        actually succeeded after all under an ambiguous response.
+
+        Item 3 fix (2026-08-24, post-incident): `qty` is an UPPER BOUND
+        only, never trusted blindly — the first real neutralization
+        attempt tried to sell 3003.5 RVN (the buy leg's own estimated
+        fill) when only 3000.4965 was actually held, and was itself
+        rejected by Binance. This always re-reads the REAL free balance
+        immediately before submitting and caps to that, floored to the
+        exchange's step size, with one extra step of technical reserve —
+        this is the last line of defense (a second failure here means
+        NEUTRALIZATION_FAILED, kill switch, manual reconciliation), so
+        the cost of a small deliberate margin is worth it."""
+        real_available = await self._get_available_base_balance(exchange, symbol)
+        step = await self._get_step_size(exchange, symbol)
+        step_size = step[0] if step is not None else 0.0
+        capped_qty = min(qty, real_available)
+        safe_qty = round_down_to_step(capped_qty, step_size) if step_size > 0 else capped_qty
+        if step_size > 0 and safe_qty > step_size:
+            safe_qty -= step_size
+        if safe_qty <= 0:
+            logger.critical(
+                "live-arbitrage: NEUTRALIZATION SKIPPED on %s for %s — no real balance available (requested up to %s, real free balance %s)",
+                exchange, attempt_id, qty, real_available,
+            )
+            return None
         # Bybit's orderLinkId has a documented 36-character max — see the
         # matching fix note on buy_client_order_id/sell_client_order_id
         # below (2026-08-24, real retCode=170003 rejections).
         neutralize_id = f"neu-{attempt_id.hex[:24]}"
         try:
-            await self._place_market_sell(exchange, symbol, qty, neutralize_id)
+            await self._place_market_sell(exchange, symbol, safe_qty, neutralize_id)
         except Exception as exc:
             logger.critical("live-arbitrage: NEUTRALIZATION ORDER SUBMISSION FAILED on %s for %s: %s", exchange, attempt_id, exc)
             return None
@@ -419,7 +499,7 @@ class LiveArbitrageExecutor:
                 result.reason = "fresh dual-leg re-check unavailable (data fetch failed)"
                 result.completed_at = time.time()
                 return result
-            quote, _buy_leg, _sell_leg = fresh
+            quote, buy_leg, sell_leg = fresh
 
             result.predicted_net_profit_usd = quote.net_profit_usd
             result.predicted_fees_usd = quote.buy_fee_usd + quote.sell_fee_usd
@@ -443,6 +523,43 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
+            # Item 1 (user directive, 2026-08-24, post-incident): common
+            # dual-leg sizing. quote.executable_qty is already
+            # price/depth/notional-aware, but has ZERO knowledge of real
+            # account balances — the first real attempt bought 3003.5
+            # RVN (sized purely by USDT notional) against only 2914.9821
+            # real Bybit inventory. Never again: the sell exchange's REAL
+            # available balance is now part of the pre-trade ceiling
+            # BOTH legs are sized against, before either order exists.
+            sell_exchange_available_qty = await self._get_available_base_balance(sell_exchange, symbol)
+            common_qty = compute_common_dual_leg_qty(quote.executable_qty, sell_exchange_available_qty, buy_leg.step_size, sell_leg.step_size)
+            if common_qty <= 0 or common_qty < buy_leg.min_qty or common_qty < sell_leg.min_qty:
+                result.outcome = ArbitrageOutcome.NO_TRADE_UNPROFITABLE
+                result.reason = (
+                    f"no common executable quantity after checking real sell-exchange inventory "
+                    f"(quote_executable_qty={quote.executable_qty}, sell_exchange_available={sell_exchange_available_qty}, common_qty={common_qty})"
+                )
+                result.completed_at = time.time()
+                return result
+
+            # Revalidate net-positive at the ACTUAL common_qty (which may
+            # be smaller than quote.executable_qty once real inventory is
+            # considered) before ever submitting an order — reuses the
+            # same leg snapshots, no extra network round trip.
+            common_notional_usd = common_qty * buy_leg.best_ask
+            sized_quote = compute_dual_leg_quote(
+                opportunity_id=uuid.uuid4(), symbol=symbol, buy_leg=buy_leg, sell_leg=sell_leg,
+                master_requested_size_usd=common_notional_usd, micro_live_cap_usdt=common_notional_usd,
+            )
+            if not sized_quote.executable or sized_quote.net_profit_usd <= 0:
+                result.outcome = ArbitrageOutcome.NO_TRADE_UNPROFITABLE
+                result.reason = sized_quote.reason or f"not net-positive at the real common quantity ({common_qty})"
+                result.completed_at = time.time()
+                return result
+            trade_qty = sized_quote.executable_qty
+            result.predicted_net_profit_usd = sized_quote.net_profit_usd  # supersede with the size-accurate prediction
+            result.safety_adjusted_predicted_profit_usd = sized_quote.net_profit_usd
+
             # Bybit's orderLinkId has a documented 36-character max — a
             # full "live-{uuid4}-buy" (45 chars) silently exceeded it and
             # is the prime suspect for the real retCode=170003 "unknown
@@ -454,7 +571,7 @@ class LiveArbitrageExecutor:
             result.buy_client_order_id = buy_client_order_id
             result.buy_submitted_at = time.time()
             try:
-                await self._place_market_buy(buy_exchange, symbol, requested_notional_per_leg_usdt, buy_client_order_id)
+                await self._place_market_buy(buy_exchange, symbol, trade_qty, buy_client_order_id)
             except Exception as exc:
                 live_guard.engage_kill_switch(f"buy leg submission raised an ambiguous error: {exc}")
                 result.outcome = ArbitrageOutcome.UNKNOWN_BUY_LEG
@@ -489,22 +606,57 @@ class LiveArbitrageExecutor:
                 result.completed_at = time.time()
                 return result
 
-            # FIX 1 (user directive, 2026-08-24): size the sell leg off
-            # what is ACTUALLY held (net of any base-asset buy fee), never
-            # the gross exchange-reported fill — selling the gross amount
-            # when the fee reduced the real balance would either fail
-            # outright or (worse) succeed against dust rounding.
+            # Item 1 (user directive, 2026-08-24, post-incident): if the
+            # real BUY fill differs from what was planned, the SELL
+            # quantity is recomputed from REAL data — never assumed to
+            # equal the pre-trade common_qty. Bounded by: what was
+            # actually received (net of any base-asset fee), what the
+            # sell exchange ACTUALLY holds right now (a fresh re-read —
+            # common_qty's balance check is now stale), and never above
+            # the already-revalidated common_qty ceiling.
+            actual_sell_exchange_available_qty = await self._get_available_base_balance(sell_exchange, symbol)
+            final_sell_qty_raw = min(buy_status.net_base_qty, actual_sell_exchange_available_qty, common_qty)
             sell_step = await self._get_step_size(sell_exchange, symbol)
-            sell_qty = round_down_to_step(buy_status.net_base_qty, sell_step[0]) if sell_step is not None else 0.0
-            if sell_step is None or sell_qty < sell_step[1] or sell_qty <= 0:
+            sell_qty = round_down_to_step(final_sell_qty_raw, sell_step[0]) if sell_step is not None else 0.0
+
+            # Revalidate net-positive with the REAL buy cost and a FRESH
+            # sell-side snapshot (never the pre-buy one — the market may
+            # have moved) before ever submitting the sell.
+            post_buy_expected_profit = None
+            still_positive = False
+            if sell_step is not None and sell_qty >= sell_step[1] > 0:
+                fresh_sell_leg = await self._fetch_leg_snapshot(symbol, sell_exchange, "sell")
+                if fresh_sell_leg is not None and fresh_sell_leg.tradable:
+                    sell_vwap, sell_depth_filled = _vwap_for_target_qty(fresh_sell_leg.depth_levels, sell_qty)
+                    sell_notional = sell_qty * fresh_sell_leg.best_bid
+                    sell_fee_usd = sell_notional * fresh_sell_leg.taker_fee_rate
+                    sell_slippage_pct = (
+                        abs(sell_vwap - fresh_sell_leg.best_bid) / fresh_sell_leg.best_bid * 100
+                        if fresh_sell_leg.best_bid > 0 and sell_depth_filled > 0 else 0.0
+                    )
+                    if sell_depth_filled < sell_qty:
+                        sell_slippage_pct = max(sell_slippage_pct, 100.0)
+                    sell_slippage_cost_usd = sell_notional * (sell_slippage_pct / 100)
+                    proportional_buy_cost_usd = (buy_status.avg_fill_price or 0) * sell_qty
+                    post_buy_expected_profit = (sell_notional - sell_fee_usd - sell_slippage_cost_usd) - proportional_buy_cost_usd
+                    min_notional_ok = fresh_sell_leg.min_notional is None or sell_notional >= fresh_sell_leg.min_notional
+                    still_positive = min_notional_ok and post_buy_expected_profit > 0
+
+            if not still_positive:
                 neutralize_result = await self._neutralize(buy_exchange, symbol, buy_status.net_base_qty, attempt_id)
                 if neutralize_result is None or not neutralize_result.is_filled:
-                    live_guard.engage_kill_switch(f"neutralization failed after buy fill too small to hedge on {sell_exchange}, attempt {attempt_id}")
+                    live_guard.engage_kill_switch(f"neutralization failed after sell leg not viable post-buy, attempt {attempt_id}")
                     result.outcome = ArbitrageOutcome.NEUTRALIZATION_FAILED
-                    result.reason = f"buy leg filled below {sell_exchange}'s tradable minimum and the {buy_exchange}-side flatten did not confirm filled"
+                    result.reason = (
+                        f"sell leg not viable after the real buy fill (final_sell_qty={sell_qty}, "
+                        f"post_buy_expected_profit={post_buy_expected_profit}) and the {buy_exchange}-side flatten did not confirm filled"
+                    )
                 else:
                     result.outcome = ArbitrageOutcome.BUY_ONLY_NEUTRALIZED
-                    result.reason = f"buy fill was below {sell_exchange}'s minimum tradable size — flattened on {buy_exchange} instead"
+                    result.reason = (
+                        f"sell leg not viable after the real buy fill (final_sell_qty={sell_qty}, "
+                        f"post_buy_expected_profit={post_buy_expected_profit}) — flattened on {buy_exchange} instead"
+                    )
                     result.neutralization_order_id = neutralize_result.order_id
                     result.neutralization_filled_qty = neutralize_result.filled_qty
                 result.completed_at = time.time()

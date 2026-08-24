@@ -136,24 +136,30 @@ class BybitLiveTradeClient:
             "Content-Type": "application/json",
         }
 
-    async def place_market_order(self, symbol: str, side: str, qty: float, order_link_id: str) -> BybitOrderAck:
+    async def place_market_order(self, symbol: str, side: str, qty: float, order_link_id: str, market_unit: str | None = None) -> BybitOrderAck:
         """POST /v5/order/create — SIGNED, category=spot, orderType=Market.
 
-        qty's meaning depends on side (verified against the current Bybit
-        v5 docs, 2026-08-24, after a real order was rejected with
-        retCode=170003 "An unknown parameter was sent" — the previous
-        version of this method never set marketUnit/isLeverage/orderFilter
-        at all):
-          - side="Buy": qty is the QUOTE-currency (USDT) notional to
-            spend. Sent with marketUnit="quoteCoin" — Bybit fills as much
-            base asset as that USDT amount buys at the real execution
-            price; the caller does not pre-estimate a base quantity from
-            a stale book price. The caller is responsible for rounding
-            qty to the symbol's quote-currency precision.
-          - side="Sell": qty is the BASE-asset quantity to sell. Sent
-            with marketUnit="baseCoin" (same convention as before). The
-            caller is responsible for rounding qty to the real LOT_SIZE
-            step already fetched via app.execution.bybit_client.
+        qty's meaning depends on market_unit (verified against the
+        current Bybit v5 docs, 2026-08-24, after a real order was
+        rejected with retCode=170003 "An unknown parameter was sent" —
+        the previous version of this method never set
+        marketUnit/isLeverage/orderFilter at all):
+          - marketUnit="quoteCoin": qty is the QUOTE-currency (USDT)
+            notional to spend. Bybit fills as much base asset as that
+            USDT amount buys at the real execution price.
+          - marketUnit="baseCoin": qty is the BASE-asset quantity to
+            trade. The caller is responsible for rounding qty to the
+            real LOT_SIZE step already fetched via
+            app.execution.bybit_client.
+
+        market_unit defaults to side's own natural convention when not
+        given explicitly — Buy defaults to "quoteCoin" (inventory
+        constitution: spend up to a USDT cap), Sell is always
+        "baseCoin". An arbitrage buy leg (item 1, user directive,
+        2026-08-24, post-incident: common dual-leg sizing) must pass
+        market_unit="baseCoin" explicitly to be quantity-capped instead
+        of notional-capped — notional-capping a buy can silently acquire
+        more base asset than the sell leg can actually absorb.
 
         Also sends isLeverage=0 (explicit: non-margin spot) and
         orderFilter="Order" (explicit: a plain order, not a TP/SL or
@@ -166,7 +172,10 @@ class BybitLiveTradeClient:
         normalized_side = side.capitalize()
         if normalized_side not in ("Buy", "Sell"):
             raise ValueError(f"side must be 'Buy' or 'Sell', got {side!r}")
-        market_unit = "quoteCoin" if normalized_side == "Buy" else "baseCoin"
+        if market_unit is None:
+            market_unit = "quoteCoin" if normalized_side == "Buy" else "baseCoin"
+        elif market_unit not in ("quoteCoin", "baseCoin"):
+            raise ValueError(f"market_unit must be 'quoteCoin' or 'baseCoin', got {market_unit!r}")
         body = {
             "category": "spot",
             "symbol": symbol,

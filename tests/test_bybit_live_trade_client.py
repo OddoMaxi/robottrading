@@ -194,12 +194,12 @@ def _fake_settings():
 ACK_SUCCESS = {"retCode": 0, "retMsg": "OK", "result": {"orderId": "order-1", "orderLinkId": "link-1"}}
 
 
-async def _place_and_capture(monkeypatch, side: str, qty: float, order_link_id: str = "link-1", payload: dict = ACK_SUCCESS):
+async def _place_and_capture(monkeypatch, side: str, qty: float, order_link_id: str = "link-1", payload: dict = ACK_SUCCESS, market_unit=None):
     captured: dict = {}
     monkeypatch.setattr("app.execution.bybit_live_trade_client.get_settings", _fake_settings)
     client = BybitLiveTradeClient()
     with patch("app.execution.bybit_live_trade_client.aiohttp.ClientSession", return_value=_FakeCreateOrderSession(payload, captured)):
-        result = await client.place_market_order("RVNUSDT", side, qty=qty, order_link_id=order_link_id)
+        result = await client.place_market_order("RVNUSDT", side, qty=qty, order_link_id=order_link_id, market_unit=market_unit)
     return result, captured
 
 
@@ -250,6 +250,31 @@ async def test_exact_payload_sent_for_a_sell_order(monkeypatch):
         "orderFilter": "Order",
         "orderLinkId": "arb-xyz",
     }
+
+
+async def test_market_unit_override_lets_a_buy_be_quantity_capped(monkeypatch):
+    """Item 1 (user directive, 2026-08-24, post-incident): the arbitrage
+    buy leg needs marketUnit="baseCoin" on a Buy — the caller-supplied
+    override, not side's own default (quoteCoin for Buy), must win."""
+    _, captured = await _place_and_capture(monkeypatch, "Buy", qty=2914.9821, market_unit="baseCoin")
+    assert captured["body"]["marketUnit"] == "baseCoin"
+    assert captured["body"]["qty"] == "2914.9821"
+
+
+async def test_market_unit_none_still_falls_back_to_sides_own_default(monkeypatch):
+    _, captured_buy = await _place_and_capture(monkeypatch, "Buy", qty=10.0, market_unit=None)
+    assert captured_buy["body"]["marketUnit"] == "quoteCoin"
+    _, captured_sell = await _place_and_capture(monkeypatch, "Sell", qty=41.5, market_unit=None)
+    assert captured_sell["body"]["marketUnit"] == "baseCoin"
+
+
+async def test_invalid_market_unit_is_rejected_before_any_network_call(monkeypatch):
+    monkeypatch.setattr("app.execution.bybit_live_trade_client.get_settings", _fake_settings)
+    client = BybitLiveTradeClient()
+    with patch("app.execution.bybit_live_trade_client.aiohttp.ClientSession") as mock_session_cls:
+        with pytest.raises(ValueError):
+            await client.place_market_order("RVNUSDT", "Buy", qty=10.0, order_link_id="link-1", market_unit="notARealUnit")
+        mock_session_cls.assert_not_called()
 
 
 async def test_no_forbidden_or_unsupported_parameters_are_ever_sent(monkeypatch):

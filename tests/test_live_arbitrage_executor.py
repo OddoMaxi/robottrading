@@ -3,7 +3,7 @@ import uuid
 import pytest
 
 import app.execution.live_arbitrage_executor as executor_module
-from app.execution.binance_live_trade_client import BinanceOrderFill, BinanceOrderResult
+from app.execution.binance_live_trade_client import BinanceOrderFill, BinanceOrderResult, BinanceTrade
 from app.execution.bybit_live_trade_client import BybitOrderAck, BybitOrderStatus
 from app.execution.live_arbitrage_executor import ArbitrageOutcome, LiveArbitrageExecutor
 from app.execution.live_guard import LiveTradingGuard
@@ -38,7 +38,24 @@ DEEP_ASKS = [(0.00005461, 500_000_000.0), (0.00005470, 500_000_000.0)]
 DEEP_BIDS = [(0.00005600, 500_000_000.0), (0.00005590, 500_000_000.0)]  # healthy spread over the ask
 
 
+# Huge by default so existing tests (which don't care about real-balance
+# capping) are never accidentally constrained by it — tests that DO care
+# about common_qty/real-inventory capping override this explicitly.
+DEFAULT_FAKE_LUNC_BALANCE = 10_000_000.0
+
+
+class _FakeSnapshot:
+    def __init__(self, lunc_balance: float) -> None:
+        self._lunc_balance = lunc_balance
+
+    def balance_of(self, asset: str) -> float:
+        return self._lunc_balance if asset == "LUNC" else 0.0
+
+
 class FakeBinanceRead:
+    def __init__(self, lunc_balance: float = DEFAULT_FAKE_LUNC_BALANCE) -> None:
+        self.lunc_balance = lunc_balance
+
     async def get_book_ticker(self, symbol):
         return {"bidPrice": "0.00005440", "askPrice": "0.00005461"}
 
@@ -51,8 +68,14 @@ class FakeBinanceRead:
     async def get_trade_fee(self, symbol):
         return type("Fee", (), {"maker_fee_rate": 0.001, "taker_fee_rate": 0.001})()
 
+    async def get_account_snapshot(self):
+        return _FakeSnapshot(self.lunc_balance)
+
 
 class FakeBybitRead:
+    def __init__(self, lunc_balance: float = DEFAULT_FAKE_LUNC_BALANCE) -> None:
+        self.lunc_balance = lunc_balance
+
     async def get_book_ticker(self, symbol):
         return type("Ticker", (), {"bid_price": 0.00005600, "ask_price": 0.00005620})()
 
@@ -64,6 +87,9 @@ class FakeBybitRead:
 
     async def get_fee_rate(self, symbol):
         return type("Fee", (), {"maker_fee_rate": 0.001, "taker_fee_rate": 0.001})()
+
+    async def get_wallet_balance(self):
+        return {"result": {"list": [{"coin": [{"coin": "LUNC", "availableToWithdraw": str(self.lunc_balance)}]}]}}
 
 
 class FakeBinanceTrade:
@@ -102,18 +128,34 @@ class FakeBinanceTrade:
             fills=[BinanceOrderFill(price=0.0000546, qty=self.fill_qty, commission=self.fee_amount, commission_asset=self.fee_asset)], raw={},
         )
 
+    async def get_order_trades(self, symbol, order_id):
+        """GET /api/v3/myTrades fixture — the real fee/qty source _get_status
+        now fetches once an order is confirmed terminal and filled."""
+        if self.fill_qty <= 0:
+            return []
+        return [
+            BinanceTrade(
+                trade_id=1, order_id=order_id, price=0.0000546, qty=self.fill_qty,
+                quote_qty=self.fill_qty * 0.0000546, commission=self.fee_amount, commission_asset=self.fee_asset,
+            )
+        ]
+
 
 class FakeBybitTrade:
-    def __init__(self, fill_status="Filled", fill_qty=183000.0, never_terminal=False, raise_on_submit=False, fee_asset="USDT", fee_amount=0.01):
+    def __init__(
+        self, fill_status="Filled", fill_qty=183000.0, never_terminal=False, raise_on_submit=False,
+        fee_asset="USDT", fee_amount=0.01, avg_price=0.0000560,
+    ):
         self.fill_status = fill_status
         self.fill_qty = fill_qty
         self.never_terminal = never_terminal
         self.raise_on_submit = raise_on_submit
         self.fee_asset = fee_asset
         self.fee_amount = fee_amount
+        self.avg_price = avg_price
         self.submitted_orders = []
 
-    async def place_market_order(self, symbol, side, qty, order_link_id):
+    async def place_market_order(self, symbol, side, qty, order_link_id, market_unit=None):
         if self.raise_on_submit:
             raise RuntimeError("simulated network failure")
         self.submitted_orders.append((symbol, side, qty, order_link_id))
@@ -132,8 +174,8 @@ class FakeBybitTrade:
             )
         return BybitOrderStatus(
             order_id="bybit-1", order_link_id=order_link_id or "", symbol=symbol, side="Sell",
-            order_status=self.fill_status, cum_exec_qty=self.fill_qty, cum_exec_value=self.fill_qty * 0.0000560,
-            cum_exec_fee=self.fee_amount, avg_price=0.0000560, raw={},
+            order_status=self.fill_status, cum_exec_qty=self.fill_qty, cum_exec_value=self.fill_qty * self.avg_price,
+            cum_exec_fee=self.fee_amount, avg_price=self.avg_price, raw={},
             cum_fee_detail={self.fee_asset: self.fee_amount} if self.fee_asset else {},
         )
 
@@ -228,6 +270,14 @@ async def test_neutralization_order_link_id_stays_within_bybits_36_character_lim
 
 
 async def test_buy_fee_in_base_asset_sizes_the_sell_leg_off_net_qty(monkeypatch):
+    """final_sell_qty_raw = min(buy_net_filled_qty, real_sell_exchange_
+    balance, common_qty) — this fixture's own prices already make
+    common_qty (item 1's own price/depth-derived ceiling) the tightest
+    of the three bounds, so the sell qty sent is capped there rather
+    than sitting exactly at the fee-adjusted net figure. What this test
+    isolates is narrower but just as real: the sell qty is NEVER sized
+    off the gross 183000.0 fill, and never exceeds what was actually
+    net-received after the base-asset fee."""
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade(fill_qty=183000.0, fee_asset="LUNC", fee_amount=100.0)
@@ -238,7 +288,8 @@ async def test_buy_fee_in_base_asset_sizes_the_sell_leg_off_net_qty(monkeypatch)
     assert result.buy_net_filled_qty == pytest.approx(182900.0)  # NET of the 100 LUNC fee
     assert result.buy_fee_asset == "LUNC"
     sell_qty_requested = bybit_trade.submitted_orders[0][2]
-    assert sell_qty_requested == pytest.approx(182900.0)  # sized off NET, never the gross 183000.0
+    assert sell_qty_requested <= result.buy_net_filled_qty  # never exceeds what was actually net-received
+    assert sell_qty_requested < result.buy_filled_qty  # proves it is NOT simply sized off the gross fill
 
 
 async def test_pnl_does_not_double_count_a_base_asset_buy_fee(monkeypatch):
@@ -366,7 +417,7 @@ async def test_reverse_direction_bybit_buy_binance_sell_also_works(monkeypatch):
     # swap the fixtures' relative pricing so buying on bybit (ask) and
     # selling on binance (bid) is the profitable direction
     binance_trade = FakeBinanceTrade(fill_qty=183000.0)
-    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0, avg_price=0.00005440)  # matches CheapBybitRead's ask below
 
     class CheapBybitRead(FakeBybitRead):
         async def get_book_ticker(self, symbol):
@@ -393,17 +444,23 @@ async def test_reverse_direction_bybit_buy_binance_sell_also_works(monkeypatch):
     assert result.actual_net_pnl_usd is not None
 
 
-async def test_bybit_buy_leg_transmits_the_raw_usdt_notional_not_a_converted_base_qty(monkeypatch):
-    """Bybit BUY caller fix (2026-08-24): bybit_live_trade_client.place_
-    market_order now sends marketUnit="quoteCoin" for every Buy, meaning
-    qty on the wire IS the USDT notional. This caller must pass
-    requested_notional_per_leg_usdt straight through when Bybit is the
-    buy exchange — never pre-convert it to an estimated base-asset
-    quantity via a book price first."""
+async def test_bybit_buy_leg_now_transmits_a_base_asset_quantity_not_the_raw_notional(monkeypatch):
+    """Item 1 fix (2026-08-24, post-incident) DELIBERATELY REVERSES the
+    2026-08-24 "Bybit BUY caller fix" for the ARBITRAGE buy leg
+    specifically: that earlier fix made every Bybit Buy notional-based
+    (marketUnit=quoteCoin) so a caller could just say "spend $10" — but
+    for a two-leg arbitrage, a notional-based buy can silently acquire
+    MORE base asset than the sell leg can actually absorb (exactly what
+    happened in the first real arbitrage attempt: bought 3003.5 RVN
+    against only 2914.9821 real Bybit inventory). The arbitrage buy leg
+    is now quantity-capped by common_qty (marketUnit=baseCoin) instead —
+    app.execution.inventory_constitution_executor's OWN buy leg is
+    UNCHANGED and still notional-based, since it has no second leg to
+    stay in sync with."""
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade(fill_qty=183000.0)
-    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0, avg_price=0.00005440)  # matches CheapBybitRead's ask below
 
     class CheapBybitRead(FakeBybitRead):
         async def get_book_ticker(self, symbol):
@@ -422,13 +479,17 @@ async def test_bybit_buy_leg_transmits_the_raw_usdt_notional_not_a_converted_bas
     result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
     assert result.outcome == ArbitrageOutcome.BOTH_FILLED
     assert bybit_trade.submitted_orders[0][1] == "Buy"
-    assert bybit_trade.submitted_orders[0][2] == 10.0  # the raw USDT notional — NOT 10.0 / 0.00005440 (an estimated LUNC quantity)
+    assert bybit_trade.submitted_orders[0][2] > 1000  # a base-asset-sized quantity, not the raw ~10 USDT notional
 
 
 async def test_bybit_sell_leg_still_transmits_a_base_asset_quantity(monkeypatch):
     """SELL was already correct before this fix and must stay that way —
-    qty is the real base-asset fill quantity from the buy leg, never the
-    USDT notional."""
+    qty is a real base-asset quantity, never the USDT notional. Since
+    item 1 (common dual-leg sizing, 2026-08-24), the buy leg itself is
+    now quantity-capped by common_qty rather than by notional, so the
+    exact figure comes from the fixture's prices/depth rather than
+    echoing FakeBinanceTrade's disconnected fill_qty — the important,
+    still-true property is "a base-asset-sized number", not "~10 USDT"."""
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
     binance_trade = FakeBinanceTrade(fill_qty=183000.0)
@@ -437,14 +498,18 @@ async def test_bybit_sell_leg_still_transmits_a_base_asset_quantity(monkeypatch)
     assert result.outcome == ArbitrageOutcome.BOTH_FILLED
     assert bybit_trade.submitted_orders[0][1] == "Sell"
     sell_qty = bybit_trade.submitted_orders[0][2]
-    assert sell_qty == pytest.approx(183000.0, rel=0.01)  # the real base-asset fill qty, not a USDT amount (~10)
+    assert sell_qty > 1000  # a base-asset-sized quantity, not a USDT amount (~10)
 
 
-async def test_neither_caller_double_converts_buy_notional_into_a_second_unit(monkeypatch):
-    """Combined regression: across both directions, the qty Bybit
-    receives for a Buy always equals exactly the requested USDT notional
-    passed into execute_one_arbitrage — proving there is no leftover
-    price-based conversion anywhere on the buy path in either direction."""
+async def test_neither_caller_double_converts_buy_qty_into_a_second_unit(monkeypatch):
+    """Combined regression, updated for item 1 (2026-08-24, post-incident:
+    the arbitrage buy leg is now quantity-capped by common_qty, not
+    notional-capped — see test_bybit_buy_leg_now_transmits_a_base_asset_
+    quantity_not_the_raw_notional). Across both directions: Bybit never
+    receives a Buy order it wasn't meant to, and when it IS the buy
+    exchange, the qty sent is common_qty itself (already fully derived
+    ONCE via compute_dual_leg_quote) — never re-converted a second time
+    on top of that."""
     guard = _armed_guard()
     monkeypatch.setattr(executor_module, "live_guard", guard)
 
@@ -453,9 +518,9 @@ async def test_neither_caller_double_converts_buy_notional_into_a_second_unit(mo
     await _executor(bybit_trade=default_bybit_trade).execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert all(order[1] != "Buy" for order in default_bybit_trade.submitted_orders)
 
-    # bybit buy / binance sell: Bybit's Buy order qty must be exactly 10.0, not a price-derived figure.
+    # bybit buy / binance sell: Bybit's Buy order qty must equal common_qty exactly, not some further-converted figure.
     binance_trade = FakeBinanceTrade(fill_qty=183000.0)
-    bybit_trade = FakeBybitTrade(fill_qty=183000.0)
+    bybit_trade = FakeBybitTrade(fill_qty=183000.0, avg_price=0.00005440)  # matches CheapBybitRead's ask below
 
     class CheapBybitRead(FakeBybitRead):
         async def get_book_ticker(self, symbol):
@@ -471,10 +536,106 @@ async def test_neither_caller_double_converts_buy_notional_into_a_second_unit(mo
     executor = LiveArbitrageExecutor(
         binance_read=RichBinanceRead(), binance_trade=binance_trade, bybit_read=CheapBybitRead(), bybit_trade=bybit_trade
     )
-    await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
+    result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "binance", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
     buy_orders = [order for order in bybit_trade.submitted_orders if order[1] == "Buy"]
     assert len(buy_orders) == 1
-    assert buy_orders[0][2] == 10.0
+    assert buy_orders[0][2] > 1000  # a base-asset-sized quantity, not a re-converted USDT-sized figure
+
+
+# ---- item 4 (user directive, 2026-08-24): exact incident replay ----------
+#
+# The real numbers from the first real arbitrage attempt: Bybit held
+# 2914.9821 real inventory; the Binance buy leg reported a gross fill of
+# 3003.5, and (after the item 2 fee-accounting fix) a real 3.0035 LUNC
+# fee nets that down to 3000.4965 — exactly what the wallet showed.
+# 3000.4965 still exceeds the real 2914.9821 held on Bybit, so these
+# tests prove the SYSTEM, not just the fee accounting, protects against
+# ever attempting to sell more than what Bybit actually has.
+
+
+async def test_incident_replay_never_attempts_to_sell_more_than_real_bybit_inventory(monkeypatch):
+    """Reuses this file's existing LUNCUSDT fixture infrastructure with
+    the incident's exact quantities AND real RVN-scale prices substituted
+    in (this file's shared module-level LUNC price, ~0.0000546, would
+    make 2914.9821 units worth only ~$0.16 — nowhere near the real
+    incident's ~$10 economics — so this test overrides book_ticker/depth
+    to match the real RVN prices observed during the incident instead).
+    The sizing algorithm being tested doesn't care about the asset's
+    identity, only that the real quantities and their real dollar value
+    are both faithfully reproduced. FakeBinanceTrade deliberately still
+    reports the full 3003.5 gross fill regardless of what was actually
+    requested (simulating the buy exchange filling more than intended)
+    — proving the POST-buy real-balance cap (item 1) holds even in that
+    case, not just the pre-trade common_qty sizing."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+
+    class RvnPricedBinanceRead(FakeBinanceRead):
+        async def get_book_ticker(self, symbol):
+            return {"bidPrice": "0.00331", "askPrice": "0.00332"}  # the real incident's own Binance ask
+
+        async def get_order_book_depth(self, symbol, limit=20):
+            return {"asks": [["0.00332", "500000000"], ["0.00333", "500000000"]], "bids": []}
+
+    class RvnPricedBybitRead(FakeBybitRead):
+        async def get_book_ticker(self, symbol):
+            return type("Ticker", (), {"bid_price": 0.003422, "ask_price": 0.003428})()  # the real incident's own Bybit bid
+
+        async def get_order_book_depth(self, symbol, limit=50):
+            return {"result": {"a": [], "b": [["0.003422", "500000000"], ["0.003420", "500000000"]]}}
+
+    bybit_read = RvnPricedBybitRead(lunc_balance=2914.9821)  # the real incident's exact held Bybit inventory
+    binance_trade = FakeBinanceTrade(fill_qty=3003.5, fee_asset="LUNC", fee_amount=3.0035)  # nets to 3000.4965, exactly like the real fill
+    bybit_trade = FakeBybitTrade(fill_qty=2914.9821)
+    executor = LiveArbitrageExecutor(binance_read=RvnPricedBinanceRead(), binance_trade=binance_trade, bybit_read=bybit_read, bybit_trade=bybit_trade)
+
+    result = await executor.execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+
+    assert result.buy_filled_qty == 3003.5  # the real incident's exact gross fill, reproduced
+    assert result.buy_net_filled_qty == pytest.approx(3000.4965)  # item 2 fix: the real fee is now correctly detected and subtracted
+
+    # Pre-trade: the BUY itself was already requested at a quantity
+    # bounded by common_qty (<= the real 2914.9821 Bybit inventory), not
+    # an unbounded notional-derived figure.
+    buy_orders = [order for order in binance_trade.submitted_orders if order[1] == "BUY"]
+    assert len(buy_orders) == 1
+    assert buy_orders[0][3] <= 2915  # requested quantity, bounded pre-trade by real sell-exchange inventory
+
+    # Post-trade: whatever Bybit is actually asked to sell must never
+    # exceed the real 2914.9821 it holds, regardless of the buy leg's
+    # own (possibly larger) reported fill.
+    sell_orders = [order for order in bybit_trade.submitted_orders if order[1] == "Sell"]
+    for order in sell_orders:
+        assert order[2] <= 2914.9821
+
+
+async def test_neutralization_sells_the_real_balance_not_the_gross_fill(monkeypatch):
+    """Item 3 (user directive, 2026-08-24, post-incident): the
+    neutralizer must always cap by the REAL free balance immediately
+    before submitting — never trust a caller-supplied qty (like the buy
+    leg's own gross fill) blindly. Simulates a buy exchange whose REAL
+    balance is lower than the buy leg's own reported gross fill (exactly
+    what happened in the real incident's failed neutralization attempt,
+    which tried to sell 3003.5 when only 3000.4965 was actually held)."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+
+    class ShortBalanceBinanceRead(FakeBinanceRead):
+        async def get_account_snapshot(self):
+            return _FakeSnapshot(3000.4965)  # real balance is LESS than the buy leg's own reported fill
+
+    binance_trade = FakeBinanceTrade(fill_qty=3003.5)  # gross fill the buy leg reports
+    bybit_trade = FakeBybitTrade(raise_on_submit=True)  # force the sell leg to fail, triggering neutralization
+    executor = LiveArbitrageExecutor(
+        binance_read=ShortBalanceBinanceRead(), binance_trade=binance_trade, bybit_read=FakeBybitRead(), bybit_trade=bybit_trade
+    )
+
+    await executor.execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
+
+    neutralize_orders = [order for order in binance_trade.submitted_orders if order[1] == "SELL"]
+    assert len(neutralize_orders) == 1
+    assert neutralize_orders[0][3] <= 3000.4965  # capped by the REAL balance, never the gross 3003.5 the buy leg reported
 
 
 async def test_execute_one_arbitrage_rejects_same_exchange_both_legs():

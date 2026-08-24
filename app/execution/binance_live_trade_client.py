@@ -89,6 +89,45 @@ class BinanceOrderResult:
         return totals
 
 
+@dataclass(slots=True)
+class BinanceTrade:
+    trade_id: int
+    order_id: int
+    price: float
+    qty: float
+    quote_qty: float
+    commission: float
+    commission_asset: str
+
+
+@dataclass(slots=True)
+class AggregatedBinanceFill:
+    """Item 2 (user directive, 2026-08-24, post-incident): the real
+    per-fill breakdown for one order, aggregated from GET /api/v3/myTrades
+    — NOT derived from a wallet-balance difference (that stays a
+    secondary, independent reconciliation check, never the primary
+    source)."""
+
+    gross_base_qty: float
+    gross_quote: float
+    actual_effective_price: float | None
+    fees_by_asset: dict[str, float]
+
+
+def aggregate_binance_trades(trades: list[BinanceTrade]) -> AggregatedBinanceFill:
+    """Pure function. Sums real per-fill qty/quoteQty/commission across
+    every trade matched to one orderId."""
+    gross_base_qty = sum(t.qty for t in trades)
+    gross_quote = sum(t.quote_qty for t in trades)
+    fees_by_asset: dict[str, float] = {}
+    for t in trades:
+        fees_by_asset[t.commission_asset] = fees_by_asset.get(t.commission_asset, 0.0) + t.commission
+    actual_effective_price = gross_quote / gross_base_qty if gross_base_qty > 0 else None
+    return AggregatedBinanceFill(
+        gross_base_qty=gross_base_qty, gross_quote=gross_quote, actual_effective_price=actual_effective_price, fees_by_asset=fees_by_asset
+    )
+
+
 def _parse_order_result(data: dict) -> BinanceOrderResult:
     fills = [
         BinanceOrderFill(
@@ -188,3 +227,31 @@ class BinanceLiveTradeClient:
                 response.raise_for_status()
                 data = await response.json()
         return _parse_order_result(data)
+
+    async def get_order_trades(self, symbol: str, order_id: int) -> list[BinanceTrade]:
+        """GET /api/v3/myTrades — SIGNED, filtered to one orderId. The
+        authoritative source for real per-fill commission/commissionAsset/
+        price/qty/quoteQty (item 2, user directive, 2026-08-24,
+        post-incident): GET /api/v3/order (get_order_status) never
+        returns fills at all — only the original POST /api/v3/order
+        response does, and that response is deliberately never trusted
+        alone (ACK != FILLED). Call this only after get_order_status
+        confirms the order reached a terminal, filled state."""
+        extra: dict = {"symbol": symbol, "orderId": order_id}
+        headers, params = self._signed_request_params(extra)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/api/v3/myTrades",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return [
+            BinanceTrade(
+                trade_id=int(t["id"]), order_id=int(t["orderId"]), price=float(t["price"]), qty=float(t["qty"]),
+                quote_qty=float(t["quoteQty"]), commission=float(t["commission"]), commission_asset=str(t["commissionAsset"]),
+            )
+            for t in data
+        ]
