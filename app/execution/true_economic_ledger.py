@@ -150,3 +150,21 @@ def save_state(state: LedgerState, path: Path = DEFAULT_STATE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump({key: asdict(pool) for key, pool in state.items()}, f, indent=2, sort_keys=True)
+
+
+def total_unrealized_pnl(state: LedgerState, current_prices: dict[tuple[str, str], float]) -> float:
+    """Pure. Sum of (qty * current_price - cost_usd) across every pool in
+    state for which a current price is known -- pools with no known
+    price are skipped, never valued at $0 (which would fabricate a
+    loss). Mirrors exactly what app.execution.v4_session_replay.
+    replay_wealth_bridge inlines for its own total_unrealized_pnl_usd,
+    extracted here so a LIVE orchestrator can compute the same figure
+    incrementally at any checkpoint, not only via a full historical
+    replay -- this is the term that, added to cumulative realized PNL,
+    must reconcile with REAL_WEALTH_PNL (app.reporting.real_net_worth.
+    check_reconciliation_invariant)."""
+    total = 0.0
+    for (exchange, asset), price in current_prices.items():
+        pool = get_pool(state, exchange, asset)
+        total += pool.qty * price - pool.cost_usd
+    return total

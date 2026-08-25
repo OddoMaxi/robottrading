@@ -11,6 +11,7 @@ from app.execution.true_economic_ledger import (
     put_pool,
     save_state,
     seed_pool,
+    total_unrealized_pnl,
 )
 
 
@@ -166,3 +167,22 @@ def test_persistence_round_trip_survives_a_restart(tmp_path):
 
 def test_load_state_missing_file_returns_empty_state(tmp_path):
     assert load_state(tmp_path / "does_not_exist.json") == {}
+
+
+def test_total_unrealized_pnl_sums_qty_times_price_minus_cost():
+    state = seed_pool({}, "binance", "RVN", qty=1000.0, price=0.0030)
+    state = seed_pool(state, "bybit", "ZIL", qty=500.0, price=0.0028)
+    total = total_unrealized_pnl(state, {("binance", "RVN"): 0.0032, ("bybit", "ZIL"): 0.0028})
+    expected = (1000.0 * 0.0032 - 1000.0 * 0.0030) + (500.0 * 0.0028 - 500.0 * 0.0028)
+    assert total == pytest.approx(expected)
+
+
+def test_total_unrealized_pnl_skips_pools_with_no_known_price():
+    state = seed_pool({}, "binance", "RVN", qty=1000.0, price=0.0030)
+    state = seed_pool(state, "bybit", "ZIL", qty=500.0, price=0.0028)
+    total = total_unrealized_pnl(state, {("binance", "RVN"): 0.0032})  # ZIL price unknown, must be skipped not zeroed
+    assert total == pytest.approx(1000.0 * 0.0032 - 1000.0 * 0.0030)
+
+
+def test_total_unrealized_pnl_empty_state_is_zero():
+    assert total_unrealized_pnl({}, {("binance", "RVN"): 0.0032}) == 0.0
