@@ -25,16 +25,26 @@ This file adds the CLASSIFICATION-level replay across the full item-4
 knowledge base and the full critical-incident taxonomy, producing the
 exact report fields the user asked for.
 
-Of the 10 known incidents in the KB, 8 are STRUCTURALLY PREVENTED -- the
+A third real incident halted the first CONTINUOUS LIVE V3 session (a
+rebalance selling RVN to fund a ZIL arbitrage got its quantity wrongly
+subtracted from the ZIL reconciliation, since the old fix keyed a
+rebalance event by exchange only, not by asset) -- proven prevented by
+tests/test_reconciliation.py::test_zil_rvn_live_incident_exact_replay_reconciles_cleanly
+and the generic cross-asset-contamination / multi-rebalance tests
+alongside it, plus test_reconciliation_self_healing.py's explicit
+CROSS_ASSET_RECONCILIATION_ATTEMPT-rejection tests.
+
+Of the 11 known incidents in the KB, 9 are STRUCTURALLY PREVENTED -- the
 code fix that resolved them means the exact failure mode cannot recur at
 all (verified by each fix's own tests: candidate_selection,
 compute_common_dual_leg_qty, _neutralize's balance cap, resolve_fee,
-get_order_trades, and the <=36-char id generation). Only 2 remain live
-runtime possibilities (capital reserve depletion, ledger reconciliation
-gaps) -- and both of those are the two proven above. So all 10 of the 10
-known incidents now require zero human intervention if their symptoms
-reappeared -- 8 because they cannot occur, 2 because they are auto-
-recovered without stopping the session."""
+get_order_trades, the <=36-char id generation, and reconcile_asset_
+balance's own per-(exchange, asset) event filtering). Only 2 remain live
+runtime possibilities (capital reserve depletion, a genuinely unaccounted
+ledger gap) -- and both of those are proven auto-recoverable above. So
+all 11 of the 11 known incidents now require zero human intervention if
+their symptoms reappeared -- 9 because they cannot occur, 2 because they
+are auto-recovered without stopping the session."""
 
 from app.operations.incident_knowledge_base import SEED_KNOWN_INCIDENTS
 from app.operations.incident_taxonomy import IncidentCategory, RecoveryLevel, _RULES
@@ -49,11 +59,16 @@ _STRUCTURALLY_PREVENTED = {
     "ARBITRAGE_SELL_QTY_EXCEEDS_SELL_SIDE_INVENTORY",  # compute_common_dual_leg_qty bounds the buy leg pre-trade
     "NEUTRALIZATION_QTY_EXCEEDS_FREE_BALANCE",  # _neutralize always re-reads and caps to real free balance
     "ORDER_LINK_ID_OR_CLIENT_ORDER_ID_COLLISION_RISK",  # every real order path mints a fresh id per attempt
+    "CROSS_ASSET_LEDGER_CONTAMINATION",  # reconcile_asset_balance filters every event to (exchange, asset) before summing -- an event for a different asset can never contribute, unconditionally, regardless of how the caller assembled the event list
 }
 
 # The incident-type string each one would raise TODAY if it somehow
-# still occurred (both are live runtime possibilities, not eliminated by
-# a code fix the way the 8 above are).
+# still occurred (both are live runtime possibilities -- unlike
+# CROSS_ASSET_LEDGER_CONTAMINATION, whether a real event gets INCLUDED
+# in a reconciliation call at all is still a caller discipline, not a
+# structural guarantee, so these two remain a self-healing/recalculate
+# concern rather than something eliminated by a code fix the way the 9
+# above are).
 _RUNTIME_CLASSIFIABLE = {
     "BUY_EXCHANGE_USDT_RESERVE_NOT_CHECKED": "REBALANCE FAILED (rebalance leg)",
     "RECONCILIATION_MISSING_REBALANCE_EVENT": "BALANCE / LEDGER MISMATCH",
@@ -67,7 +82,7 @@ def test_every_seed_incident_is_accounted_for_in_the_replay():
 
 
 def test_structurally_prevented_incidents_count():
-    assert len(_STRUCTURALLY_PREVENTED) == 8
+    assert len(_STRUCTURALLY_PREVENTED) == 9
 
 
 def test_both_runtime_classifiable_known_incidents_are_auto_recoverable():
@@ -131,8 +146,13 @@ def test_replay_report_numbers():
     known_incidents = len(SEED_KNOWN_INCIDENTS)
     auto_recoverable = len(_STRUCTURALLY_PREVENTED) + len(_RUNTIME_CLASSIFIABLE)
     would_require_human = known_incidents - auto_recoverable
-    false_global_stops_prevented = 2  # BUY_EXCHANGE_USDT_RESERVE_NOT_CHECKED + RECONCILIATION_MISSING_REBALANCE_EVENT, both empirically replayed against real historical order data
-    assert known_incidents == 10
-    assert auto_recoverable == 10
+    # BUY_EXCHANGE_USDT_RESERVE_NOT_CHECKED (31-event replay),
+    # RECONCILIATION_MISSING_REBALANCE_EVENT (RVN exact replay), and
+    # CROSS_ASSET_LEDGER_CONTAMINATION (ZIL/RVN exact replay) -- all
+    # three empirically replayed against real historical order data, not
+    # just classified hypothetically.
+    false_global_stops_prevented = 3
+    assert known_incidents == 11
+    assert auto_recoverable == 11
     assert would_require_human == 0
-    assert false_global_stops_prevented == 2
+    assert false_global_stops_prevented == 3

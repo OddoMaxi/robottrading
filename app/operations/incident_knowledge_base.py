@@ -160,7 +160,38 @@ SEED_KNOWN_INCIDENTS: tuple[KnownIncident, ...] = (
         validation="Fixed 2026-08-25, verified independently three ways before the fix was written (script log "
         "arithmetic, a fresh separate balance re-read, and raw Binance myTrades pulled directly for orders "
         "1344692249/1344692270) -- all three agreed to the decimal that no RVN was actually missing. Replay test "
-        "reproduces the exact real incident and proves it now reconciles.",
+        "reproduces the exact real incident and proves it now reconciles. Superseded 2026-08-25 by "
+        "CROSS_ASSET_LEDGER_CONTAMINATION below (FIX 4), which generalizes this fix's own shape -- the "
+        "rebalance_sell_exchange/qty parameters this fix added were themselves keyed by exchange only, not by "
+        "asset, and that gap is exactly what FIX 4 closes.",
+        first_seen="2026-08-25", last_seen="2026-08-25", occurrence_count=1,
+    ),
+    KnownIncident(
+        incident_signature="CROSS_ASSET_LEDGER_CONTAMINATION",
+        root_cause="FIX 3's own rebalance_sell_exchange/rebalance_sell_qty parameters were keyed by exchange "
+        "only, not by (exchange, asset) -- so any event described as 'a rebalance happened on this exchange' got "
+        "applied to whichever asset the CALLER happened to be reconciling, regardless of which asset the rebalance "
+        "actually sold. The first real CONTINUOUS LIVE V3 session hit this immediately: REBALANCE_FIRST sold "
+        "2107.9 RVN on Binance to fund a ZIL arbitrage buy (net 2626.2711 ZIL); both the rebalance and the ZIL "
+        "arbitrage were individually correct, but reconciliation subtracted the RVN quantity from the ZIL check, "
+        "producing a false 2107.9-unit 'BALANCE / LEDGER MISMATCH' that halted the session after 3 profitable "
+        "cycles. Independently verified safe: a fresh balance re-read matched the script's own final numbers "
+        "exactly, and the real ZIL delta (before=6202.0917, after=8828.3628) matched the arbitrage's own net buy "
+        "fill (2626.2711) exactly once the RVN event was excluded.",
+        safe_recovery="Replaced the fixed set of named optional parameters with a flat list of explicitly-typed "
+        "LedgerEvent records, each carrying its OWN base_asset (app.execution.reconciliation.reconcile_asset_"
+        "balance). Reconciliation now filters events to exchange==exchange AND base_asset==asset BEFORE summing "
+        "anything -- an event for a different asset contributes exactly zero, structurally, regardless of how the "
+        "caller assembled the event list. The self-healing layer additionally detects and explicitly refuses any "
+        "candidate event whose asset does not match (CROSS_ASSET_RECONCILIATION_ATTEMPT), never using it as an "
+        "explanation even when its magnitude would numerically close the gap.",
+        validation="Fixed 2026-08-25. Exact live incident replay "
+        "(tests/test_reconciliation.py::test_zil_rvn_live_incident_exact_replay_reconciles_cleanly) proves ZIL "
+        "reconciles cleanly with the RVN rebalance event contributing zero; a generic cross-asset-contamination "
+        "test (4 distinct assets: rebalance/arbitrage/inventory/neutralization) and a multi-rebalance test (3 "
+        "chained rebalance->arbitrage pairs sharing an asset) both prove no event ever leaks into another asset's "
+        "ledger; self-healing tests prove a cross-asset candidate is rejected and reported even when it would "
+        "numerically fit.",
         first_seen="2026-08-25", last_seen="2026-08-25", occurrence_count=1,
     ),
     KnownIncident(

@@ -1,84 +1,94 @@
 """RECONCILIATION SELF-HEALING (user directive, 2026-08-25, AUTONOMOUS
-SELF-HEALING OPERATIONS LAYER, item 3). The procedure: re-read balances,
-re-read real trades/orders, reconstruct events, check whether the gap is
-explained by a known event type not yet integrated into the original
-reconcile call, re-reconcile. AUTO_RECOVERED if explained, SAFE STOP if
-not -- "ne jamais inventer une correction de ledger."
+SELF-HEALING OPERATIONS LAYER item 3; rebuilt 2026-08-25 for FIX 4 --
+MULTI-ASSET RECONCILIATION, item 5). The procedure: re-read balances,
+re-read real trades/orders, reconstruct events, group by (exchange,
+asset), check whether the gap is explained by a known event not yet
+included, re-reconcile. AUTO_RECOVERED if explained, SAFE STOP if not --
+"ne jamais inventer une correction de ledger."
 
-This module is the pure decision core only: given an already-computed
-ReconciliationResult and a small set of CANDIDATE explaining events (each
-one a real, independently-fetched quantity -- e.g. a rebalance sell this
-cycle actually executed, confirmed against real trade history, never an
-invented number), it searches for the smallest subset that explains the
-mismatch within the original tolerance. Fetching the candidate events
-themselves (re-reading balances/trades) is necessarily I/O and belongs in
-the orchestrator, exactly like every other pure/IO split in this
-project's app.execution modules.
-
-FIX 3 to reconcile_base_asset_balance (2026-08-25) already closes the
-ONE specific gap this module exists to guard against going forward (a
-rebalance sell in the same cycle) -- callers that pass complete data
-should never need this module's search to find anything. It remains the
-safety net for a genuinely new gap shape, and the mechanism this
-project's real RVN incident would have been caught by even before that
-targeted fix existed."""
+Given app.execution.reconciliation.reconcile_asset_balance already
+filters every event to the exact (exchange, asset) pair being checked
+before summing anything, the original ZIL/RVN incident this module was
+extended to guard against can no longer occur through this module's own
+mechanism -- a candidate event for the wrong asset is filtered out
+structurally, not by search logic. What remains for self-healing to do:
+search ADDITIONAL real, independently-verified candidate events (for the
+SAME asset) not originally included in the reconciliation call, exactly
+as before FIX 4 -- plus explicitly detect and report the case where a
+caller offers a candidate for a DIFFERENT asset (CROSS_ASSET_
+RECONCILIATION_ATTEMPT, item 5): such a candidate is never used as an
+explanation even if its magnitude would numerically close the gap, and
+is reported by name rather than silently dropped."""
 
 from dataclasses import dataclass
 from itertools import combinations
 
-from app.execution.reconciliation import ReconciliationResult
-
-
-@dataclass(slots=True, frozen=True)
-class CandidateExplanationEvent:
-    label: str
-    signed_qty: float  # positive = added to the balance, negative = removed -- always from real, independently-verified trade data
+from app.execution.reconciliation import AssetReconciliationResult, LedgerEvent, reconcile_asset_balance
 
 
 @dataclass(slots=True, frozen=True)
 class SelfHealingResult:
     recovered: bool
-    final_result: ReconciliationResult
-    explaining_events: tuple[CandidateExplanationEvent, ...]
+    final_result: AssetReconciliationResult
+    explaining_events: tuple[LedgerEvent, ...]
+    cross_asset_attempts_rejected: tuple[LedgerEvent, ...]
     diagnostic: str
 
 
 def attempt_reconciliation_recovery(
-    *, original_result: ReconciliationResult, candidate_events: tuple[CandidateExplanationEvent, ...],
+    *, original_result: AssetReconciliationResult, candidate_events: tuple[LedgerEvent, ...],
 ) -> SelfHealingResult:
-    """Pure. Tries subsets of `candidate_events` smallest-first (the
-    simplest explanation that fits wins) and returns the first one whose
-    combined signed quantity brings the difference within the ORIGINAL
-    tolerance -- never a loosened one. If `original_result` already
-    matches, there is nothing to heal. If no combination explains it,
-    returns recovered=False: this is a real SAFE STOP, not a search
-    failure to retry with different numbers."""
-    if original_result.match:
-        return SelfHealingResult(True, original_result, (), "no mismatch -- nothing to heal")
+    """Pure. `candidate_events` are real, independently-verified events
+    not part of the original reconciliation call -- some may legitimately
+    belong to `original_result.asset`, others may belong to a different
+    asset entirely (a rebalance of some other holding that happened on
+    the same exchange). Only same-(exchange, asset) candidates are ever
+    searched as an explanation; any others are reported as rejected
+    CROSS_ASSET_RECONCILIATION_ATTEMPTs, never silently used even if
+    their magnitude would numerically close the gap. Tries subsets
+    smallest-first (the simplest explanation that fits wins) against the
+    ORIGINAL tolerance -- never a loosened one."""
+    same_asset = tuple(e for e in candidate_events if e.exchange == original_result.exchange and e.base_asset == original_result.asset)
+    cross_asset_rejected = tuple(e for e in candidate_events if not (e.exchange == original_result.exchange and e.base_asset == original_result.asset))
 
-    for r in range(1, len(candidate_events) + 1):
-        for combo in combinations(candidate_events, r):
-            adjustment = sum(e.signed_qty for e in combo)
+    if original_result.match:
+        return SelfHealingResult(True, original_result, (), (), "no mismatch -- nothing to heal")
+
+    for r in range(1, len(same_asset) + 1):
+        for combo in combinations(same_asset, r):
+            adjustment = sum(e.net_base_delta for e in combo)
             new_expected = original_result.expected_delta + adjustment
             new_difference = original_result.actual_delta - new_expected
             if abs(new_difference) <= original_result.tolerance:
-                labels = ", ".join(e.label for e in combo)
+                labels = ", ".join(f"{e.event_type.value}({e.base_asset}{', order ' + e.order_id if e.order_id else ''})" for e in combo)
                 explanation = (
-                    f"AUTO_RECOVERED: original mismatch (difference={original_result.difference:.6f}) fully "
-                    f"explained by real event(s) not in the original reconciliation call: {labels} "
-                    f"(combined adjustment {adjustment:+.6f}); revised expected_delta={new_expected:.6f}, "
-                    f"revised difference={new_difference:.6f}, tolerance={original_result.tolerance:.6f}"
+                    f"AUTO_RECOVERED: original mismatch (difference={original_result.difference:.6f}) for "
+                    f"{original_result.exchange}/{original_result.asset} fully explained by real, same-asset "
+                    f"event(s) not in the original reconciliation call: {labels} (combined adjustment {adjustment:+.6f}); "
+                    f"revised expected_delta={new_expected:.6f}, revised difference={new_difference:.6f}, "
+                    f"tolerance={original_result.tolerance:.6f}"
                 )
-                healed = ReconciliationResult(
-                    expected_delta=new_expected, actual_delta=original_result.actual_delta,
-                    difference=new_difference, tolerance=original_result.tolerance, match=True,
-                    explanation=explanation,
+                if cross_asset_rejected:
+                    rejected_labels = ", ".join(f"{e.event_type.value}({e.base_asset})" for e in cross_asset_rejected)
+                    explanation += f" | CROSS_ASSET_RECONCILIATION_ATTEMPT also detected and refused (not used): {rejected_labels}"
+                healed = AssetReconciliationResult(
+                    exchange=original_result.exchange, asset=original_result.asset, expected_delta=new_expected,
+                    actual_delta=original_result.actual_delta, difference=new_difference, tolerance=original_result.tolerance,
+                    match=True, contributing_events=original_result.contributing_events + combo, explanation=explanation,
                 )
-                return SelfHealingResult(True, healed, combo, explanation)
+                return SelfHealingResult(True, healed, combo, cross_asset_rejected, explanation)
 
-    return SelfHealingResult(
-        False, original_result, (),
+    detail = (
         f"SAFE STOP: mismatch (difference={original_result.difference:.6f}, tolerance={original_result.tolerance:.6f}) "
-        f"could not be explained by any combination of the {len(candidate_events)} real candidate event(s) checked "
-        "-- never inventing a correction; this becomes a CRITICAL_SAFETY incident for human review",
+        f"for {original_result.exchange}/{original_result.asset} could not be explained by any combination of the "
+        f"{len(same_asset)} real same-asset candidate event(s) checked -- never inventing a correction"
     )
+    if cross_asset_rejected:
+        rejected_labels = ", ".join(f"{e.event_type.value}({e.base_asset}, net_base_delta={e.net_base_delta})" for e in cross_asset_rejected)
+        detail += (
+            f" | CROSS_ASSET_RECONCILIATION_ATTEMPT detected and refused: {rejected_labels} -- one or more of these "
+            f"would have numerically fit the gap, but belong to a different asset than {original_result.asset}; "
+            "never used as an explanation, regardless of fit"
+        )
+    detail += " -- this becomes a CRITICAL_SAFETY incident for human review"
+    return SelfHealingResult(False, original_result, (), cross_asset_rejected, detail)

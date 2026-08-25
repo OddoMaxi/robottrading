@@ -1,115 +1,118 @@
-"""BALANCE RECONCILIATION (user directive, 2026-08-24, FIX 2; extended
-2026-08-25, FIX 3). Verifies a real, observed base-asset balance delta
-against everything a batch attempt could actually have done to it: an
-optional inventory constitution fill, an arbitrage buy fill, an
-arbitrage sell fill, an optional neutralization (flatten) fill, and an
-optional capital-rebalancing sell -- each only contributing when it
-happened ON THE EXCHANGE being checked.
+"""BALANCE RECONCILIATION (user directive 2026-08-24 FIX 2; 2026-08-25
+FIX 3; rebuilt 2026-08-25 FIX 4 -- MULTI-ASSET RECONCILIATION). Verifies
+a real, observed per-(exchange, asset) balance delta against every real
+ledger event that could have touched it.
 
-The one-off batch script's original reconcile check (2026-08-24) compared
-the balance after a cycle to the balance captured BEFORE that same
-cycle's own inventory constitution step -- so a real SAND cycle that
-correctly constituted 236.763 net SAND on Binance then sold 232.0 of it
-there (leaving 4.763, exactly as observed) was flagged as a 232 SAND
-"deficit", purely because the constitution step's own contribution was
-never added into the expected side of the equation. FIX 3 (2026-08-25)
-closes an identical gap introduced by the capital rebalancer: a real RVN
-cycle sold 2192.5 RVN via REBALANCE_FIRST on Binance, then bought back
-net 2125.1727 RVN there via the arbitrage leg -- this module only knew
-about the buy, so it flagged a false -2192.5 "mismatch" that was, in
-fact, fully explained by the rebalance sell (verified independently
-against real Binance myTrades: orders 1344692249 and 1344692270). This
-module fixes both with one explicit identity:
+FIX 4's reason for existing: FIX 3 added a `rebalance_sell_exchange`/
+`rebalance_sell_qty` PAIR OF SCALARS to the old keyword-argument design,
+keyed only by exchange. The first real CONTINUOUS LIVE V3 session then
+hit exactly the flaw that shape invites: a rebalance sold RVN on Binance
+to fund a ZIL arbitrage, and because the old function only checked
+"did *a* rebalance happen on *this exchange*", it subtracted the RVN
+quantity from the ZIL reconciliation -- a false 2107.9-unit mismatch
+that halted the session, even though both the rebalance and the ZIL
+arbitrage were individually correct.
 
-    expected_after = before
-                    + inventory_constitution_net_qty (if constituted here)
-                    + arbitrage_buy_net_qty            (if bought here)
-                    - arbitrage_sell_qty                (if sold here)
-                    - neutralization_qty                (if flattened here)
-                    - rebalance_sell_qty                (if rebalance-sold here)
+FIX 4 replaces the fixed set of named optional parameters with a flat
+list of explicitly-typed LedgerEvent records, each carrying its OWN
+`base_asset`. reconcile_asset_balance() filters events to
+`exchange == exchange AND base_asset == asset` BEFORE summing anything
+-- an event for a different asset contributes exactly zero, structurally,
+regardless of how the caller assembled the event list. This makes the
+whole bug CLASS (not just this one instance) impossible: there is no
+longer any parameter whose meaning is "this exchange had SOME event",
+divorced from which asset it was.
 
-Pure function, no I/O, no order placement -- reads results that
-app.execution.inventory_constitution_executor / live_arbitrage_executor /
-app.execution.capital_rebalancer's own callers already produced and
+Pure functions, no I/O, no order placement -- callers assemble
+LedgerEvent records from data app.execution.inventory_constitution_executor
+/ live_arbitrage_executor / the capital rebalancer already produced and
 persisted."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 
-@dataclass(slots=True)
-class ReconciliationResult:
+class LedgerEventType(StrEnum):
+    ARBITRAGE_BUY = "ARBITRAGE_BUY"
+    ARBITRAGE_SELL = "ARBITRAGE_SELL"
+    INVENTORY_CONSTITUTION = "INVENTORY_CONSTITUTION"  # covers both fresh constitution and recycling -- identical ledger effect (net base-asset qty added on one exchange); the business-level distinction lives in the caller's own inventory_action label, not in this event's type
+    REBALANCE_SELL = "REBALANCE_SELL"
+    NEUTRALIZATION = "NEUTRALIZATION"
+
+
+@dataclass(slots=True, frozen=True)
+class LedgerEvent:
+    """One real, explicitly-typed movement. `net_base_delta` is what
+    this module sums for reconciliation -- the actual effect on the
+    (exchange, base_asset) wallet balance, already fee-aware (BUY-shaped
+    events: gross fill minus a same-asset fee, matching
+    net_base_qty_after_fee's existing semantics; SELL-shaped events: the
+    full filled/sold quantity, since a trading fee is conventionally
+    deducted from what you RECEIVE in a trade -- quote currency for a
+    sell -- not from the base asset you are giving up). `gross_base_delta`
+    is kept only as audit metadata and is never summed.
+    `quote_delta`/`fee_asset`/`fee_amount` exist for completeness and for
+    REBALANCING_PNL/audit purposes -- this module does not itself
+    reconcile the quote asset."""
+
+    event_type: LedgerEventType
+    exchange: str
+    base_asset: str
+    quote_asset: str
+    side: str  # "BUY" | "SELL"
+    gross_base_delta: float
+    net_base_delta: float
+    quote_delta: float | None
+    fee_asset: str | None
+    fee_amount: float | None
+    order_id: str | None
+    timestamp: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class AssetReconciliationResult:
+    exchange: str
+    asset: str
     expected_delta: float
     actual_delta: float
     difference: float
     tolerance: float
     match: bool
+    contributing_events: tuple[LedgerEvent, ...]
     explanation: str
 
 
-def reconcile_base_asset_balance(
+def reconcile_asset_balance(
     *,
     exchange: str,
+    asset: str,
     before_balance: float,
     after_balance: float,
-    inventory_constitution_exchange: str | None = None,
-    inventory_constitution_net_qty: float = 0.0,
-    arbitrage_buy_exchange: str | None = None,
-    arbitrage_buy_net_qty: float = 0.0,
-    arbitrage_sell_exchange: str | None = None,
-    arbitrage_sell_qty: float = 0.0,
-    neutralization_exchange: str | None = None,
-    neutralization_qty: float = 0.0,
-    rebalance_sell_exchange: str | None = None,
-    rebalance_sell_qty: float = 0.0,
+    events: tuple[LedgerEvent, ...] = (),
     tolerance_abs: float = 0.05,
     tolerance_rel: float = 0.02,
-) -> ReconciliationResult:
-    """Pure function. `exchange` is the one being checked ("binance" or
-    "bybit"); every other `*_exchange` argument says WHERE that specific
-    leg actually happened -- its quantity only contributes to
-    expected_delta when it matches `exchange`, so calling this once per
-    exchange with the SAME attempt's full data naturally reconciles both
-    sides. Neutralization and rebalance-selling are always sells (they
-    flatten an unwanted position / raise USDT headroom), so they always
-    subtract, exactly like an arbitrage sell. A single cycle can only
-    ever rebalance-sell on ONE of the two exchanges per USDT-spending
-    action it gates (buy_exchange and sell_exchange always differ in a
-    cross-exchange arbitrage) -- a scalar is sufficient, matching every
-    other leg here.
-
-    tolerance is the larger of tolerance_abs and tolerance_rel *
-    |expected_delta| -- a small, disclosed allowance for dust/rounding,
-    never a silent excuse for an unexplained gap: it must be documented
-    at the call site, not tuned away a mismatch."""
-    expected_delta = 0.0
-    parts: list[str] = []
-    if inventory_constitution_exchange == exchange and inventory_constitution_net_qty:
-        expected_delta += inventory_constitution_net_qty
-        parts.append(f"+{inventory_constitution_net_qty} (inventory constitution net fill)")
-    if arbitrage_buy_exchange == exchange and arbitrage_buy_net_qty:
-        expected_delta += arbitrage_buy_net_qty
-        parts.append(f"+{arbitrage_buy_net_qty} (arbitrage buy net fill)")
-    if arbitrage_sell_exchange == exchange and arbitrage_sell_qty:
-        expected_delta -= arbitrage_sell_qty
-        parts.append(f"-{arbitrage_sell_qty} (arbitrage sell fill)")
-    if neutralization_exchange == exchange and neutralization_qty:
-        expected_delta -= neutralization_qty
-        parts.append(f"-{neutralization_qty} (neutralization sell fill)")
-    if rebalance_sell_exchange == exchange and rebalance_sell_qty:
-        expected_delta -= rebalance_sell_qty
-        parts.append(f"-{rebalance_sell_qty} (capital-rebalancing sell fill)")
+) -> AssetReconciliationResult:
+    """Pure function. Filters `events` to exactly this (exchange, asset)
+    pair before summing `net_base_delta` -- an event for a different
+    asset, or a different exchange, contributes zero by construction,
+    never by caller discipline. tolerance is the larger of tolerance_abs
+    and tolerance_rel * |expected_delta| -- a small, disclosed allowance
+    for dust/rounding, never a silent excuse for an unexplained gap."""
+    contributing = tuple(e for e in events if e.exchange == exchange and e.base_asset == asset)
+    expected_delta = sum(e.net_base_delta for e in contributing)
 
     actual_delta = after_balance - before_balance
     difference = actual_delta - expected_delta
     tolerance = max(tolerance_abs, abs(expected_delta) * tolerance_rel)
     match = abs(difference) <= tolerance
 
+    parts = [f"{'+' if e.net_base_delta >= 0 else ''}{e.net_base_delta} ({e.event_type.value})" for e in contributing]
     explanation = (
-        f"exchange={exchange}: expected_delta={expected_delta} ({', '.join(parts) if parts else 'no fills on this exchange'}), "
+        f"exchange={exchange} asset={asset}: expected_delta={expected_delta} ({', '.join(parts) if parts else 'no events for this (exchange, asset)'}), "
         f"actual_delta={actual_delta} (before={before_balance}, after={after_balance}), "
         f"difference={difference}, tolerance={tolerance} -> {'MATCH' if match else 'MISMATCH'}"
     )
-    return ReconciliationResult(
-        expected_delta=expected_delta, actual_delta=actual_delta, difference=difference,
-        tolerance=tolerance, match=match, explanation=explanation,
+    return AssetReconciliationResult(
+        exchange=exchange, asset=asset, expected_delta=expected_delta, actual_delta=actual_delta,
+        difference=difference, tolerance=tolerance, match=match, contributing_events=contributing, explanation=explanation,
     )
