@@ -7,9 +7,11 @@ the FastAPI app's long-lived engine).
 """
 
 import asyncio
+import json
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import aiohttp
 import pandas as pd
@@ -19,6 +21,23 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
+from app.execution.binance_account_client import BinanceAccountClient
+from app.execution.bybit_client import BybitClient, parse_all_wallet_balances, parse_wallet_balance
+from app.reporting.live_trading_dashboard import (
+    InventoryConstitutionSummary,
+    InventoryPosition,
+    LiveTradeRow,
+    MissedOpportunityCause,
+    RealPnlBreakdown,
+    TradeCounts,
+    build_live_ledger_rows,
+    compute_cost_basis_by_asset_exchange,
+    compute_inventory_constitution_summary,
+    compute_inventory_position_status,
+    compute_missed_opportunity_causes,
+    compute_real_pnl_breakdown,
+    compute_trade_counts,
+)
 from app.reporting.benchmark import BenchmarkReport, build_benchmark_report
 from app.reporting.daily import DailySummary, build_daily_summary
 from app.reporting.dex_execution_funnel import DexStrategyFunnel, build_dex_execution_funnel
@@ -1520,3 +1539,206 @@ async def fetch_cex_scan_disagreement_breakdown(hours: float = 24.0) -> list[Cex
 @st.cache_data(ttl=15, show_spinner=False)
 def get_cex_scan_disagreement_breakdown_cached(hours: float = 24.0) -> list[CexScanDisagreementRow]:
     return asyncio.run(fetch_cex_scan_disagreement_breakdown(hours))
+
+
+# ---- LIVE TRADING page (user directive, 2026-08-25) — REAL money only -----
+#
+# A one-off, individually-authorized live-trading script (never the
+# FastAPI engine main.py, which has never had live_trading_enabled
+# flipped True) writes its own progress to a local JSON file on the same
+# host — the only way to see "is a real cycle active right now" from
+# outside that script's own process, since it exposes no HTTP endpoint.
+# Everything else on this page (ledger history, real balances, real
+# prices) is read directly, matching this file's established two-tier
+# fetch_*/get_*_cached shape.
+
+LIVE_STATUS_FILE = Path("/tmp/robotcripto_live_status.json")
+LIVE_STATUS_STALE_AFTER_SECONDS = 60.0  # a running script rewrites this file at least once per idle scan (~10s) or immediately on any event
+
+
+@dataclass(slots=True)
+class LiveScriptStatus:
+    available: bool
+    stale: bool = False
+    age_seconds: float | None = None
+    raw: dict = field(default_factory=dict)
+
+
+def fetch_live_script_status() -> LiveScriptStatus:
+    """Plain local file read -- deliberately NOT wrapped in asyncio.run()
+    (unlike every other fetcher in this module) since there is no async
+    I/O involved; the docstring difference itself documents why this one
+    departs from the surrounding convention. Never raises -- a missing,
+    unreadable, or malformed file reports available=False."""
+    try:
+        mtime = LIVE_STATUS_FILE.stat().st_mtime
+        age = datetime.now(UTC).timestamp() - mtime
+        payload = json.loads(LIVE_STATUS_FILE.read_text())
+        stale = age > LIVE_STATUS_STALE_AFTER_SECONDS and payload.get("LIVE_STATUS") == "RUNNING"
+        return LiveScriptStatus(available=True, stale=stale, age_seconds=age, raw=payload)
+    except Exception:
+        return LiveScriptStatus(available=False)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def get_live_script_status_cached() -> LiveScriptStatus:
+    return fetch_live_script_status()
+
+
+async def _fresh_price(exchange: str, binance_read: BinanceAccountClient, bybit_read: BybitClient, symbol: str) -> float | None:
+    """Best-effort current price for one symbol on one exchange -- mid of
+    bid/ask, or whichever side is available. Never raises."""
+    try:
+        if exchange == "binance":
+            book = await binance_read.get_book_ticker(symbol)
+            bid, ask = float(book["bidPrice"]), float(book["askPrice"])
+        else:
+            book = await bybit_read.get_book_ticker(symbol)
+            if book is None:
+                return None
+            bid, ask = book.bid_price, book.ask_price
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2
+        return bid or ask or None
+    except Exception:
+        return None
+
+
+@dataclass(slots=True)
+class LiveTradingPageSummary:
+    reachable: bool  # False only if the DB itself could not be reached
+    now: datetime
+    session_start: datetime | None
+    pnl: RealPnlBreakdown | None = None
+    last_trades: list[LiveTradeRow] = field(default_factory=list)
+    counts: TradeCounts | None = None
+    inventory_summary: InventoryConstitutionSummary | None = None
+    positions: list[InventoryPosition] = field(default_factory=list)
+    missed_causes: list[MissedOpportunityCause] = field(default_factory=list)
+    total_arb_attempts: int = 0
+    total_inventory_attempts: int = 0
+    binance_usdt: float | None = None
+    bybit_usdt: float | None = None
+    binance_inventory_value_usdt: float = 0.0
+    bybit_inventory_value_usdt: float = 0.0
+    balances_reachable: bool = False
+
+
+async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    script_status = fetch_live_script_status()
+    session_start = None
+    if script_status.available and script_status.raw.get("SESSION_START"):
+        try:
+            session_start = datetime.fromisoformat(script_status.raw["SESSION_START"]).astimezone(UTC).replace(tzinfo=None)
+        except (ValueError, TypeError):
+            session_start = None
+
+    engine = create_async_engine(get_settings().database_url)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            arb_rows, inv_rows = await build_live_ledger_rows(session)
+    finally:
+        await engine.dispose()
+
+    pnl, last_trades = compute_real_pnl_breakdown(arb_rows, now=now, today_start=today_start, session_start=session_start, last_n=20)
+    counts = compute_trade_counts(arb_rows)
+    inv_summary = compute_inventory_constitution_summary(inv_rows)
+    cost_basis = compute_cost_basis_by_asset_exchange(arb_rows, inv_rows)
+    missed_causes = compute_missed_opportunity_causes(arb_rows, inv_rows)
+
+    binance_read = BinanceAccountClient()
+    bybit_read = BybitClient()
+    positions: list[InventoryPosition] = []
+    binance_usdt = bybit_usdt = None
+    binance_inv_value = bybit_inv_value = 0.0
+    balances_reachable = False
+    try:
+        snapshot = await binance_read.get_account_snapshot()
+        wallet = await bybit_read.get_wallet_balance()
+        binance_usdt = snapshot.balance_usdt() if snapshot is not None else None
+        bybit_usdt = parse_wallet_balance(wallet, "USDT")
+        balances_reachable = snapshot is not None
+
+        if snapshot is not None:
+            for bal in snapshot.balances:
+                if bal.asset == "USDT" or bal.free <= 0:
+                    continue
+                price = await _fresh_price("binance", binance_read, bybit_read, f"{bal.asset}USDT")
+                value = bal.free * price if price is not None else None
+                basis = cost_basis.get((bal.asset, "binance"))
+                unrealized = (price - basis) * bal.free if price is not None and basis is not None else None
+                positions.append(InventoryPosition(
+                    symbol=bal.asset, exchange="binance", quantity=bal.free, current_price_usdt=price, value_usdt=value,
+                    cost_basis_usdt_per_unit=basis, unrealized_pnl_usd=unrealized, status=compute_inventory_position_status(value),
+                ))
+                binance_inv_value += value or 0.0
+
+        for asset, qty in parse_all_wallet_balances(wallet).items():
+            if asset == "USDT" or qty <= 0:
+                continue
+            price = await _fresh_price("bybit", binance_read, bybit_read, f"{asset}USDT")
+            value = qty * price if price is not None else None
+            basis = cost_basis.get((asset, "bybit"))
+            unrealized = (price - basis) * qty if price is not None and basis is not None else None
+            positions.append(InventoryPosition(
+                symbol=asset, exchange="bybit", quantity=qty, current_price_usdt=price, value_usdt=value,
+                cost_basis_usdt_per_unit=basis, unrealized_pnl_usd=unrealized, status=compute_inventory_position_status(value),
+            ))
+            bybit_inv_value += value or 0.0
+    except Exception:
+        pass
+
+    return LiveTradingPageSummary(
+        reachable=True, now=now, session_start=session_start, pnl=pnl, last_trades=last_trades, counts=counts,
+        inventory_summary=inv_summary, positions=positions, missed_causes=missed_causes,
+        total_arb_attempts=len(arb_rows), total_inventory_attempts=len(inv_rows),
+        binance_usdt=binance_usdt, bybit_usdt=bybit_usdt,
+        binance_inventory_value_usdt=binance_inv_value, bybit_inventory_value_usdt=bybit_inv_value, balances_reachable=balances_reachable,
+    )
+
+
+@st.cache_data(ttl=8, show_spinner=False)
+def get_live_trading_page_summary_cached() -> LiveTradingPageSummary:
+    try:
+        return asyncio.run(fetch_live_trading_page_summary())
+    except Exception:
+        return LiveTradingPageSummary(reachable=False, now=datetime.now(UTC).replace(tzinfo=None), session_start=None)
+
+
+@dataclass(slots=True)
+class ApiPermissionsStatus:
+    reachable: bool
+    binance_withdrawals_disabled: bool | None = None
+    binance_trading_enabled: bool | None = None
+    bybit_withdrawals_disabled: bool | None = None
+    bybit_trading_enabled: bool | None = None
+
+
+async def fetch_api_permissions_status() -> ApiPermissionsStatus:
+    """Same read-only permission calls as app.execution.live_readiness_gate
+    and every live-trading script's own periodic safety re-check this
+    session -- never raises, an unreachable/errored check reports
+    reachable=False rather than a false green."""
+    try:
+        binance_read = BinanceAccountClient()
+        bybit_read = BybitClient()
+        restrictions = await binance_read.get_api_restrictions()
+        key_info = await bybit_read.get_api_key_info()
+        return ApiPermissionsStatus(
+            reachable=True,
+            binance_withdrawals_disabled=not restrictions.enable_withdrawals,
+            binance_trading_enabled=restrictions.enable_spot_and_margin_trading,
+            bybit_withdrawals_disabled=not key_info.has_withdrawal_permission(),
+            bybit_trading_enabled=not key_info.read_only,
+        )
+    except Exception:
+        return ApiPermissionsStatus(reachable=False)
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def get_api_permissions_status_cached() -> ApiPermissionsStatus:
+    return asyncio.run(fetch_api_permissions_status())

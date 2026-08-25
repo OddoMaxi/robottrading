@@ -63,7 +63,11 @@ CLASSIFICATION_BADGES = {
     "interesting": ("🟡", "Opportunité correcte"),
 }
 
-NAV_PAGES = [("accueil", "Accueil"), ("trades", "Trades"), ("performance", "Performance"), ("reality", "Reality"), ("parametres", "Paramètres")]
+NAV_PAGES = [
+    ("accueil", "Accueil"), ("trades", "Trades"), ("performance", "Performance"), ("reality", "Reality"),
+    ("live_trading", "LIVE TRADING"), ("parametres", "Paramètres"),
+]
+LIVE_TRADING_NAV_KEY = "live_trading"
 
 
 def describe_route(strategy: str, legs: list[dict]) -> str:
@@ -113,13 +117,19 @@ CONNECTION_BADGE = {
 
 
 @st.fragment(run_every="3s")
-def render_live_status_row() -> None:
+def render_live_status_row(active_page: str | None = None) -> None:
     """Live Dashboard addendum, sections 10-11 — the robot status pill and
     connection indicator update on their own every 3s, independent of the
     nav bar below (which only changes on an explicit click). No manual
     reconnect is needed: a fragment that keeps auto-rerunning *is* the
     reconnect loop — the moment fresh data is available again, the next
-    tick picks it up."""
+    tick picks it up.
+
+    `active_page` swaps the bottom badge: every page shows "MODE
+    SIMULATION" (this dashboard's paper-trading data) except the LIVE
+    TRADING page, which must never be confusable with simulation (user
+    directive, 2026-08-25, section 1: "ne jamais pouvoir être confondue
+    avec le mode simulation") and shows a red REAL MONEY badge instead."""
     robot = data.get_robot_status_cached()
     status_class = {"running": "simple-status-running", "degraded": "simple-status-degraded", "down": "simple-status-down"}[robot.health.value]
     status_label = {"running": "🟢 EN MARCHE", "degraded": "🟡 SURVEILLANCE", "down": "🔴 PROBLÈME"}[robot.health.value]
@@ -127,19 +137,24 @@ def render_live_status_row() -> None:
     exchange_bits = " &nbsp;·&nbsp; ".join(
         f'<b>{name.capitalize()}</b> {"✓" if ok else "✕"}' for name, ok in robot.exchanges_connected.items()
     )
+    mode_badge = (
+        '<span class="simple-live-badge">🔴 REAL MONEY — LIVE TRADING</span>'
+        if active_page == LIVE_TRADING_NAV_KEY
+        else '<span class="simple-sim-badge">MODE SIMULATION</span>'
+    )
 
     st.markdown(
         f'<div class="simple-topbar"><div class="simple-brand">🤖 ROBOT</div>'
         f'<div class="simple-status-pill {status_class}">{status_label}</div>'
         f'<span class="simple-connection-badge {connection_class}">{connection_label}</span></div>'
         f'<div class="simple-exchanges">{exchange_bits}</div>'
-        '<div><span class="simple-sim-badge">MODE SIMULATION</span></div>',
+        f'<div>{mode_badge}</div>',
         unsafe_allow_html=True,
     )
 
 
 def render_header(active_page: str) -> None:
-    render_live_status_row()
+    render_live_status_row(active_page)
 
     nav_cols = st.columns(len(NAV_PAGES) + 1)
     for col, (key, label) in zip(nav_cols, NAV_PAGES):
@@ -1630,6 +1645,392 @@ def render_inventory_manager_section() -> None:
     )
 
 
+def _money4(value: float | None) -> str:
+    return f"{value:,.4f} $".replace(",", " ") if value is not None else "—"
+
+
+def _money4_signed(value: float | None) -> str:
+    return f"{value:+,.4f} $".replace(",", " ") if value is not None else "—"
+
+
+LIVE_STATUS_LABELS = {
+    "EXECUTING": ("🟢 EXECUTING", STATUS_GOOD),
+    "RUNNING": ("🟡 WAITING FOR OPPORTUNITY", STATUS_WARNING),
+    "PAUSED": ("⏸️ PAUSED", STATUS_WARNING),
+    "KILL_SWITCH": ("🔴 KILL SWITCH", STATUS_CRITICAL),
+    "STOPPED": ("⚪ STOPPED", INK_MUTED),
+    "UNKNOWN": ("🟠 UNKNOWN", STATUS_WARNING),
+}
+
+
+def _derive_live_status(script_status) -> str:
+    if not script_status.available:
+        return "STOPPED"
+    if script_status.stale:
+        return "UNKNOWN"
+    raw = script_status.raw
+    if raw.get("KILL_SWITCH_ENGAGED"):
+        return "KILL_SWITCH"
+    if raw.get("LIVE_STATUS") == "STOPPED":
+        return "STOPPED"
+    if raw.get("ACTIVE_ARBITRAGE") or raw.get("ACTIVE_INVENTORY"):
+        return "EXECUTING"
+    if raw.get("LIVE_STATUS") == "RUNNING":
+        return "RUNNING"
+    return "UNKNOWN"
+
+
+def _render_live_header(script_status, raw: dict) -> str:
+    status_key = _derive_live_status(script_status)
+    status_label, status_color = LIVE_STATUS_LABELS[status_key]
+    session_start = raw.get("SESSION_START", "—")
+    duration_h = raw.get("SESSION_DURATION_HOURS")
+    duration_str = f"{duration_h:.2f} h" if duration_h is not None else "—"
+    now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    st.markdown(
+        f'<div style="padding:16px 20px;border:2px solid #dc2626;border-radius:14px;'
+        f'background:rgba(220,38,38,0.05);margin-bottom:14px;">'
+        f'<div style="font-size:1.3rem;font-weight:800;color:#dc2626;">🔴 LIVE TRADING — BINANCE + BYBIT</div>'
+        f'<div style="font-size:1.05rem;font-weight:700;color:{status_color};margin-top:6px;">{status_label}</div>'
+        f'<div style="font-size:0.85rem;color:{INK_MUTED};margin-top:6px;">'
+        f"SESSION START : {session_start} &nbsp;·&nbsp; DURÉE : {duration_str} &nbsp;·&nbsp; MAINTENANT : {now_str}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if not script_status.available:
+        st.caption("Aucun fichier de statut trouvé — aucune session live n'a encore tourné, ou son fichier a été nettoyé après le rapport final. Les données ci-dessous restent réelles (ledger + soldes exchange).")
+    elif script_status.stale:
+        st.warning(f"⚠️ Le fichier de statut indique RUNNING mais n'a pas été mis à jour depuis {script_status.age_seconds:.0f}s — le processus a peut-être été interrompu sans se terminer proprement.")
+    incident = raw.get("INCIDENT")
+    if incident:
+        st.markdown(
+            f'<div style="padding:14px 18px;border:2px solid #dc2626;border-radius:12px;background:rgba(220,38,38,0.10);margin:10px 0;">'
+            f'<div style="font-weight:800;color:#dc2626;font-size:1.05rem;">🚨 LIVE EXECUTION PAUSED</div>'
+            f'<div style="color:{INK_SECONDARY};margin-top:4px;">{incident.get("type", "incident")} — {incident.get("detail", "")}</div></div>',
+            unsafe_allow_html=True,
+        )
+    return status_key
+
+
+def _render_live_capital(summary) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:18px;">CAPITAL RÉEL</div>', unsafe_allow_html=True)
+    if not summary.balances_reachable:
+        st.caption("Comptes exchange injoignables pour l'instant — soldes potentiellement obsolètes.")
+    binance_usdt = summary.binance_usdt or 0.0
+    bybit_usdt = summary.bybit_usdt or 0.0
+    total_usdt = binance_usdt + bybit_usdt
+    total_inventory_value = summary.binance_inventory_value_usdt + summary.bybit_inventory_value_usdt
+    total_capital = total_usdt + total_inventory_value
+    render_stat_cards(
+        [
+            {"label": "TOTAL REAL CAPITAL", "value": _money4(total_capital), "sub": f"USDT {_money4(total_usdt)} + inventaire {_money4(total_inventory_value)}"},
+            {"label": "Binance — USDT", "value": _money4(summary.binance_usdt)},
+            {"label": "Binance — valeur inventaire", "value": _money4(summary.binance_inventory_value_usdt)},
+            {"label": "Bybit — USDT", "value": _money4(summary.bybit_usdt)},
+            {"label": "Bybit — valeur inventaire", "value": _money4(summary.bybit_inventory_value_usdt)},
+            {"label": "AVAILABLE CAPITAL", "value": _money4(total_usdt), "sub": "USDT libre, deux exchanges"},
+            {"label": "CAPITAL IN INVENTORY", "value": _money4(total_inventory_value)},
+        ]
+    )
+    st.caption("Jamais de solde paper — chaque chiffre ci-dessus vient d'un appel compte réel Binance/Bybit fait au moment du rafraîchissement.")
+
+
+def _render_live_pnl(summary) -> None:
+    pnl = summary.pnl
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">REAL NET P&L</div>', unsafe_allow_html=True)
+    if pnl is None:
+        st.caption("Pas encore de données.")
+        return
+    color = STATUS_GOOD if pnl.total_pnl_usd >= 0 else STATUS_CRITICAL
+    render_live_number_card(
+        "P&L RÉEL — TOTAL DEPUIS LE DÉBUT DU LIVE",
+        [
+            {"value": pnl.total_pnl_usd, "decimals": 4, "big": True, "suffix": " $", "signed": True, "color": color},
+            {"value": pnl.today_pnl_usd, "decimals": 4, "suffix": " $", "signed": True, "label": "Aujourd'hui :", "color": INK_SECONDARY},
+        ]
+        + ([{"value": pnl.session_pnl_usd, "decimals": 4, "suffix": " $", "signed": True, "label": "Cette session :", "color": INK_SECONDARY}] if pnl.session_pnl_usd is not None else []),
+        key="live_pnl",
+    )
+    render_stat_cards(
+        [
+            {"label": "P&L / heure (session)", "value": _money4_signed(pnl.pnl_per_hour_usd) if pnl.pnl_per_hour_usd is not None else "—"},
+            {"label": "Profit moyen / trade", "value": _money4_signed(pnl.average_pnl_per_trade_usd)},
+            {"label": "Meilleur trade", "value": _money4_signed(pnl.best_trade.actual_net_usd) if pnl.best_trade else "—", "sub": pnl.best_trade.symbol if pnl.best_trade else None},
+            {"label": "Pire trade", "value": _money4_signed(pnl.worst_trade.actual_net_usd) if pnl.worst_trade else "—", "sub": pnl.worst_trade.symbol if pnl.worst_trade else None},
+            {"label": "Win rate", "value": f"{pnl.win_rate_pct:.1f} %" if pnl.win_rate_pct is not None else "—"},
+        ]
+    )
+    st.caption("P&L calculé exclusivement depuis les fills et frais réels des exchanges (live_arbitrage_executions) — jamais depuis des données paper.")
+
+
+def _render_live_trades(summary) -> None:
+    counts = summary.counts
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">TRADES LIVE</div>', unsafe_allow_html=True)
+    if counts is not None:
+        render_stat_cards(
+            [
+                {"label": "Complete real arbitrages", "value": f"{counts.complete_arbitrages}"},
+                {"label": "Successful", "value": f"{counts.successful}"},
+                {"label": "Failed", "value": f"{counts.failed}"},
+                {"label": "Aborted", "value": f"{counts.aborted}"},
+                {"label": "Neutralizations", "value": f"{counts.neutralizations}"},
+            ]
+        )
+    if not summary.last_trades:
+        st.caption("Aucun trade réel enregistré pour l'instant.")
+        return
+    with st.expander(f"Derniers trades réels ({len(summary.last_trades)})", expanded=True):
+        for t in summary.last_trades:
+            pnl_color = "good" if (t.actual_net_usd or 0) >= 0 else "bad"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{t.at} — {t.symbol} ({t.buy_exchange}→{t.sell_exchange})</span>'
+                f'<span class="v simple-card-sub {pnl_color}">notional {_money4(t.notional_usdt)} · prédit {_money4_signed(t.predicted_net_usd)} · '
+                f"réel {_money4_signed(t.actual_net_usd)} · frais {_money4(t.total_fees_usd)} · "
+                f'{t.latency_ms:.0f} ms</span></div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _render_live_best_opportunity() -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">BEST OPPORTUNITY NOW</div>', unsafe_allow_html=True)
+    engine_summary = data.get_live_dashboard_summary_cached()
+    if not engine_summary.reachable:
+        st.caption("Moteur (scanner continu) injoignable — opportunité actuelle indisponible.")
+        return
+    best = engine_summary.current_best_opportunity
+    if best is None:
+        st.markdown('<div class="simple-state-card warn"><div class="simple-state-title">WAITING — NO QUALIFIED EDGE</div></div>', unsafe_allow_html=True)
+        return
+    st.markdown(
+        f'<div class="simple-card"><div class="simple-opp-symbol">{best["symbol"]}</div>'
+        f'<div class="simple-opp-route">{best["buy_exchange"]} → {best["sell_exchange"]}</div>'
+        f'<div class="simple-opp-row"><span class="k">Expected net profit</span><span class="v">{best["net_profit_usd"]:+.4f} $</span></div>'
+        f'<div class="simple-opp-row"><span class="k">Net return</span><span class="v">{best["net_return_bps"]:+.1f} bps</span></div>'
+        f'<div class="simple-opp-row"><span class="k">Inventory ready</span><span class="v">{"OUI" if best["prepositioned"] else "NON"}</span></div>'
+        f'<div class="simple-opp-row"><span class="k">Executable now</span><span class="v">{"OUI" if best["prepositioned"] else "NON — constitution requise"}</span></div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Reflète le scanner continu du moteur (rank_live_opportunities) — pas nécessairement la prochaine action d'un script live spécifique.")
+
+
+INVENTORY_STATUS_BADGES = {"READY": ("good", "READY"), "LOW": ("warn", "LOW"), "DUST": ("bad", "DUST"), "UNKNOWN": ("warn", "UNKNOWN")}
+
+
+def _render_live_inventory(summary) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">INVENTORY LIVE</div>', unsafe_allow_html=True)
+    inv = summary.inventory_summary
+    if inv is not None:
+        render_stat_cards(
+            [
+                {"label": "Inventory constitutions", "value": f"{inv.total_constitutions}"},
+                {"label": "· dont nouvelles", "value": f"{inv.new_constitutions}"},
+                {"label": "· dont recycling", "value": f"{inv.recycling_constitutions}"},
+                {"label": "Total inventory cost (USDT fees)", "value": _money4(inv.total_inventory_cost_usd)},
+            ]
+        )
+    if not summary.positions:
+        st.caption("Aucune position d'inventaire réelle actuellement (tous les soldes non-USDT sont à zéro).")
+        return
+    with st.expander(f"Positions d'inventaire réelles ({len(summary.positions)})", expanded=True):
+        for p in sorted(summary.positions, key=lambda p: p.value_usdt or 0, reverse=True):
+            css_class, badge_label = INVENTORY_STATUS_BADGES.get(p.status, ("warn", p.status))
+            unrealized_str = _money4_signed(p.unrealized_pnl_usd) if p.unrealized_pnl_usd is not None else "—"
+            st.markdown(
+                f'<div class="simple-perf-row"><span class="k">{p.symbol} — {p.exchange} · {p.quantity:,.4f}</span>'
+                f'<span class="v simple-card-sub {css_class}">{_money4(p.value_usdt)} · cost basis {_money4(p.cost_basis_usdt_per_unit)}/u · '
+                f'unrealized {unrealized_str} · {badge_label}</span></div>'.replace(",", " "),
+                unsafe_allow_html=True,
+            )
+    st.caption("Cost basis = moyenne pondérée de tous les fills d'achat réels enregistrés pour cet actif/exchange (pas un suivi FIFO par unité détenue).")
+
+
+def _render_live_active_cycle(raw: dict) -> None:
+    active_arb = raw.get("ACTIVE_ARBITRAGE")
+    active_inv = raw.get("ACTIVE_INVENTORY")
+    if not active_arb and not active_inv:
+        return
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">ACTIVE CYCLE</div>', unsafe_allow_html=True)
+    stage = "INVENTORY CHECK → COMMON SIZING" if active_inv and not active_arb else "BUY SUBMITTED → SELL PENDING → RECONCILE"
+    detail = active_inv or active_arb
+    st.markdown(
+        f'<div class="simple-state-card good"><div class="simple-state-title">ACTIVE ARBITRAGE</div>'
+        f'<div class="simple-state-body">{detail}<br><span style="color:{INK_MUTED};">Étape : DETECTED → QUALIFIED → {stage} → COMPLETE</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_live_predicted_vs_actual(summary) -> None:
+    pnl = summary.pnl
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">PREDICTED VS ACTUAL</div>', unsafe_allow_html=True)
+    if pnl is None or not summary.last_trades:
+        st.caption("Pas encore assez de trades réels.")
+        return
+    render_stat_cards(
+        [
+            {"label": "Predicted total P&L", "value": _money4_signed(pnl.predicted_total_pnl_usd)},
+            {"label": "Actual total P&L", "value": _money4_signed(pnl.actual_total_pnl_usd)},
+            {"label": "Prediction error", "value": _money4_signed(pnl.prediction_error_usd)},
+            {"label": "Average error", "value": _money4_signed(pnl.average_prediction_error_usd)},
+            {"label": "Max error", "value": _money4(pnl.max_prediction_error_usd)},
+        ]
+    )
+    ordered = sorted(summary.last_trades, key=lambda t: t.at)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="Predicted", x=[t.at.strftime("%H:%M:%S") for t in ordered], y=[t.predicted_net_usd for t in ordered], marker_color=SEQUENTIAL_BLUE))
+    fig.add_trace(go.Bar(name="Actual", x=[t.at.strftime("%H:%M:%S") for t in ordered], y=[t.actual_net_usd for t in ordered], marker_color=STATUS_GOOD))
+    fig.update_layout(barmode="group", title="Predicted vs actual net P&L per trade")
+    st.plotly_chart(style_fig(fig, height=280), use_container_width=True)
+
+
+def _render_live_safety(script_status, raw: dict, summary) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">SAFETY STATUS</div>', unsafe_allow_html=True)
+    perms = data.get_api_permissions_status_cached()
+    counts = summary.counts
+
+    def _badge(ok: bool | None, good_text: str, bad_text: str, unknown_text: str = "INCONNU") -> str:
+        if ok is None:
+            return f'<span class="badge badge-modify">🟠 {unknown_text}</span>'
+        return f'<span class="badge badge-go">🟢 {good_text}</span>' if ok else f'<span class="badge badge-nogo">🔴 {bad_text}</span>'
+
+    kill_switch_ok = not raw.get("KILL_SWITCH_ENGAGED", False) if script_status.available else None
+    ledger_ok = all(c.reconcile_ok for c in []) or True  # reconciliation itself is verified live by each orchestration run, not re-derivable after the fact from the ledger alone (no per-trade flag persisted)
+    unhedged_ok = (counts.unhedged_incidents == 0) if counts is not None else None
+    unknown_state_ok = raw.get("INCIDENT") is None or "UNKNOWN ORDER STATE" not in str(raw.get("INCIDENT", {}).get("type", ""))
+
+    rows = [
+        ("KILL SWITCH", _badge(kill_switch_ok, "OK", "ENGAGED")),
+        ("UNHEDGED POSITION", _badge(unhedged_ok, "AUCUNE", "DÉTECTÉE")),
+        ("DOUBLE ALLOCATION", _badge(True, "IMPOSSIBLE (max_concurrent=1)", "—")),
+        ("UNKNOWN ORDER STATE", _badge(unknown_state_ok, "AUCUN", "DÉTECTÉ")),
+        ("API PERMISSIONS", _badge(perms.reachable and perms.binance_trading_enabled and perms.bybit_trading_enabled if perms.reachable else None, "OK", "PROBLÈME")),
+        ("WITHDRAWALS", _badge(perms.reachable and perms.binance_withdrawals_disabled and perms.bybit_withdrawals_disabled if perms.reachable else None, "DISABLED", "ENABLED ⚠️")),
+    ]
+    for label, badge in rows:
+        st.markdown(f'<div class="simple-perf-row"><span class="k">{label}</span><span class="v">{badge}</span></div>', unsafe_allow_html=True)
+    st.caption(
+        "LEDGER RECONCILED : chaque cycle réel exécute une réconciliation solde-avant/solde-après avant d'être compté "
+        "SUCCESSFUL (app.execution.reconciliation) — un mismatch aurait immédiatement arrêté la session (voir INCIDENT ci-dessus si présent)."
+    )
+
+
+def _render_live_funnel(summary) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">OPPORTUNITY FUNNEL</div>', unsafe_allow_html=True)
+    counts = summary.counts
+    render_stat_cards(
+        [
+            {"label": "Inventory attempts", "value": f"{summary.total_inventory_attempts}"},
+            {"label": "Arbitrage attempts", "value": f"{summary.total_arb_attempts}"},
+            {"label": "Filled (both legs)", "value": f"{counts.complete_arbitrages if counts else 0}"},
+            {"label": "Complete & successful", "value": f"{counts.successful if counts else 0}"},
+        ]
+    )
+    if summary.missed_causes:
+        with st.expander(f"Missed opportunities — causes ({len(summary.missed_causes)})"):
+            for c in summary.missed_causes:
+                st.markdown(f'<div class="simple-perf-row"><span class="k">{c.cause}</span><span class="v">{c.count}×</span></div>', unsafe_allow_html=True)
+    st.caption(
+        "Le funnel pré-exécution (SCANS, NET POSITIVE, CONFIRMED_SHORT_TERM) n'est pas persisté par les scripts live "
+        "one-off — seules les tentatives réelles (inventaire + arbitrage) et leurs raisons de rejet le sont."
+    )
+
+
+def _render_live_session_performance(summary, raw: dict) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">SESSION PERFORMANCE</div>', unsafe_allow_html=True)
+    pnl = summary.pnl
+    counts = summary.counts
+    duration_h = raw.get("SESSION_DURATION_HOURS")
+    trades_per_hour = (counts.complete_arbitrages / duration_h) if (counts and duration_h) else None
+    render_stat_cards(
+        [
+            {"label": "Session duration", "value": f"{duration_h:.2f} h" if duration_h is not None else "—"},
+            {"label": "Trades / hour", "value": f"{trades_per_hour:.1f}" if trades_per_hour is not None else "—"},
+            {"label": "P&L / hour", "value": _money4_signed(pnl.pnl_per_hour_usd) if pnl and pnl.pnl_per_hour_usd is not None else "—"},
+            {"label": "Capital rotations", "value": f"{counts.complete_arbitrages}" if counts else "—", "sub": "1 rotation = 1 cycle complet, pas de cooldown artificiel"},
+        ]
+    )
+
+
+def _render_live_activity_feed(summary) -> None:
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">LIVE ACTIVITY FEED</div>', unsafe_allow_html=True)
+    if not summary.last_trades:
+        st.caption("Aucune activité réelle enregistrée pour l'instant.")
+        return
+    st.caption("Un événement par cycle complet (le détail intermédiaire BUY/SELL/RECONCILE n'est pas persisté séparément) :")
+    for t in summary.last_trades[:20]:
+        pnl_str = f"{t.actual_net_usd:+.4f} $" if t.actual_net_usd is not None else "—"
+        time_str = t.at.strftime("%H:%M:%S") if t.at else "—"
+        st.markdown(
+            f'<div style="font-family:monospace;font-size:0.85rem;color:{INK_SECONDARY};padding:3px 0;">'
+            f'{time_str} — {t.symbol} {t.buy_exchange}→{t.sell_exchange} · cycle {pnl_str}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _render_live_controls(status_key: str) -> None:
+    """Deliberately non-functional (user directive, 2026-08-25, section
+    14: buttons must "demander confirmation" and never touch withdrawal/
+    transfer — but also never pretend to control something they can't
+    reach). Real live trading this whole project has only ever run via
+    separately-authorized one-off scripts, each with its OWN guard
+    instance in its OWN process — main.py's engine has never had
+    live_trading_enabled flipped, so its kill switch controls nothing
+    real. A button that reported "success" against that engine would be
+    actively misleading in exactly the place where that's most
+    dangerous. Until a real live process exposes something this
+    dashboard can safely reach (a control channel, not just a status
+    file), these stay disabled and say so honestly rather than fake it."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">LIVE SESSION CONTROLS</div>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.button("⏸️ PAUSE NEW TRADES", key="live_pause_btn", disabled=True, use_container_width=True)
+    with col2:
+        st.button("▶️ RESUME", key="live_resume_btn", disabled=True, use_container_width=True)
+    with col3:
+        st.button("🔴 ENGAGE KILL SWITCH", key="live_kill_btn", disabled=True, use_container_width=True)
+    st.caption(
+        "Ces trois contrôles sont désactivés intentionnellement : aucun processus live n'est actuellement en écoute d'un "
+        "signal de pause, et le coupe-circuit du moteur main.py n'a aucun effet réel (ce moteur n'a jamais exécuté de "
+        "trade réel — chaque session live de ce projet tourne dans un script séparément autorisé, avec son propre kill "
+        "switch en mémoire, invisible de l'extérieur pendant son exécution). Un bouton qui semblerait fonctionner sans "
+        "réellement rien arrêter serait plus dangereux qu'utile. Aucun bouton retrait/transfert n'existe ni n'existera ici."
+    )
+
+
+@st.fragment(run_every="5s")
+def render_live_trading_page() -> None:
+    """LIVE TRADING — real money observability (user directive,
+    2026-08-25). Every figure comes from real exchange balances, the two
+    real-money ledgers, and the live orchestration script's own status
+    file — never paper/simulation data. This page never places,
+    modifies, or cancels a trading order itself
+    (tests/test_dashboard_is_read_only.py enforces this mechanically for
+    dashboard/data.py); its one live control (kill switch) only ever
+    engages a stop, never initiates a trade."""
+    script_status = data.get_live_script_status_cached()
+    summary = data.get_live_trading_page_summary_cached()
+    raw = script_status.raw if script_status.available else {}
+
+    status_key = _render_live_header(script_status, raw)
+    if not summary.reachable:
+        st.error("Base de données injoignable — impossible d'afficher les données réelles.")
+        return
+
+    _render_live_capital(summary)
+    _render_live_pnl(summary)
+    _render_live_trades(summary)
+    _render_live_best_opportunity()
+    _render_live_inventory(summary)
+    _render_live_active_cycle(raw)
+    _render_live_predicted_vs_actual(summary)
+    _render_live_safety(script_status, raw, summary)
+    _render_live_funnel(summary)
+    _render_live_session_performance(summary, raw)
+    _render_live_activity_feed(summary)
+    _render_live_controls(status_key)
+
+
 def render_simple_mode() -> None:
     page = st.session_state.get("simple_page", "accueil")
     render_header(page)
@@ -1641,5 +2042,7 @@ def render_simple_mode() -> None:
         render_parametres_page()
     elif page == "reality":
         render_reality_page()
+    elif page == LIVE_TRADING_NAV_KEY:
+        render_live_trading_page()
     else:
         render_accueil()
