@@ -2229,6 +2229,72 @@ def _render_v5_true_economic_live() -> None:
         st.caption(f"OKX SHADOW TRUE POSITIVES (même fenêtre, OKX jamais tradé réellement) = {okx_positives}")
 
 
+def _render_v5_continuous_okx_validation() -> None:
+    """V5 CONTINUOUS OKX VALIDATION (user directive, 2026-08-25, "MISSION
+    -- CONTINUOUS OKX TRUE-ECONOMIC VALIDATION"). Read-only, same pattern
+    as every other V5 section -- displays what the persistent,
+    systemd-managed scanner (robotcripto-live-v5-continuous-okx.service)
+    reports about itself, never controls it. OKX_VALIDATION is the
+    section's own state machine: WAITING (scanning, no real order placed
+    yet) / EXECUTING (mid real order) / VALIDATED (the one permitted real
+    OKX cycle completed and reconciled) / SAFE_STOP (pre-flight or
+    reconciliation failure halted the process)."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">V5 CONTINUOUS OKX VALIDATION</div>', unsafe_allow_html=True)
+    status = data.get_v5_continuous_okx_status_cached()
+    if not status.available:
+        st.caption("Le scanner de validation OKX continue n'a pas encore publié de statut (pas encore démarré, ou vient de démarrer).")
+        return
+    raw = status.raw
+    if status.stale:
+        st.warning("Statut de validation OKX obsolète (le service ne semble plus tourner -- vérifier systemctl status robotcripto-live-v5-continuous-okx).")
+
+    validation_state = raw.get("OKX_VALIDATION", "—")
+    state_icon = {"WAITING": "⏳", "EXECUTING": "⚡", "VALIDATED": "✅", "SAFE_STOP": "⛔"}.get(validation_state, "—")
+    st.caption(f"OKX_VALIDATION = {state_icon} {validation_state}")
+
+    cols = st.columns(4)
+    okx_usdt = raw.get("OKX_USDT")
+    reserve_floor = raw.get("OKX_RESERVE_FLOOR")
+    buy_capacity = raw.get("OKX_BUY_CAPACITY")
+    wait_seconds = raw.get("TIME_WAITING_FOR_FIRST_OKX_CYCLE_SECONDS")
+    cols[0].metric("OKX USDT", f"{okx_usdt:.4f} $" if okx_usdt is not None else "—")
+    cols[1].metric("RESERVE FLOOR", f"{reserve_floor:.4f} $" if reserve_floor is not None else "—")
+    cols[2].metric("BUY CAPACITY", f"{buy_capacity:.4f} $" if buy_capacity is not None else "—")
+    wait_display = f"{wait_seconds / 60:.1f} min" if wait_seconds is not None else "—"
+    cols[3].metric("TIME WAITING FOR 1ST CYCLE", wait_display)
+
+    cols2 = st.columns(4)
+    cols2[0].metric("SCANS", raw.get("SCANS", "—"))
+    cols2[1].metric("OKX CANDIDATES EVALUATED", raw.get("OKX_CANDIDATES_EVALUATED", "—"))
+    cols2[2].metric("TRUE ECONOMIC POSITIVES", raw.get("TRUE_ECONOMIC_POSITIVES", "—"))
+    cols2[3].metric("EXECUTABLE TRUE POSITIVES", raw.get("EXECUTABLE_TRUE_POSITIVES", "—"))
+
+    cols3 = st.columns(5)
+    cols3[0].metric("REJECTED: COST BASIS", raw.get("REJECTED_UNKNOWN_COST_BASIS", "—"))
+    cols3[1].metric("REJECTED: INVENTORY", raw.get("REJECTED_INVENTORY", "—"))
+    cols3[2].metric("REJECTED: CAPITAL", raw.get("REJECTED_CAPITAL", "—"))
+    cols3[3].metric("REJECTED: ECONOMICS", raw.get("REJECTED_ECONOMICS", "—"))
+    cols3[4].metric("REJECTED: MIN NOTIONAL", raw.get("REJECTED_MIN_NOTIONAL", "—"))
+
+    best = raw.get("BEST_OKX_OPPORTUNITY_NOW")
+    if best:
+        blocker = best.get("blocker") or "none — executable"
+        edge = best.get("true_economic_edge")
+        edge_display = f"{edge:+.6f} $" if edge is not None else "—"
+        st.caption(f"BEST OKX OPPORTUNITY NOW: {best.get('symbol')} {best.get('route')} — TRUE_ECONOMIC_EDGE={edge_display} — BLOCKER={blocker}")
+    else:
+        st.caption("Aucune opportunité OKX évaluée pour l'instant sur ce cycle de scan.")
+
+    if validation_state == "VALIDATED":
+        st.success(
+            f"PREMIÈRE VALIDATION OKX RÉELLE COMPLÈTE: {raw.get('ROUTE', '—')} {raw.get('SYMBOL', '—')} — "
+            f"TRUE_ECONOMIC_PNL={raw.get('TRUE_ECONOMIC_PNL', 0.0):+.6f} $ — "
+            f"RECONCILIATION_ERROR={raw.get('RECONCILIATION_ERROR', 0.0):+.6f} $ — exécution réelle arrêtée définitivement (item 8)."
+        )
+    elif validation_state == "SAFE_STOP":
+        st.error(f"SAFE STOP: {raw.get('REASON', '—')}")
+
+
 def _render_live_controls(status_key: str) -> None:
     """Deliberately non-functional (user directive, 2026-08-25, section
     14: buttons must "demander confirmation" and never touch withdrawal/
@@ -2293,6 +2359,7 @@ def render_live_trading_page() -> None:
     _render_live_activity_feed(summary)
     _render_v5_true_economic_live()
     _render_v5_shadow_three_exchange()
+    _render_v5_continuous_okx_validation()
     _render_live_controls(status_key)
 
 

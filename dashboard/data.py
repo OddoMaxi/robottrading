@@ -1681,6 +1681,40 @@ def get_v5_live_status_cached() -> V5LiveStatus:
     return fetch_v5_live_status()
 
 
+# V5 CONTINUOUS OKX VALIDATION (user directive, 2026-08-25, "MISSION --
+# CONTINUOUS OKX TRUE-ECONOMIC VALIDATION"). Same read-only status-file
+# pattern as every other V5 section on this page -- this page never
+# controls the scanner (a persistent, systemd-managed process,
+# robotcripto-live-v5-continuous-okx.service), only displays what its
+# own status file reports.
+V5_CONTINUOUS_OKX_STATUS_FILE = Path("/tmp/robotcripto_v5_continuous_okx_status.json")
+V5_CONTINUOUS_OKX_STATUS_STALE_AFTER_SECONDS = 120.0  # one scan cycle can legitimately take ~60-90s under real API load
+
+
+@dataclass(slots=True)
+class V5ContinuousOkxStatus:
+    available: bool
+    stale: bool = False
+    age_seconds: float | None = None
+    raw: dict = field(default_factory=dict)
+
+
+def fetch_v5_continuous_okx_status() -> V5ContinuousOkxStatus:
+    try:
+        mtime = V5_CONTINUOUS_OKX_STATUS_FILE.stat().st_mtime
+        age = datetime.now(UTC).timestamp() - mtime
+        payload = json.loads(V5_CONTINUOUS_OKX_STATUS_FILE.read_text())
+        stale = age > V5_CONTINUOUS_OKX_STATUS_STALE_AFTER_SECONDS
+        return V5ContinuousOkxStatus(available=True, stale=stale, age_seconds=age, raw=payload)
+    except Exception:
+        return V5ContinuousOkxStatus(available=False)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def get_v5_continuous_okx_status_cached() -> V5ContinuousOkxStatus:
+    return fetch_v5_continuous_okx_status()
+
+
 async def _fresh_price(exchange: str, binance_read: BinanceAccountClient, bybit_read: BybitClient, symbol: str) -> float | None:
     """Best-effort current price for one symbol on one exchange -- mid of
     bid/ask, or whichever side is available. Never raises."""
