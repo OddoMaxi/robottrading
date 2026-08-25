@@ -23,6 +23,11 @@ from app.config.settings import get_settings
 from app.database.models import OpportunityRecord, PriceSnapshot, VirtualPortfolioRecord
 from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.bybit_client import BybitClient, parse_all_wallet_balances, parse_wallet_balance
+from app.execution.capital_rebalancer import (
+    compute_capital_imbalance_score,
+    compute_reserve_floor,
+    is_rebalance_needed,
+)
 from app.reporting.live_trading_dashboard import (
     InventoryConstitutionSummary,
     InventoryPosition,
@@ -1622,6 +1627,11 @@ class LiveTradingPageSummary:
     binance_inventory_value_usdt: float = 0.0
     bybit_inventory_value_usdt: float = 0.0
     balances_reachable: bool = False
+    binance_reserve_floor: float = 0.0
+    bybit_reserve_floor: float = 0.0
+    capital_imbalance_score: float = 0.0
+    rebalance_needed: bool = False
+    current_rebalance_action: str | None = None  # e.g. "SELL_TO_USDT -- binance RVN (~79.98 USDT)"; None when no rebalance is needed
 
 
 async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
@@ -1692,12 +1702,30 @@ async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
     except Exception:
         pass
 
+    max_notional = get_settings().max_notional_per_leg_usdt
+    binance_floor = compute_reserve_floor(max_notional)
+    bybit_floor = compute_reserve_floor(max_notional)
+    imbalance_score = compute_capital_imbalance_score(binance_usdt or 0.0, bybit_usdt or 0.0)
+    rebalance_needed = is_rebalance_needed(binance_usdt or 0.0, bybit_usdt or 0.0, binance_floor, bybit_floor) if balances_reachable else False
+
+    current_rebalance_action = None
+    if rebalance_needed:
+        depleted_exchange = "binance" if (binance_usdt or 0.0) < binance_floor else "bybit"
+        candidates = [p for p in positions if p.exchange == depleted_exchange and p.value_usdt]
+        top = max(candidates, key=lambda p: p.value_usdt, default=None)
+        if top is not None:
+            current_rebalance_action = f"SELL_TO_USDT -- {depleted_exchange} {top.symbol} (~{top.value_usdt:.2f} USDT)"
+        else:
+            current_rebalance_action = f"{depleted_exchange} is below its reserve floor but holds no reconvertible inventory"
+
     return LiveTradingPageSummary(
         reachable=True, now=now, session_start=session_start, pnl=pnl, last_trades=last_trades, counts=counts,
         inventory_summary=inv_summary, positions=positions, missed_causes=missed_causes,
         total_arb_attempts=len(arb_rows), total_inventory_attempts=len(inv_rows),
         binance_usdt=binance_usdt, bybit_usdt=bybit_usdt,
         binance_inventory_value_usdt=binance_inv_value, bybit_inventory_value_usdt=bybit_inv_value, balances_reachable=balances_reachable,
+        binance_reserve_floor=binance_floor, bybit_reserve_floor=bybit_floor, capital_imbalance_score=imbalance_score,
+        rebalance_needed=rebalance_needed, current_rebalance_action=current_rebalance_action,
     )
 
 

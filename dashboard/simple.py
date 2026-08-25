@@ -1736,6 +1736,56 @@ def _render_live_capital(summary) -> None:
     st.caption("Jamais de solde paper — chaque chiffre ci-dessus vient d'un appel compte réel Binance/Bybit fait au moment du rafraîchissement.")
 
 
+def _render_live_capital_rebalancer(summary, raw: dict) -> None:
+    """CAPITAL REBALANCER section (user directive, 2026-08-25, dashboard
+    wiring). The floors/imbalance/rebalance-needed/current-action fields
+    are computed LIVE from real balances (app.execution.capital_
+    rebalancer) every refresh -- they reflect the true current state
+    regardless of whether any live script is currently running. The
+    P&L-breakdown and rebalance-count fields only exist in the context
+    of an actual session, so they come from that session's own status
+    file (raw) and read "—" when no session has reported them."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">CAPITAL REBALANCER</div>', unsafe_allow_html=True)
+    render_stat_cards(
+        [
+            {"label": "BINANCE RESERVE FLOOR", "value": _money4(summary.binance_reserve_floor)},
+            {"label": "BYBIT RESERVE FLOOR", "value": _money4(summary.bybit_reserve_floor)},
+            {"label": "CAPITAL IMBALANCE SCORE", "value": f"{summary.capital_imbalance_score * 100:.1f} %"},
+            {"label": "REBALANCE NEEDED", "value": "OUI" if summary.rebalance_needed else "NON"},
+        ]
+    )
+    if summary.rebalance_needed:
+        st.markdown(
+            f'<div class="simple-state-card warn"><div class="simple-state-title">CURRENT REBALANCE ACTION</div>'
+            f'<div class="simple-state-body">{summary.current_rebalance_action}</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Les deux exchanges sont au-dessus de leur reserve floor — aucun rééquilibrage requis actuellement.")
+
+    total_rebalances = raw.get("TOTAL_REBALANCES")
+    rebalancing_cost = raw.get("REBALANCING_COST_USD")
+    arbitrage_pnl = raw.get("ARBITRAGE_PNL")
+    inventory_pnl = raw.get("INVENTORY_PNL")
+    rebalancing_pnl = raw.get("REBALANCING_PNL")
+    true_net_pnl = raw.get("TRUE_SESSION_NET_PNL")
+    render_stat_cards(
+        [
+            {"label": "TOTAL REBALANCES (session)", "value": f"{total_rebalances}" if total_rebalances is not None else "—"},
+            {"label": "REBALANCING COST (session)", "value": _money4(rebalancing_cost) if rebalancing_cost is not None else "—"},
+            {"label": "ARBITRAGE P&L (session)", "value": _money4_signed(arbitrage_pnl) if arbitrage_pnl is not None else "—"},
+            {"label": "INVENTORY P&L (session)", "value": _money4_signed(inventory_pnl) if inventory_pnl is not None else "—"},
+            {"label": "REBALANCING P&L (session)", "value": _money4_signed(rebalancing_pnl) if rebalancing_pnl is not None else "—"},
+            {"label": "TRUE SESSION NET P&L", "value": _money4_signed(true_net_pnl) if true_net_pnl is not None else "—"},
+        ]
+    )
+    st.caption(
+        "TRUE SESSION NET P&L = ARBITRAGE P&L + INVENTORY P&L + REBALANCING P&L — un rebalance qui coûte réduit "
+        "toujours le résultat économique global, jamais traité comme neutre. Ces six derniers champs viennent du "
+        "fichier de statut de la session live la plus récente (« — » si aucune session n'a encore tourné avec cette logique)."
+    )
+
+
 def _render_live_pnl(summary) -> None:
     pnl = summary.pnl
     st.markdown('<div class="simple-card-label" style="margin-top:22px;">REAL NET P&L</div>', unsafe_allow_html=True)
@@ -2018,6 +2068,7 @@ def render_live_trading_page() -> None:
         return
 
     _render_live_capital(summary)
+    _render_live_capital_rebalancer(summary, raw)
     _render_live_pnl(summary)
     _render_live_trades(summary)
     _render_live_best_opportunity()
