@@ -1632,6 +1632,22 @@ class LiveTradingPageSummary:
     capital_imbalance_score: float = 0.0
     rebalance_needed: bool = False
     current_rebalance_action: str | None = None  # e.g. "SELL_TO_USDT -- binance RVN (~79.98 USDT)"; None when no rebalance is needed
+    # --- AUTONOMOUS SELF-HEALING OPERATIONS LAYER (item 10) -- all read
+    # straight off the same live-script status file above; None/empty
+    # when no self-healing-aware script (v3+) is the one currently
+    # writing that file, e.g. the file is stale or absent, or a plain
+    # v2-shaped session is running.
+    autonomous_operations: str | None = None
+    current_incident: str | None = None
+    incident_level: str | None = None
+    auto_recovery_action: str | None = None
+    recovered_incidents_count: int = 0
+    symbols_temporarily_paused: list[str] = field(default_factory=list)
+    exchange_status: dict = field(default_factory=dict)
+    last_auto_recovery: str | None = None
+    global_kill_switch: bool = False
+    safe_to_resume: bool = True
+    activity_feed: list[str] = field(default_factory=list)
 
 
 async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
@@ -1718,6 +1734,7 @@ async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
         else:
             current_rebalance_action = f"{depleted_exchange} is below its reserve floor but holds no reconvertible inventory"
 
+    raw = script_status.raw if script_status.available else {}
     return LiveTradingPageSummary(
         reachable=True, now=now, session_start=session_start, pnl=pnl, last_trades=last_trades, counts=counts,
         inventory_summary=inv_summary, positions=positions, missed_causes=missed_causes,
@@ -1726,6 +1743,17 @@ async def fetch_live_trading_page_summary() -> LiveTradingPageSummary:
         binance_inventory_value_usdt=binance_inv_value, bybit_inventory_value_usdt=bybit_inv_value, balances_reachable=balances_reachable,
         binance_reserve_floor=binance_floor, bybit_reserve_floor=bybit_floor, capital_imbalance_score=imbalance_score,
         rebalance_needed=rebalance_needed, current_rebalance_action=current_rebalance_action,
+        autonomous_operations=raw.get("AUTONOMOUS_OPERATIONS"),
+        current_incident=raw.get("CURRENT_INCIDENT"),
+        incident_level=raw.get("INCIDENT_LEVEL"),
+        auto_recovery_action=raw.get("AUTO_RECOVERY_ACTION"),
+        recovered_incidents_count=raw.get("RECOVERED_INCIDENTS") or 0,
+        symbols_temporarily_paused=raw.get("SYMBOLS_TEMPORARILY_PAUSED") or [],
+        exchange_status=raw.get("EXCHANGE_STATUS") or {},
+        last_auto_recovery=raw.get("LAST_AUTO_RECOVERY"),
+        global_kill_switch=bool(raw.get("GLOBAL_KILL_SWITCH", False)),
+        safe_to_resume=bool(raw.get("SAFE_TO_RESUME", True)),
+        activity_feed=raw.get("ACTIVITY_FEED") or [],
     )
 
 

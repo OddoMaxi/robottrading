@@ -1786,6 +1786,58 @@ def _render_live_capital_rebalancer(summary, raw: dict) -> None:
     )
 
 
+def _render_live_self_healing(summary) -> None:
+    """AUTONOMOUS SELF-HEALING OPERATIONS LAYER section (user directive,
+    2026-08-25, item 10). All fields come straight from the live
+    script's own status file — a plain v2-shaped session (or no session
+    at all) simply reports AUTONOMOUS OPERATIONS = "—" rather than a
+    misleading ACTIVE/INACTIVE guess, since this dashboard cannot itself
+    know which orchestrator version is running."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">AUTONOMOUS SELF-HEALING OPERATIONS</div>', unsafe_allow_html=True)
+    render_stat_cards(
+        [
+            {"label": "AUTONOMOUS OPERATIONS", "value": summary.autonomous_operations or "—"},
+            {"label": "RECOVERED INCIDENTS (session)", "value": f"{summary.recovered_incidents_count}"},
+            {"label": "SAFE TO RESUME", "value": "OUI" if summary.safe_to_resume else "NON"},
+            {"label": "GLOBAL KILL SWITCH", "value": "ENGAGED" if summary.global_kill_switch else "OK"},
+        ]
+    )
+
+    if summary.current_incident:
+        st.markdown(
+            f'<div class="simple-state-card warn"><div class="simple-state-title">CURRENT INCIDENT — {summary.incident_level or "?"}</div>'
+            f'<div class="simple-state-body">{summary.current_incident}<br/>Action : {summary.auto_recovery_action or "—"}</div></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("Aucun incident actif.")
+
+    exch_status = summary.exchange_status or {}
+    if exch_status:
+        render_stat_cards([{"label": f"EXCHANGE STATUS — {ex.upper()}", "value": status} for ex, status in exch_status.items()])
+
+    if summary.symbols_temporarily_paused:
+        st.markdown(
+            f'<div class="simple-state-card warn"><div class="simple-state-title">SYMBOLS TEMPORARILY PAUSED</div>'
+            f'<div class="simple-state-body">{", ".join(summary.symbols_temporarily_paused)}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    if summary.last_auto_recovery:
+        st.markdown(
+            f'<div class="simple-state-card good"><div class="simple-state-title">LAST AUTO-RECOVERY</div>'
+            f'<div class="simple-state-body">{summary.last_auto_recovery}</div></div>',
+            unsafe_allow_html=True,
+        )
+    st.caption(
+        "DETECT → CLASSIFY → APPLY KNOWN SAFE RECOVERY → REVALIDATE → RESUME pour les problèmes opérationnels connus "
+        "(rebalance de capital, ledger mismatch expliqué, rejet local d'une seule paire, erreurs réseau répétées). "
+        "Tout incident touchant la sécurité réelle du capital (exposition non couverte, échec de neutralisation, état "
+        "d'ordre inconnu, incohérence de solde inexpliquée, violation de sécurité de capital) reste un SAFE STOP global, "
+        "jamais auto-résolu."
+    )
+
+
 def _render_live_pnl(summary) -> None:
     pnl = summary.pnl
     st.markdown('<div class="simple-card-label" style="margin-top:22px;">REAL NET P&L</div>', unsafe_allow_html=True)
@@ -2004,6 +2056,17 @@ def _render_live_session_performance(summary, raw: dict) -> None:
 
 def _render_live_activity_feed(summary) -> None:
     st.markdown('<div class="simple-card-label" style="margin-top:22px;">LIVE ACTIVITY FEED</div>', unsafe_allow_html=True)
+    if summary.activity_feed:
+        # A self-healing-aware (v3+) session's own fine-grained feed --
+        # includes AUTO-RECOVERY / reserve-restored / revalidated /
+        # RESUMED lines the per-cycle summary below can't show.
+        st.caption("Flux détaillé de la session live en cours (y compris les événements d'auto-récupération) :")
+        for line in reversed(summary.activity_feed[-30:]):
+            st.markdown(
+                f'<div style="font-family:monospace;font-size:0.85rem;color:{INK_SECONDARY};padding:3px 0;">{line}</div>',
+                unsafe_allow_html=True,
+            )
+        return
     if not summary.last_trades:
         st.caption("Aucune activité réelle enregistrée pour l'instant.")
         return
@@ -2069,6 +2132,7 @@ def render_live_trading_page() -> None:
 
     _render_live_capital(summary)
     _render_live_capital_rebalancer(summary, raw)
+    _render_live_self_healing(summary)
     _render_live_pnl(summary)
     _render_live_trades(summary)
     _render_live_best_opportunity()
