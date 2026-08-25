@@ -30,7 +30,13 @@ MAIN_ENTRYPOINT = REPO_ROOT / "main.py"
 EXECUTOR = APP_DIR / "execution" / "live_arbitrage_executor.py"
 INVENTORY_EXECUTOR = APP_DIR / "execution" / "inventory_constitution_executor.py"
 AUTHORIZED_EXECUTORS = (EXECUTOR, INVENTORY_EXECUTOR)
-DANGEROUS_MODULES = ("binance_live_trade_client", "bybit_live_trade_client")
+# okx_live_trade_client (added 2026-08-25, "integre OKX aussi") is
+# included here even though it isn't imported by either authorized
+# executor yet -- the point is that NOTHING under app/ may import it
+# until OKX is deliberately wired into one of them, exactly the same
+# "capability exists, but is structurally unreachable" posture Binance/
+# Bybit started from before Phase 3A.
+DANGEROUS_MODULES = ("binance_live_trade_client", "bybit_live_trade_client", "okx_live_trade_client")
 
 
 def _imported_module_names(source: str) -> set[str]:
