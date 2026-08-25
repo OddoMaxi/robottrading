@@ -51,8 +51,7 @@ import uuid
 from dataclasses import dataclass
 
 from app.execution.capital_rebalancer import ReserveImpact, compute_reserve_floor, evaluate_reserve_impact
-from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
-from app.execution.live_arbitrage_executor import compute_common_dual_leg_qty
+from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_common_dual_leg_qty, compute_dual_leg_quote
 from app.execution.true_economic_ledger import CostBasisPool, LedgerState, apply_buy, get_pool, put_pool, seed_pool
 from app.execution.true_economic_pretrade import (
     InventoryConstitutionQuote, RebalanceSimulation, TrueEconomicQuote,

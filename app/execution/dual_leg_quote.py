@@ -186,3 +186,32 @@ def compute_dual_leg_quote(
         sell_fee_source=sell_leg.fee_source,
         computed_at=now,
     )
+
+
+def compute_common_dual_leg_qty(quote_executable_qty: float, sell_exchange_available_qty: float, buy_step_size: float, sell_step_size: float) -> float:
+    """Pure function (item 1, user directive, 2026-08-24, post-incident:
+    common dual-leg sizing). A leg's quantity must NEVER be derived
+    blindly from the other leg's fill — the first real arbitrage
+    attempt bought 3003.5 RVN (sized purely from a USDT notional) and
+    then tried to sell that same 3003.5 on Bybit, which only held
+    2914.9821 real RVN, because the two legs had never been sized
+    against one shared, pre-trade quantity ceiling.
+
+    common_qty is that shared ceiling: never more than
+    quote_executable_qty (already the price/depth/notional-aware
+    minimum of what each leg's own market data supports — see
+    compute_dual_leg_quote.executable_qty) and never more than what the
+    sell exchange actually holds right now. Rounded down to whichever
+    step size is coarser, so the result is valid on both exchanges.
+
+    Lives here (not in live_arbitrage_executor, which imports it) so a
+    read-only script can size a dual-leg quantity without importing an
+    order-capable module — app.operations.dangerous_module_guard treats
+    any import of live_arbitrage_executor as disqualifying for a
+    "REAL ORDERS = 0" script, and this function has no order-placement
+    logic of its own to justify that coupling."""
+    common_qty_raw = min(quote_executable_qty, sell_exchange_available_qty)
+    if common_qty_raw <= 0:
+        return 0.0
+    common_step = max(buy_step_size, sell_step_size)
+    return round_down_to_step(common_qty_raw, common_step) if common_step > 0 else common_qty_raw

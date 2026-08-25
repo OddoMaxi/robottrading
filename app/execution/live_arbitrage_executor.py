@@ -56,7 +56,7 @@ from app.execution.binance_filters import round_down_to_step
 from app.execution.binance_live_trade_client import BinanceLiveTradeClient, aggregate_binance_trades
 from app.execution.bybit_client import BybitClient, parse_wallet_balance
 from app.execution.bybit_live_trade_client import BybitLiveTradeClient
-from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
+from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_common_dual_leg_qty, compute_dual_leg_quote
 from app.execution.live_guard import LiveExecutionRefused, live_guard
 from app.execution.okx_account_client import OkxAccountClient
 from app.execution.okx_live_trade_client import OkxLiveTradeClient
@@ -112,28 +112,6 @@ def net_base_qty_after_fee(gross_qty: float, fee_asset: str | None, fee_amount: 
     if fee_asset == base_asset:
         return max(0.0, gross_qty - fee_amount)
     return gross_qty
-
-
-def compute_common_dual_leg_qty(quote_executable_qty: float, sell_exchange_available_qty: float, buy_step_size: float, sell_step_size: float) -> float:
-    """Pure function (item 1, user directive, 2026-08-24, post-incident:
-    common dual-leg sizing). A leg's quantity must NEVER be derived
-    blindly from the other leg's fill — the first real arbitrage
-    attempt bought 3003.5 RVN (sized purely from a USDT notional) and
-    then tried to sell that same 3003.5 on Bybit, which only held
-    2914.9821 real RVN, because the two legs had never been sized
-    against one shared, pre-trade quantity ceiling.
-
-    common_qty is that shared ceiling: never more than
-    quote_executable_qty (already the price/depth/notional-aware
-    minimum of what each leg's own market data supports — see
-    compute_dual_leg_quote.executable_qty) and never more than what the
-    sell exchange actually holds right now. Rounded down to whichever
-    step size is coarser, so the result is valid on both exchanges."""
-    common_qty_raw = min(quote_executable_qty, sell_exchange_available_qty)
-    if common_qty_raw <= 0:
-        return 0.0
-    common_step = max(buy_step_size, sell_step_size)
-    return round_down_to_step(common_qty_raw, common_step) if common_step > 0 else common_qty_raw
 
 
 class ArbitrageOutcome(StrEnum):

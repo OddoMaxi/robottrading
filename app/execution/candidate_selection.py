@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from app.execution.live_arbitrage_executor import compute_common_dual_leg_qty
+from app.execution.dual_leg_quote import compute_common_dual_leg_qty
 
 
 class CandidateStatus(StrEnum):
