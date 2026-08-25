@@ -9,3 +9,11 @@ venv/
 *.egg-info/
 .DS_Store
 .claude/
+
+# Runtime state for the AUTONOMOUS 24/7 operations layer (user
+# directive, 2026-08-25) -- kill-switch state, order-intent log,
+# incident knowledge base, capital-scaling observations, session
+# snapshots. Real, live, VPS-local data, never source code -- must
+# never be committed or accidentally clobbered by a deploy.
+/data/
+

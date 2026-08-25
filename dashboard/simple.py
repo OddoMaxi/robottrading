@@ -1687,6 +1687,9 @@ def _render_live_header(script_status, raw: dict) -> str:
     duration_h = raw.get("SESSION_DURATION_HOURS")
     duration_str = f"{duration_h:.2f} h" if duration_h is not None else "—"
     now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    uptime = raw.get("UPTIME")
+    autonomous_mode = raw.get("AUTONOMOUS_MODE")
+    self_healing_status = raw.get("SELF_HEALING_STATUS")
 
     st.markdown(
         f'<div style="padding:16px 20px;border:2px solid #dc2626;border-radius:14px;'
@@ -1695,7 +1698,12 @@ def _render_live_header(script_status, raw: dict) -> str:
         f'<div style="font-size:1.05rem;font-weight:700;color:{status_color};margin-top:6px;">{status_label}</div>'
         f'<div style="font-size:0.85rem;color:{INK_MUTED};margin-top:6px;">'
         f"SESSION START : {session_start} &nbsp;·&nbsp; DURÉE : {duration_str} &nbsp;·&nbsp; MAINTENANT : {now_str}</div>"
-        f"</div>",
+        + (
+            f'<div style="font-size:0.85rem;color:{INK_MUTED};margin-top:4px;">'
+            f"UPTIME : {uptime} &nbsp;·&nbsp; AUTONOMOUS MODE : {autonomous_mode} &nbsp;·&nbsp; SELF-HEALING : {self_healing_status}</div>"
+            if uptime is not None else ""
+        )
+        + "</div>",
         unsafe_allow_html=True,
     )
     if not script_status.available:
@@ -1845,7 +1853,7 @@ def _render_live_self_healing(summary) -> None:
     )
 
 
-def _render_live_pnl(summary) -> None:
+def _render_live_pnl(summary, raw: dict) -> None:
     pnl = summary.pnl
     st.markdown('<div class="simple-card-label" style="margin-top:22px;">REAL NET P&L</div>', unsafe_allow_html=True)
     if pnl is None:
@@ -1853,7 +1861,7 @@ def _render_live_pnl(summary) -> None:
         return
     color = STATUS_GOOD if pnl.total_pnl_usd >= 0 else STATUS_CRITICAL
     render_live_number_card(
-        "P&L RÉEL — TOTAL DEPUIS LE DÉBUT DU LIVE",
+        "P&L RÉEL (ARBITRAGE SEUL) — TOTAL DEPUIS LE DÉBUT DU LIVE",
         [
             {"value": pnl.total_pnl_usd, "decimals": 4, "big": True, "suffix": " $", "signed": True, "color": color},
             {"value": pnl.today_pnl_usd, "decimals": 4, "suffix": " $", "signed": True, "label": "Aujourd'hui :", "color": INK_SECONDARY},
@@ -1870,7 +1878,21 @@ def _render_live_pnl(summary) -> None:
             {"label": "Win rate", "value": f"{pnl.win_rate_pct:.1f} %" if pnl.win_rate_pct is not None else "—"},
         ]
     )
-    st.caption("P&L calculé exclusivement depuis les fills et frais réels des exchanges (live_arbitrage_executions) — jamais depuis des données paper.")
+    st.caption("P&L ci-dessus calculé exclusivement depuis les fills et frais réels des exchanges (live_arbitrage_executions) — jamais depuis des données paper.")
+
+    today_true = raw.get("TODAY_TRUE_NET_PNL")
+    session_true = raw.get("TRUE_SESSION_NET_PNL")
+    if today_true is not None or session_true is not None:
+        render_stat_cards(
+            [
+                {"label": "TODAY TRUE NET P&L", "value": _money4_signed(today_true) if today_true is not None else "—"},
+                {"label": "SESSION TRUE NET P&L", "value": _money4_signed(session_true) if session_true is not None else "—"},
+            ]
+        )
+        st.caption(
+            "TRUE NET P&L = ARBITRAGE P&L + INVENTORY P&L + REBALANCING P&L — inclut le coût/gain réel du "
+            "rebalancing de capital, contrairement au P&L arbitrage seul ci-dessus."
+        )
 
 
 def _render_live_trades(summary) -> None:
@@ -2140,7 +2162,7 @@ def render_live_trading_page() -> None:
     _render_live_capital(summary)
     _render_live_capital_rebalancer(summary, raw)
     _render_live_self_healing(summary)
-    _render_live_pnl(summary)
+    _render_live_pnl(summary, raw)
     _render_live_trades(summary)
     _render_live_best_opportunity()
     _render_live_inventory(summary)
