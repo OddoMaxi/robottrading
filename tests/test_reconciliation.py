@@ -139,6 +139,71 @@ def test_partial_consumption_leaves_correct_residual_for_a_future_cycle():
     # identity composes across consecutive cycles.
 
 
+# ---- FIX 3 (user directive, 2026-08-25): exact RVN rebalance-mismatch
+# incident replay -------------------------------------------------------------
+#
+# Scan 2 of the first CONTINUOUS LIVE V2 session: REBALANCE_FIRST sold
+# 2192.5 RVN on Binance (order 1344692249) to fund the upcoming arbitrage
+# buy, which then bought back net 2125.1727 RVN there (order 1344692270).
+# Before FIX 3, reconcile_base_asset_balance had no rebalance_sell_*
+# parameter, so it expected only +2125.1727 and flagged a false -2192.5
+# "BALANCE / LEDGER MISMATCH" that halted the session. Verified
+# independently against real Binance myTrades before this fix was written.
+
+
+def test_rvn_rebalance_mismatch_incident_exact_replay_now_reconciles():
+    result = reconcile_base_asset_balance(
+        exchange="binance",
+        before_balance=14400.3175,
+        after_balance=14332.9902,
+        arbitrage_buy_exchange="binance",
+        arbitrage_buy_net_qty=2125.1727,
+        rebalance_sell_exchange="binance",
+        rebalance_sell_qty=2192.5,
+    )
+    assert result.match is True
+    assert result.expected_delta == pytest.approx(-67.3273, abs=1e-4)
+
+
+def test_without_the_rebalance_term_the_incident_reproduces_the_false_mismatch():
+    """Documents exactly what the original bug looked like: omitting the
+    rebalance-sell contribution (the pre-FIX-3 call shape) reproduces the
+    real observed -2192.5 false mismatch."""
+    result = reconcile_base_asset_balance(
+        exchange="binance",
+        before_balance=14400.3175,
+        after_balance=14332.9902,
+        arbitrage_buy_exchange="binance",
+        arbitrage_buy_net_qty=2125.1727,
+    )
+    assert result.match is False
+    assert result.difference == pytest.approx(-2192.5, abs=1e-3)
+
+
+def test_rebalance_sell_on_a_different_exchange_does_not_contribute():
+    result = reconcile_base_asset_balance(
+        exchange="bybit", before_balance=10.0, after_balance=10.0,
+        rebalance_sell_exchange="binance", rebalance_sell_qty=2192.5,
+    )
+    assert result.expected_delta == 0.0
+    assert result.match is True
+
+
+def test_rebalance_sell_combines_with_inventory_and_arbitrage_legs():
+    """A cycle that recycled inventory, rebalanced, AND arbitraged -- all
+    on the same exchange -- must still reconcile via one combined
+    identity (the general case FIX 3 exists to cover, not just the exact
+    incident replay above)."""
+    result = reconcile_base_asset_balance(
+        exchange="binance", before_balance=100.0, after_balance=100.0 + 50.0 - 20.0 + 30.0,
+        inventory_constitution_exchange="binance", inventory_constitution_net_qty=50.0,
+        rebalance_sell_exchange="binance", rebalance_sell_qty=20.0,
+        arbitrage_buy_exchange="binance", arbitrage_buy_net_qty=30.0,
+    )
+    assert result.match is True
+    assert result.expected_delta == pytest.approx(60.0)
+
+
 # ---- structural / negative cases -------------------------------------------
 
 
