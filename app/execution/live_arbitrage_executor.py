@@ -58,18 +58,30 @@ from app.execution.bybit_client import BybitClient, parse_wallet_balance
 from app.execution.bybit_live_trade_client import BybitLiveTradeClient
 from app.execution.dual_leg_quote import DualLegQuote, LegSnapshot, compute_dual_leg_quote
 from app.execution.live_guard import LiveExecutionRefused, live_guard
+from app.execution.okx_account_client import OkxAccountClient
+from app.execution.okx_live_trade_client import OkxLiveTradeClient
 from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE, _vwap_for_target_qty
+from app.scanner.okx_public_client import OkxPublicClient
 
 logger = logging.getLogger(__name__)
 
 LEG_CONFIRMATION_TIMEOUT_SECONDS = 15.0
 LEG_POLL_INTERVAL_SECONDS = 0.5
-EXCHANGES = ("binance", "bybit")
+EXCHANGES = ("binance", "bybit", "okx")
 QUOTE_ASSET = "USDT"  # every symbol in this codebase is USDT-quoted (app.execution.inventory_manager's own convention)
 
 
 def direction_for(buy_exchange: str, sell_exchange: str) -> str:
     return f"{buy_exchange.upper()}_BUY_{sell_exchange.upper()}_SELL"
+
+
+def _bare_symbol_to_okx(symbol: str) -> str:
+    """This module's own symbols are bare, Binance-style ("LUNCUSDT", no
+    separator) -- app.execution.okx_account_client/okx_live_trade_client/
+    app.scanner.okx_public_client all expect the "/"-separated form
+    ("LUNC/USDT") and convert to OKX's own "-" form internally. Every
+    OKX call site below goes through this first."""
+    return f"{symbol.removesuffix(QUOTE_ASSET)}/{QUOTE_ASSET}"
 
 
 def resolve_fee(fees_by_asset: dict[str, float], base_asset: str, avg_fill_price: float | None, log_prefix: str) -> tuple[str | None, float, float | None]:
@@ -205,14 +217,17 @@ class LiveArbitrageExecutor:
         binance_trade: BinanceLiveTradeClient | None = None,
         bybit_read: BybitClient | None = None,
         bybit_trade: BybitLiveTradeClient | None = None,
+        okx_read: OkxAccountClient | None = None,
+        okx_public: OkxPublicClient | None = None,
+        okx_trade: OkxLiveTradeClient | None = None,
     ) -> None:
         self._binance_read = binance_read or BinanceAccountClient()
         self._binance_trade = binance_trade or BinanceLiveTradeClient()
         self._bybit_read = bybit_read or BybitClient()
         self._bybit_trade = bybit_trade or BybitLiveTradeClient()
-
-    def _read_client(self, exchange: str):
-        return self._binance_read if exchange == "binance" else self._bybit_read
+        self._okx_read = okx_read or OkxAccountClient()
+        self._okx_public = okx_public or OkxPublicClient()
+        self._okx_trade = okx_trade or OkxLiveTradeClient()
 
     async def _fresh_dual_leg_quote(
         self, symbol: str, buy_exchange: str, sell_exchange: str, micro_live_cap_usdt: float, master_requested_size_usd: float
@@ -265,7 +280,7 @@ class LiveArbitrageExecutor:
                 fetch_started_at=now,
                 fetch_completed_at=time.time(),
             )
-        else:
+        elif exchange == "bybit":
             book = await self._bybit_read.get_book_ticker(symbol)
             if book is None:
                 return None
@@ -293,6 +308,42 @@ class LiveArbitrageExecutor:
                 fetch_started_at=now,
                 fetch_completed_at=time.time(),
             )
+        elif exchange == "okx":
+            okx_symbol = _bare_symbol_to_okx(symbol)
+            book = await self._okx_public.get_book_ticker(okx_symbol)
+            if book is None:
+                return None
+            depth = await self._okx_public.get_order_book_depth(okx_symbol, limit=20)
+            rules = await self._okx_public.get_symbol_rules(okx_symbol)
+            if rules is None:
+                return None
+            try:
+                fee = await self._okx_read.get_trade_fee(okx_symbol)
+            except Exception:
+                fee = None  # OkxCredentialsMissing or a transient failure -- fall back to the estimated default, never block the leg fetch
+            book_data = depth.get("data", [{}])
+            levels = book_data[0] if book_data else {}
+            side_key = "asks" if side == "buy" else "bids"
+            depth_levels = [(float(p), float(q)) for p, q, *_ in levels.get(side_key, [])]
+            return LegSnapshot(
+                exchange="okx",
+                side=side,
+                best_bid=book.bid_price,
+                best_ask=book.ask_price,
+                depth_levels=depth_levels,
+                min_qty=rules.min_qty,
+                step_size=rules.lot_size,
+                tick_size=rules.tick_size,
+                min_notional=None,  # OKX spot publishes no separate notional floor; minSz (base asset) is the binding constraint
+                tradable=rules.is_tradable,
+                maker_fee_rate=fee.maker_fee_rate if fee is not None else None,
+                taker_fee_rate=fee.taker_fee_rate if fee is not None else DEFAULT_TAKER_FEE_RATE,
+                fee_source="real_account_fee" if fee is not None else "estimated_default",
+                fetch_started_at=now,
+                fetch_completed_at=time.time(),
+            )
+        else:
+            raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _await_terminal(self, poll_fn, timeout_seconds: float) -> tuple[bool, object | None]:
         """Polls poll_fn() until it returns a terminal result or the
@@ -322,8 +373,13 @@ class LiveArbitrageExecutor:
         if exchange == "binance":
             snapshot = await self._binance_read.get_account_snapshot()
             return snapshot.balance_of(base_asset) if snapshot is not None else 0.0
-        wallet = await self._bybit_read.get_wallet_balance()
-        return parse_wallet_balance(wallet, base_asset)
+        if exchange == "bybit":
+            wallet = await self._bybit_read.get_wallet_balance()
+            return parse_wallet_balance(wallet, base_asset)
+        if exchange == "okx":
+            snapshot = await self._okx_read.get_account_snapshot()
+            return snapshot.balance_of(base_asset) if snapshot is not None else 0.0
+        raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _place_market_buy(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
         """Item 1 fix (2026-08-24, post-incident): the arbitrage buy leg
@@ -334,17 +390,28 @@ class LiveArbitrageExecutor:
         app.execution.inventory_constitution_executor's OWN
         _place_market_buy, deliberately unchanged and still
         notional-based — inventory constitution has no second leg to
-        stay in sync with.)"""
+        stay in sync with.) OKX's tgtCcy=base_ccy (set unconditionally
+        inside OkxLiveTradeClient.place_market_order) gives the same
+        quantity-in-base-asset guarantee as Binance's `quantity=`/
+        Bybit's market_unit="baseCoin" above."""
         if exchange == "binance":
             await self._binance_trade.place_market_order(symbol, "BUY", client_order_id=client_order_id, quantity=qty)
-        else:
+        elif exchange == "bybit":
             await self._bybit_trade.place_market_order(symbol, "Buy", qty=qty, order_link_id=client_order_id, market_unit="baseCoin")
+        elif exchange == "okx":
+            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "buy", qty, client_order_id=client_order_id)
+        else:
+            raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _place_market_sell(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
         if exchange == "binance":
             await self._binance_trade.place_market_order(symbol, "SELL", client_order_id=client_order_id, quantity=qty)
-        else:
+        elif exchange == "bybit":
             await self._bybit_trade.place_market_order(symbol, "Sell", qty=qty, order_link_id=client_order_id)
+        elif exchange == "okx":
+            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "sell", qty, client_order_id=client_order_id)
+        else:
+            raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _get_status(self, exchange: str, symbol: str, client_order_id: str) -> _NormalizedOrderStatus | None:
         base_asset = symbol.removesuffix(QUOTE_ASSET)
@@ -382,7 +449,7 @@ class LiveArbitrageExecutor:
                 fee_asset=fee_asset, fee_amount=fee_amount, fee_usd_equivalent=fee_usd_equivalent,
                 raw_status=result.status,
             )
-        else:
+        elif exchange == "bybit":
             status = await self._bybit_trade.get_order_status(symbol, order_link_id=client_order_id)
             if status is None:
                 return None
@@ -401,6 +468,32 @@ class LiveArbitrageExecutor:
                 fee_asset=fee_asset, fee_amount=fee_amount, fee_usd_equivalent=fee_usd_equivalent,
                 raw_status=status.order_status,
             )
+        elif exchange == "okx":
+            status = await self._okx_trade.get_order_status(_bare_symbol_to_okx(symbol), client_order_id=client_order_id)
+            if status is None:
+                return None
+            gross_qty = status.filled_qty
+            # Item 4 (user directive, 2026-08-25, "IMPORTANT -- ne jamais
+            # supposer que les frais sont en USDT"): OKX's own fee_asset
+            # can be the base asset, the quote asset, or an unrelated
+            # promotional discount token (e.g. OKB) -- resolve_fee already
+            # returns fee_usd_equivalent=None for anything it cannot
+            # price, which the caller (execute_one_arbitrage) must treat
+            # as a reason to stop, never a reason to assume $0.
+            fees_by_asset = {status.fee_asset: status.fee_amount} if status.fee_asset and status.fee_amount else {}
+            fee_asset, fee_amount, fee_usd_equivalent = resolve_fee(fees_by_asset, base_asset, status.avg_fill_price, "live-arbitrage")
+            return _NormalizedOrderStatus(
+                order_id=status.order_id,
+                is_terminal=status.is_terminal,
+                is_filled=status.is_filled,
+                filled_qty=gross_qty,
+                net_base_qty=net_base_qty_after_fee(gross_qty, fee_asset, fee_amount, base_asset),
+                avg_fill_price=status.avg_fill_price,
+                fee_asset=fee_asset, fee_amount=fee_amount, fee_usd_equivalent=fee_usd_equivalent,
+                raw_status=status.state,
+            )
+        else:
+            raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _get_step_size(self, exchange: str, symbol: str) -> tuple[float, float] | None:
         """Returns (step_size, min_qty) for the given exchange/symbol, or
@@ -410,10 +503,17 @@ class LiveArbitrageExecutor:
             info = await self._binance_read.get_exchange_info(symbols=[symbol])
             rules = parse_binance_symbol_rules(info, symbol)
             return rules.step_size, rules.min_qty
-        rules = await self._bybit_read.get_symbol_rules(symbol)
-        if rules is None:
-            return None
-        return rules.qty_step, rules.min_order_qty
+        if exchange == "bybit":
+            rules = await self._bybit_read.get_symbol_rules(symbol)
+            if rules is None:
+                return None
+            return rules.qty_step, rules.min_order_qty
+        if exchange == "okx":
+            rules = await self._okx_public.get_symbol_rules(_bare_symbol_to_okx(symbol))
+            if rules is None:
+                return None
+            return rules.lot_size, rules.min_qty
+        raise ValueError(f"unknown exchange {exchange!r}")
 
     async def _neutralize(self, exchange: str, symbol: str, qty: float, attempt_id: uuid.UUID) -> _NormalizedOrderStatus | None:
         """Flattens an unwanted position acquired on `exchange` with an

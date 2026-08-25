@@ -41,6 +41,7 @@ def evaluate_preflight(
     balances_reachable: bool,
     ledger_reachable: bool,
     kill_switch_state: KillSwitchState,
+    okx_open_orders: Sized = (),  # list[OkxOrderStatus] at the call site, same untyped reason -- optional, defaults to "none" so every existing (Binance/Bybit-only) caller is unaffected
 ) -> PreflightResult:
     """Pure. Returns SAFE_TO_RESUME=True only if every check passes, in
     order. `checks` always records every check attempted (up to and
@@ -48,10 +49,13 @@ def evaluate_preflight(
     honest pre-flight report rather than just the final verdict."""
     checks: dict[str, str] = {}
 
-    if binance_open_orders or bybit_open_orders:
-        checks["OPEN_ORDERS"] = f"FAIL -- {len(binance_open_orders)} binance, {len(bybit_open_orders)} bybit open order(s) found at startup"
+    if binance_open_orders or bybit_open_orders or okx_open_orders:
+        checks["OPEN_ORDERS"] = (
+            f"FAIL -- {len(binance_open_orders)} binance, {len(bybit_open_orders)} bybit, "
+            f"{len(okx_open_orders)} okx open order(s) found at startup"
+        )
         return PreflightResult(False, "OPEN ORDERS FOUND AT STARTUP -- HUMAN_REVIEW_REQUIRED, never auto-resolved", checks)
-    checks["OPEN_ORDERS"] = "PASS -- none found on either exchange"
+    checks["OPEN_ORDERS"] = "PASS -- none found on any exchange"
 
     if unresolved_intents:
         checks["UNKNOWN_ORDERS"] = f"FAIL -- {len(unresolved_intents)} unresolved order-intent(s) from a prior run: " + ", ".join(

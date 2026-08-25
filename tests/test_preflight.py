@@ -83,3 +83,22 @@ def test_engaged_kill_switch_blocks_resume_even_if_everything_else_is_clean():
 def test_checks_are_recorded_in_order_up_to_the_failure():
     result = _all_clear(kill_switch_state=ENGAGED_KILL_SWITCH)
     assert list(result.checks.keys()) == ["OPEN_ORDERS", "UNKNOWN_ORDERS", "BALANCES", "LEDGER_STATE", "KILL_SWITCH"]
+
+
+def test_okx_open_order_blocks_resume():
+    """okx_open_orders defaults to () for backward compatibility, but
+    when supplied it must be checked exactly like binance/bybit's --
+    one real open order on OKX at startup is just as anomalous as one
+    on either of the other two exchanges."""
+    result = _all_clear(okx_open_orders=[{"ordId": "1"}])
+    assert result.safe_to_resume is False
+    assert "OPEN ORDERS" in result.reason
+    assert "1 okx" in result.checks["OPEN_ORDERS"]
+
+
+def test_okx_open_orders_defaults_to_empty_and_stays_backward_compatible():
+    """Every pre-existing (Binance/Bybit-only) caller that never passes
+    okx_open_orders at all must be completely unaffected."""
+    result = _all_clear()
+    assert result.safe_to_resume is True
+    assert result.checks["OPEN_ORDERS"] == "PASS -- none found on any exchange"

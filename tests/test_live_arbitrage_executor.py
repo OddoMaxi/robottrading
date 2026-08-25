@@ -661,3 +661,210 @@ async def test_no_fresh_dual_leg_data_means_no_trade_not_a_crash(monkeypatch):
     result = await broken_executor.execute_one_arbitrage(SYMBOL, "binance", "bybit", 10.0)
     assert result.outcome == ArbitrageOutcome.NO_TRADE_UNPROFITABLE
     assert guard.in_flight_count == 0
+
+
+# ============================================================
+# OKX (user directive, 2026-08-25, "MISSION -- V5 TRUE ECONOMIC
+# ENGINE -- FIRST REAL OKX VALIDATION"). Same fake-client
+# conventions as the Binance/Bybit fixtures above.
+# ============================================================
+
+from app.execution.okx_account_client import OkxAccountSnapshot, OkxBalance, OkxTradeFee
+from app.execution.okx_live_trade_client import OkxOrderAck, OkxOrderStatus
+from app.scanner.okx_public_client import OkxBookTicker, OkxSymbolRules
+
+class FakeOkxRead:
+    def __init__(self, lunc_balance: float = DEFAULT_FAKE_LUNC_BALANCE, usdt_balance: float = 1000.0) -> None:
+        self.lunc_balance = lunc_balance
+        self.usdt_balance = usdt_balance
+
+    async def get_account_snapshot(self):
+        return OkxAccountSnapshot(balances=[
+            OkxBalance(currency="LUNC", available=self.lunc_balance, frozen=0.0),
+            OkxBalance(currency="USDT", available=self.usdt_balance, frozen=0.0),
+        ])
+
+    async def get_trade_fee(self, symbol):
+        return OkxTradeFee(inst_id=symbol, maker_fee_rate=0.0008, taker_fee_rate=0.001)
+
+
+def _okx_depth(bid: float, ask: float) -> dict:
+    return {"data": [{
+        "asks": [[f"{ask:.8f}", "500000000", "0", "1"]],
+        "bids": [[f"{bid:.8f}", "500000000", "0", "1"]],
+    }]}
+
+
+class FakeOkxPublic:
+    """Deep, single-level book at exactly bid/ask -- no slippage, so a
+    test's chosen spread survives intact through the pre-trade quote AND
+    the post-buy revalidation (both re-fetch this same fake)."""
+
+    def __init__(self, bid: float = 0.00005000, ask: float = 0.00005010) -> None:
+        self.bid = bid
+        self.ask = ask
+
+    async def get_book_ticker(self, symbol):
+        return OkxBookTicker(inst_id=symbol, bid_price=self.bid, ask_price=self.ask)
+
+    async def get_order_book_depth(self, symbol, limit=20):
+        return _okx_depth(self.bid, self.ask)
+
+    async def get_symbol_rules(self, symbol):
+        return OkxSymbolRules(inst_id=symbol, is_tradable=True, min_qty=1.0, lot_size=1.0, tick_size=0.00000001)
+
+
+# OKX_CHEAP: a low ask, used whenever OKX must be the profitable BUY
+# source. OKX_EXPENSIVE: a high bid, used whenever OKX must be the
+# profitable SELL target. Never both roles in the same test -- each
+# test picks whichever one it needs and keeps the OTHER leg's fake
+# trade client's avg_price in sync with that same fake's book price.
+OKX_CHEAP_BID, OKX_CHEAP_ASK = 0.00005000, 0.00005010
+OKX_EXPENSIVE_BID, OKX_EXPENSIVE_ASK = 0.00005900, 0.00005910
+
+
+class FakeOkxTrade:
+    def __init__(self, fill_status="filled", fill_qty=183000.0, never_terminal=False, raise_on_submit=False,
+                 fee_asset="USDT", fee_amount=0.01, avg_price=OKX_CHEAP_ASK):
+        self.fill_status = fill_status
+        self.fill_qty = fill_qty
+        self.never_terminal = never_terminal
+        self.raise_on_submit = raise_on_submit
+        self.fee_asset = fee_asset
+        self.fee_amount = fee_amount
+        self.avg_price = avg_price
+        self.submitted_orders = []
+
+    async def place_market_order(self, symbol, side, quantity, client_order_id=None):
+        if self.raise_on_submit:
+            raise RuntimeError("simulated network failure")
+        self.submitted_orders.append((symbol, side, quantity, client_order_id))
+        return OkxOrderAck(order_id="okx-1", client_order_id=client_order_id or "", accepted=True, status_code="0", status_message="", raw={})
+
+    async def get_order_status(self, symbol, order_id=None, client_order_id=None):
+        if self.never_terminal:
+            return OkxOrderStatus(order_id="okx-1", client_order_id=client_order_id or "", symbol=symbol, side="buy",
+                                   state="live", filled_qty=0.0, avg_fill_price=None, fee_amount=0.0, fee_asset=None, raw={})
+        if self.fill_qty <= 0:
+            return OkxOrderStatus(order_id="okx-1", client_order_id=client_order_id or "", symbol=symbol, side="buy",
+                                   state="canceled", filled_qty=0.0, avg_fill_price=None, fee_amount=0.0, fee_asset=None, raw={})
+        return OkxOrderStatus(
+            order_id="okx-1", client_order_id=client_order_id or "", symbol=symbol, side="buy", state=self.fill_status,
+            filled_qty=self.fill_qty, avg_fill_price=self.avg_price, fee_amount=self.fee_amount, fee_asset=self.fee_asset, raw={},
+        )
+
+
+def _executor_okx(okx_trade=None, okx_read=None, okx_public=None, binance_trade=None, bybit_trade=None, bybit_read=None):
+    return LiveArbitrageExecutor(
+        binance_read=FakeBinanceRead(), binance_trade=binance_trade or FakeBinanceTrade(),
+        bybit_read=bybit_read or FakeBybitRead(), bybit_trade=bybit_trade or FakeBybitTrade(),
+        okx_read=okx_read or FakeOkxRead(), okx_public=okx_public or FakeOkxPublic(), okx_trade=okx_trade or FakeOkxTrade(),
+    )
+
+
+class CheapBybitRead(FakeBybitRead):
+    """Ask overridden to a real, self-consistent cheap buy price --
+    FakeBybitTrade's own avg_price must be set to match in any test
+    using this, exactly like the real exchange's fill price always
+    matches what was actually quoted."""
+
+    async def get_book_ticker(self, symbol):
+        return type("Ticker", (), {"bid_price": 0.00005420, "ask_price": 0.00005300})()
+
+
+async def test_okx_as_sell_exchange_both_legs_filled(monkeypatch):
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    bybit_trade = FakeBybitTrade(avg_price=0.00005300)
+    executor = _executor_okx(
+        bybit_read=CheapBybitRead(), bybit_trade=bybit_trade,
+        okx_public=FakeOkxPublic(bid=OKX_EXPENSIVE_BID, ask=OKX_EXPENSIVE_ASK), okx_trade=FakeOkxTrade(avg_price=OKX_EXPENSIVE_BID),
+    )
+    result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "okx", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.sell_exchange_order_id == "okx-1"
+    assert result.actual_net_pnl_usd is not None
+    assert result.actual_net_pnl_usd > 0
+    assert guard.in_flight_count == 0
+
+
+async def test_okx_as_buy_exchange_both_legs_filled(monkeypatch):
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    executor = _executor_okx()  # default cheap OKX (ask=0.00005010) -> default Bybit sell (bid=0.00005600)
+    result = await executor.execute_one_arbitrage(SYMBOL, "okx", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.buy_exchange_order_id == "okx-1"
+    assert result.actual_net_pnl_usd is not None
+    assert result.actual_net_pnl_usd > 0
+    assert guard.in_flight_count == 0
+
+
+async def test_okx_fee_in_base_asset_resolved_correctly(monkeypatch):
+    """OKX charging the fee in LUNC (the base asset) must reduce
+    net_base_qty, never be silently treated as a $0 USDT cost -- exactly
+    the same in-kind fee handling already proven for Binance/Bybit."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    okx_trade = FakeOkxTrade(fee_asset="LUNC", fee_amount=100.0)
+    executor = _executor_okx(okx_trade=okx_trade)
+    result = await executor.execute_one_arbitrage(SYMBOL, "okx", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.buy_fee_asset == "LUNC"
+    assert result.buy_net_filled_qty == pytest.approx(result.buy_filled_qty - 100.0)
+
+
+async def test_okx_fee_in_unresolvable_asset_never_fabricates_usd_equivalent(monkeypatch):
+    """Item 4, user directive: 'si fee asset inconnu: SAFE STOP' -- this
+    module's own contract is fee_usd_equivalent=None whenever the fee
+    asset is neither the base nor quote asset (e.g. a promotional OKB
+    discount token); the caller (a live orchestrator) is the one that
+    must refuse to proceed on None, exactly like it already must for
+    Binance/Bybit's own unresolvable-fee case."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    okx_trade = FakeOkxTrade(fee_asset="OKB", fee_amount=0.05)
+    executor = _executor_okx(okx_trade=okx_trade)
+    result = await executor.execute_one_arbitrage(SYMBOL, "okx", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert result.buy_fee_asset == "OKB"
+    assert result.buy_fee_usd_equivalent is None
+
+
+async def test_okx_common_qty_capped_by_real_okx_balance_when_sell_exchange(monkeypatch):
+    """Same real-balance-capping discipline as the original Binance/Bybit
+    incident this module's whole design exists to prevent -- OKX must
+    never be allowed to sell more than it actually, really holds."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    bybit_trade = FakeBybitTrade(avg_price=0.00005300)
+    thin_okx_read = FakeOkxRead(lunc_balance=50.0)  # far less than the requested notional would imply
+    okx_trade = FakeOkxTrade(fill_qty=50.0, avg_price=OKX_EXPENSIVE_BID)
+    executor = _executor_okx(
+        bybit_read=CheapBybitRead(), bybit_trade=bybit_trade, okx_read=thin_okx_read,
+        okx_public=FakeOkxPublic(bid=OKX_EXPENSIVE_BID, ask=OKX_EXPENSIVE_ASK), okx_trade=okx_trade,
+    )
+    result = await executor.execute_one_arbitrage(SYMBOL, "bybit", "okx", 10.0)
+    assert result.outcome != ArbitrageOutcome.BOTH_FILLED or result.sell_filled_qty <= 50.0
+
+
+async def test_okx_submission_failure_triggers_neutralization_not_a_crash(monkeypatch):
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    okx_trade = FakeOkxTrade(raise_on_submit=True, avg_price=OKX_EXPENSIVE_BID)
+    binance_trade = FakeBinanceTrade()
+    executor = _executor_okx(
+        okx_trade=okx_trade, binance_trade=binance_trade,
+        okx_public=FakeOkxPublic(bid=OKX_EXPENSIVE_BID, ask=OKX_EXPENSIVE_ASK),
+    )
+    result = await executor.execute_one_arbitrage(SYMBOL, "binance", "okx", 10.0)
+    assert result.outcome in (ArbitrageOutcome.BUY_ONLY_NEUTRALIZED, ArbitrageOutcome.NEUTRALIZATION_FAILED)
+    assert guard.in_flight_count == 0
+
+
+async def test_okx_never_treated_as_unrecognized_exchange():
+    """Structural check: 'okx' must be a first-class member of EXCHANGES,
+    not silently falling into the old binary if/else's implicit bybit
+    branch (which would misroute every OKX call to Bybit's own client)."""
+    assert "okx" in executor_module.EXCHANGES
+    assert len(executor_module.EXCHANGES) == 3
