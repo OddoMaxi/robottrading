@@ -68,6 +68,14 @@ def _parse_symbol_rules(data: dict, inst_id: str) -> OkxSymbolRules | None:
     return None
 
 
+def _parse_all_usdt_spot_symbols(data: dict) -> set[str]:
+    symbols: set[str] = set()
+    for entry in data.get("data", []):
+        if entry.get("quoteCcy") == "USDT" and str(entry.get("state", "")) == "live":
+            symbols.add(f"{entry['baseCcy']}/USDT")
+    return symbols
+
+
 class OkxPublicClient(ExchangeClient):
     def __init__(self, base_url: str = MAINNET_BASE_URL, timeout_seconds: float = REQUEST_TIMEOUT_SECONDS) -> None:
         self._base_url = base_url
@@ -107,6 +115,22 @@ class OkxPublicClient(ExchangeClient):
                 response.raise_for_status()
                 data = await response.json()
         return _parse_symbol_rules(data, inst_id)
+
+    async def get_all_usdt_spot_symbols(self) -> set[str]:
+        """GET /api/v5/public/instruments, instType=SPOT, no instId —
+        public, unauthenticated. OKX returns every spot instrument in one
+        response (no pagination needed, unlike Bybit's instruments-info).
+        Used by app.execution.live_universe to build the OKX side of the
+        3-exchange universe."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/api/v5/public/instruments",
+                params={"instType": "SPOT"},
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return _parse_all_usdt_spot_symbols(data)
 
     async def check_connectivity(self) -> ExchangeConnectivity:
         import time

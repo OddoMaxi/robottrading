@@ -1,20 +1,24 @@
-"""LIVE OPPORTUNITY RANKER (Phase 3, user directive, 2026-08-23) —
-READ-ONLY. MASTER's continuous ranking of every qualified real-capital
-candidate across the dynamically-discovered Binance∩Bybit universe.
+"""LIVE OPPORTUNITY RANKER (Phase 3, user directive, 2026-08-23; extended
+2026-08-25, "integre OKX aussi" / V5 three-exchange shadow) — READ-ONLY.
+MASTER's continuous ranking of every qualified real-capital candidate
+across the dynamically-discovered 3-exchange universe.
 
 Reuses app.scanner.cross_exchange_scanner.scan_symbol (already
-exchange-agnostic, already validated math) restricted to Binance+Bybit
-only (no OKX live-trade client exists) — this module's own job is
-turning those quotes into a REAL-CAPITAL-AWARE ranking: for every
-candidate, checking whether the required balances are actually
-pre-positioned on the right exchange RIGHT NOW (item 5 of the directive)
-and combining that with profit/liquidity/persistence/latency into one
-score. Never fetches a balance to size an order for execution — that
-remains app.execution.live_arbitrage_executor's own fresh re-check,
-immediately before submission.
+exchange-agnostic, already validated math) across all three exchanges —
+this module's own job is turning those quotes into a REAL-CAPITAL-AWARE
+ranking: for every candidate, checking whether the required balances are
+actually pre-positioned on the right exchange RIGHT NOW (item 5 of the
+original directive) and combining that with profit/liquidity/
+persistence/latency into one score. Never fetches a balance to size an
+order for execution — that remains app.execution.live_arbitrage_
+executor's own fresh re-check, immediately before submission.
 
-No order is placed anywhere in this module.
-"""
+Ranking real balances against OKX uses app.execution.okx_account_client.
+OkxAccountClient (read-only) only — never okx_live_trade_client, which
+stays unreachable from this module exactly like every other file under
+app/ (tests/test_phase3a_isolation.py).
+
+No order is placed anywhere in this module."""
 
 import logging
 import time
@@ -24,12 +28,13 @@ from app.execution.binance_account_client import BinanceAccountClient
 from app.execution.bybit_client import BybitClient, parse_wallet_balance
 from app.execution.dual_leg_quote import DualLegQuote
 from app.execution.live_universe import LiveUniverseBuilder, live_universe_builder
+from app.execution.okx_account_client import OkxAccountClient
 from app.scanner.cross_exchange_scanner import DirectionQuote, scan_symbol
 from app.scanner.market_snapshot import MultiExchangeSnapshotFetcher
 
 logger = logging.getLogger(__name__)
 
-LIVE_EXCHANGES = ("binance", "bybit")
+LIVE_EXCHANGES = ("binance", "bybit", "okx")
 
 
 @dataclass(slots=True)
@@ -64,15 +69,18 @@ def check_prepositioning(
     buy_exchange: str,
     sell_exchange: str,
     base_asset: str,
-    binance_usdt: float,
-    bybit_usdt: float,
-    binance_base: float,
-    bybit_base: float,
+    available_usdt: dict[str, float],
+    available_base: dict[str, float],
 ) -> PrePositioningCheck:
+    """available_usdt/available_base are keyed by exchange name (any of
+    LIVE_EXCHANGES) -- generalized from the original 2-exchange
+    binance_usdt/bybit_usdt/binance_base/bybit_base keyword arguments so
+    a third (or Nth) exchange never needs another set of positional
+    parameters bolted on."""
     required_buy_balance_usdt = quote.executable_qty * quote.buy_execution_price
     required_sell_qty = quote.executable_qty
-    available_buy_balance_usdt = binance_usdt if buy_exchange == "binance" else bybit_usdt
-    available_sell_balance = binance_base if sell_exchange == "binance" else bybit_base
+    available_buy_balance_usdt = available_usdt.get(buy_exchange, 0.0)
+    available_sell_balance = available_base.get(sell_exchange, 0.0)
 
     prepositioned = available_buy_balance_usdt >= required_buy_balance_usdt and available_sell_balance >= required_sell_qty
     return PrePositioningCheck(
@@ -110,6 +118,7 @@ async def rank_live_opportunities(
     universe_builder: LiveUniverseBuilder | None = None,
     binance_read: BinanceAccountClient | None = None,
     bybit_read: BybitClient | None = None,
+    okx_read: OkxAccountClient | None = None,
     fetcher: MultiExchangeSnapshotFetcher | None = None,
     requested_notional_per_leg_usdt: float = 5.0,
     max_symbols: int | None = None,
@@ -117,13 +126,21 @@ async def rank_live_opportunities(
     universe_builder = universe_builder or live_universe_builder
     binance_read = binance_read or BinanceAccountClient()
     bybit_read = bybit_read or BybitClient()
-    fetcher = fetcher or MultiExchangeSnapshotFetcher(binance=binance_read, bybit=bybit_read)
+    okx_read = okx_read or OkxAccountClient()
+    fetcher = fetcher or MultiExchangeSnapshotFetcher(binance=binance_read, bybit=bybit_read, okx_account=okx_read)
 
     universe = await universe_builder.get_universe()
-    symbols = universe.common_symbols[:max_symbols] if max_symbols else universe.common_symbols
+    # Union of every pairwise-relevant symbol -- a symbol tradable only
+    # on Binance+OKX (not Bybit), or Bybit+OKX (not Binance), was
+    # previously invisible when this only iterated common_symbols
+    # (Binance ∩ Bybit). scan_symbol itself skips any exchange a given
+    # symbol genuinely isn't listed on, so including the broader union
+    # here costs nothing when a symbol is only on two exchanges.
+    all_symbols = sorted(set(universe.common_symbols) | set(universe.binance_okx_symbols) | set(universe.bybit_okx_symbols))
+    symbols = all_symbols[:max_symbols] if max_symbols else all_symbols
 
-    binance_usdt = 0.0
-    bybit_usdt = 0.0
+    binance_usdt = bybit_usdt = okx_usdt = 0.0
+    wallet = None
     try:
         snapshot = await binance_read.get_account_snapshot()
         binance_usdt = snapshot.balance_usdt() if snapshot is not None else 0.0
@@ -134,7 +151,11 @@ async def rank_live_opportunities(
         bybit_usdt = parse_wallet_balance(wallet, "USDT")
     except Exception as exc:
         logger.warning("live-ranker: Bybit balance fetch failed: %s", exc)
-        wallet = None
+    try:
+        okx_snapshot = await okx_read.get_account_snapshot()
+        okx_usdt = okx_snapshot.balance_usdt() if okx_snapshot is not None else 0.0
+    except Exception as exc:
+        logger.warning("live-ranker: OKX balance fetch failed: %s", exc)
 
     ranked: list[RankedOpportunity] = []
     for symbol in symbols:
@@ -145,8 +166,7 @@ async def rank_live_opportunities(
             continue
 
         base_asset = _base_asset(symbol)
-        binance_base = 0.0
-        bybit_base = 0.0
+        binance_base = bybit_base = okx_base = 0.0
         try:
             binance_snapshot = await binance_read.get_account_snapshot()
             binance_base = binance_snapshot.balance_of(base_asset) if binance_snapshot is not None else 0.0
@@ -154,11 +174,17 @@ async def rank_live_opportunities(
             pass
         if wallet is not None:
             bybit_base = parse_wallet_balance(wallet, base_asset)
+        try:
+            okx_snapshot = await okx_read.get_account_snapshot()
+            okx_base = okx_snapshot.balance_of(base_asset) if okx_snapshot is not None else 0.0
+        except Exception:
+            pass
+
+        available_usdt = {"binance": binance_usdt, "bybit": bybit_usdt, "okx": okx_usdt}
+        available_base = {"binance": binance_base, "bybit": bybit_base, "okx": okx_base}
 
         for dq in direction_quotes:
-            prepositioning = check_prepositioning(
-                dq.quote, dq.buy_exchange, dq.sell_exchange, base_asset, binance_usdt, bybit_usdt, binance_base, bybit_base
-            )
+            prepositioning = check_prepositioning(dq.quote, dq.buy_exchange, dq.sell_exchange, base_asset, available_usdt, available_base)
             score = score_opportunity(dq.quote, prepositioning)
             ranked.append(
                 RankedOpportunity(symbol=symbol, buy_exchange=dq.buy_exchange, sell_exchange=dq.sell_exchange, quote=dq.quote, prepositioning=prepositioning, score=score)

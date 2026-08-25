@@ -59,7 +59,7 @@ async def test_ready_when_everything_passes(monkeypatch):
     monkeypatch.setattr(preflight_module, "build_first_live_gate_report", _fake_gate(_account_gate()))
     monkeypatch.setattr(
         preflight_module.live_universe_builder, "get_universe",
-        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_symbol_count=500, bybit_symbol_count=400, fetched_at=100.0)),
+        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_okx_symbols=[], bybit_okx_symbols=[], all_three_symbols=[], binance_symbol_count=500, bybit_symbol_count=400, okx_symbol_count=0, fetched_at=100.0)),
     )
     monkeypatch.setattr(preflight_module, "rank_live_opportunities", _fake_rank([_ranked_opportunity()]))
 
@@ -73,7 +73,7 @@ async def test_not_ready_when_no_qualified_candidate(monkeypatch):
     monkeypatch.setattr(preflight_module, "build_first_live_gate_report", _fake_gate(_account_gate()))
     monkeypatch.setattr(
         preflight_module.live_universe_builder, "get_universe",
-        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_symbol_count=500, bybit_symbol_count=400, fetched_at=100.0)),
+        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_okx_symbols=[], bybit_okx_symbols=[], all_three_symbols=[], binance_symbol_count=500, bybit_symbol_count=400, okx_symbol_count=0, fetched_at=100.0)),
     )
     monkeypatch.setattr(preflight_module, "rank_live_opportunities", _fake_rank([]))  # nothing qualifies
 
@@ -86,7 +86,7 @@ async def test_not_ready_when_withdrawals_not_disabled(monkeypatch):
     monkeypatch.setattr(preflight_module, "build_first_live_gate_report", _fake_gate(_account_gate(withdrawals_disabled=False)))
     monkeypatch.setattr(
         preflight_module.live_universe_builder, "get_universe",
-        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_symbol_count=500, bybit_symbol_count=400, fetched_at=100.0)),
+        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_okx_symbols=[], bybit_okx_symbols=[], all_three_symbols=[], binance_symbol_count=500, bybit_symbol_count=400, okx_symbol_count=0, fetched_at=100.0)),
     )
     monkeypatch.setattr(preflight_module, "rank_live_opportunities", _fake_rank([_ranked_opportunity()]))
 
@@ -99,7 +99,7 @@ async def test_not_ready_when_best_candidate_not_prepositioned(monkeypatch):
     monkeypatch.setattr(preflight_module, "build_first_live_gate_report", _fake_gate(_account_gate()))
     monkeypatch.setattr(
         preflight_module.live_universe_builder, "get_universe",
-        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_symbol_count=500, bybit_symbol_count=400, fetched_at=100.0)),
+        _fake_universe(LiveUniverse(common_symbols=["ZRO/USDT"], binance_okx_symbols=[], bybit_okx_symbols=[], all_three_symbols=[], binance_symbol_count=500, bybit_symbol_count=400, okx_symbol_count=0, fetched_at=100.0)),
     )
     not_prepositioned = _ranked_opportunity(score=0.0, executable_now=False)
     monkeypatch.setattr(preflight_module, "rank_live_opportunities", _fake_rank([not_prepositioned]))

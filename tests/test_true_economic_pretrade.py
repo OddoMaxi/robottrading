@@ -198,3 +198,152 @@ def test_fees_are_reported_but_not_double_subtracted():
     # it must not equal a naive (proceeds - cost) that ignores fees, nor double-subtract them
     naive_gross = 1000.0 * (0.0035 - 0.0030)
     assert quote.expected_true_wealth_delta_usd == pytest.approx(naive_gross - 0.65)
+
+
+import uuid as _uuid
+
+from app.execution.dual_leg_quote import LegSnapshot as _LegSnapshot
+from app.execution.true_economic_pretrade import compute_return_bps, evaluate_executability, evaluate_route_across_tiers
+
+_OPP_ID = _uuid.UUID("00000000-0000-0000-0000-000000000042")
+
+
+def _leg(exchange: str, side: str, price: float, depth_usd: float, *, taker_fee_rate=0.001, min_notional=None) -> _LegSnapshot:
+    qty_at_price = depth_usd / price
+    return _LegSnapshot(
+        exchange=exchange, side=side, best_bid=price, best_ask=price, depth_levels=[(price, qty_at_price)],
+        min_qty=0.0001, step_size=0.0001, tick_size=0.00001, min_notional=min_notional, tradable=True,
+        maker_fee_rate=None, taker_fee_rate=taker_fee_rate, fee_source="real_account_fee",
+        fetch_started_at=1000.0, fetch_completed_at=1000.0,
+    )
+
+
+def test_compute_return_bps_basic():
+    assert compute_return_bps(1.0, 100.0) == pytest.approx(100.0)  # $1 on $100 = 100 bps = 1%
+
+
+def test_compute_return_bps_none_when_wealth_delta_unknown():
+    assert compute_return_bps(None, 100.0) is None
+
+
+def test_compute_return_bps_none_when_no_notional_deployed():
+    assert compute_return_bps(1.0, 0.0) is None
+
+
+def test_executability_true_economic_positive_but_capital_insufficient():
+    """The exact scenario the user described: economically excellent but
+    currently unexecutable purely because one exchange (e.g. OKX) isn't
+    funded -- must be reported as such, not silently dropped."""
+    check = evaluate_executability(
+        capital_required_usd=10.0, capital_available_usd=0.0,  # OKX unfunded
+        inventory_required_qty=100.0, inventory_available_qty=500.0,
+        true_economic_positive=True,
+    )
+    assert check.true_economic_positive is True
+    assert check.executable_now is False
+    assert check.blocker == "INSUFFICIENT_CAPITAL"
+
+
+def test_executability_not_true_economic_positive_blocks_regardless_of_capital():
+    check = evaluate_executability(
+        capital_required_usd=10.0, capital_available_usd=1000.0, inventory_required_qty=1.0, inventory_available_qty=1000.0,
+        true_economic_positive=False,
+    )
+    assert check.executable_now is False
+    assert check.blocker == "NOT_TRUE_ECONOMIC_POSITIVE"
+
+
+def test_executability_insufficient_inventory_specifically():
+    check = evaluate_executability(
+        capital_required_usd=10.0, capital_available_usd=1000.0, inventory_required_qty=1000.0, inventory_available_qty=1.0,
+        true_economic_positive=True,
+    )
+    assert check.blocker == "INSUFFICIENT_INVENTORY"
+
+
+def test_executability_both_insufficient():
+    check = evaluate_executability(
+        capital_required_usd=10.0, capital_available_usd=0.0, inventory_required_qty=1000.0, inventory_available_qty=0.0,
+        true_economic_positive=True,
+    )
+    assert check.blocker == "INSUFFICIENT_CAPITAL_AND_INVENTORY"
+
+
+def test_executability_fully_executable():
+    check = evaluate_executability(
+        capital_required_usd=10.0, capital_available_usd=1000.0, inventory_required_qty=1.0, inventory_available_qty=1000.0,
+        true_economic_positive=True,
+    )
+    assert check.executable_now is True
+    assert check.blocker is None
+
+
+def test_evaluate_route_across_tiers_returns_one_result_per_requested_tier():
+    buy_leg = _leg("binance", "buy", 1.00, depth_usd=1_000_000)
+    sell_leg = _leg("bybit", "sell", 1.02, depth_usd=1_000_000)
+    sell_pool = get_pool(seed_pool({}, "bybit", "RVN", qty=1_000_000.0, price=0.99), "bybit", "RVN")
+    buy_pool = empty_pool("binance", "RVN")
+    results = evaluate_route_across_tiers(
+        symbol="RVN/USDT", buy_leg=buy_leg, sell_leg=sell_leg, opportunity_id=_OPP_ID,
+        sell_pool=sell_pool, buy_pool=buy_pool, tiers_usdt=(10.0, 20.0, 50.0),
+    )
+    assert [r.tier_usdt for r in results] == [10.0, 20.0, 50.0]
+    # deep, liquid, profitable market -- true economic pnl should scale up with size
+    assert results[0].true_economic.expected_true_wealth_delta_usd < results[2].true_economic.expected_true_wealth_delta_usd
+
+
+def test_evaluate_route_across_tiers_reuses_one_snapshot_not_a_fresh_fetch_per_tier():
+    """Both legs' depth is finite and shared across tiers -- larger tiers
+    must show more slippage/worse execution price than smaller ones from
+    the SAME snapshot, proving no re-fetch happened per tier."""
+    buy_leg = _leg("binance", "buy", 1.00, depth_usd=60.0)  # thin depth: only ~60 USDT worth at the top price
+    sell_leg = _leg("bybit", "sell", 1.02, depth_usd=1_000_000)
+    sell_pool = get_pool(seed_pool({}, "bybit", "RVN", qty=1_000_000.0, price=0.99), "bybit", "RVN")
+    buy_pool = empty_pool("binance", "RVN")
+    results = evaluate_route_across_tiers(
+        symbol="RVN/USDT", buy_leg=buy_leg, sell_leg=sell_leg, opportunity_id=_OPP_ID,
+        sell_pool=sell_pool, buy_pool=buy_pool, tiers_usdt=(10.0, 50.0),
+    )
+    assert results[1].quote.buy_slippage_pct >= results[0].quote.buy_slippage_pct
+
+
+from app.execution.true_economic_pretrade import build_route_observation
+
+
+def test_build_route_observation_reports_true_positive_but_not_executable_when_unfunded():
+    """The exact user scenario: OKX has real, currently-zero USDT, but
+    the route is genuinely economically excellent -- must still surface
+    TRUE_ECONOMIC_EDGE > 0 and WOULD_TRADE True, with EXECUTABLE_NOW
+    False and a specific INSUFFICIENT_CAPITAL blocker, never dropped."""
+    buy_leg = _leg("okx", "buy", 1.00, depth_usd=1_000_000)
+    sell_leg = _leg("bybit", "sell", 1.05, depth_usd=1_000_000)
+    sell_pool = get_pool(seed_pool({}, "bybit", "RVN", qty=1_000_000.0, price=0.98), "bybit", "RVN")
+    buy_pool = empty_pool("okx", "RVN")
+    obs = build_route_observation(
+        symbol="RVN/USDT", base_asset="RVN", buy_exchange="okx", sell_exchange="bybit",
+        buy_leg=buy_leg, sell_leg=sell_leg, opportunity_id=_OPP_ID, sell_pool=sell_pool, buy_pool=buy_pool,
+        available_usdt={"okx": 0.0, "bybit": 1000.0}, available_base={"okx": 0.0, "bybit": 1_000_000.0},
+    )
+    assert obs.true_economic_quote.would_trade is True
+    assert obs.true_economic_edge_usd > 0
+    assert obs.executability.true_economic_positive is True
+    assert obs.executability.executable_now is False
+    assert obs.executability.blocker == "INSUFFICIENT_CAPITAL"
+    assert obs.capital_required_per_exchange_usd["okx"] > 0
+    assert obs.inventory_required["bybit"]["RVN"] > 0
+    assert set(obs.expected_true_pnl_by_tier_usd.keys()) == {10.0, 20.0, 50.0}
+    assert obs.true_economic_return_bps is not None
+
+
+def test_build_route_observation_executable_when_funded():
+    buy_leg = _leg("okx", "buy", 1.00, depth_usd=1_000_000)
+    sell_leg = _leg("bybit", "sell", 1.05, depth_usd=1_000_000)
+    sell_pool = get_pool(seed_pool({}, "bybit", "RVN", qty=1_000_000.0, price=0.98), "bybit", "RVN")
+    buy_pool = empty_pool("okx", "RVN")
+    obs = build_route_observation(
+        symbol="RVN/USDT", base_asset="RVN", buy_exchange="okx", sell_exchange="bybit",
+        buy_leg=buy_leg, sell_leg=sell_leg, opportunity_id=_OPP_ID, sell_pool=sell_pool, buy_pool=buy_pool,
+        available_usdt={"okx": 1000.0, "bybit": 1000.0}, available_base={"okx": 0.0, "bybit": 1_000_000.0},
+    )
+    assert obs.executability.executable_now is True
+    assert obs.executability.blocker is None

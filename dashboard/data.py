@@ -1590,6 +1590,64 @@ def get_live_script_status_cached() -> LiveScriptStatus:
     return fetch_live_script_status()
 
 
+# V5 THREE-EXCHANGE SHADOW (user directive, 2026-08-25) -- same pattern
+# as LIVE_STATUS_FILE above: the shadow script's own status file is the
+# only way to see it from outside its process. REAL_ORDERS is always 0
+# for this script by construction (it never imports okx_live_trade_client
+# or any other order-capable client) -- this page only displays what it
+# reports, it never controls it.
+V5_SHADOW_STATUS_FILE = Path("/tmp/robotcripto_v5_shadow_status.json")
+V5_SHADOW_OBSERVATIONS_FILE = Path("/opt/robotcripto/data/v5_shadow_observations.jsonl")
+V5_SHADOW_STATUS_STALE_AFTER_SECONDS = 60.0
+V5_SHADOW_MAX_OBSERVATIONS_READ = 5000  # tail-read cap -- a multi-day file must not be loaded in full every render
+
+
+@dataclass(slots=True)
+class V5ShadowStatus:
+    available: bool
+    stale: bool = False
+    age_seconds: float | None = None
+    raw: dict = field(default_factory=dict)
+
+
+def fetch_v5_shadow_status() -> V5ShadowStatus:
+    try:
+        mtime = V5_SHADOW_STATUS_FILE.stat().st_mtime
+        age = datetime.now(UTC).timestamp() - mtime
+        payload = json.loads(V5_SHADOW_STATUS_FILE.read_text())
+        stale = age > V5_SHADOW_STATUS_STALE_AFTER_SECONDS
+        return V5ShadowStatus(available=True, stale=stale, age_seconds=age, raw=payload)
+    except Exception:
+        return V5ShadowStatus(available=False)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def get_v5_shadow_status_cached() -> V5ShadowStatus:
+    return fetch_v5_shadow_status()
+
+
+def fetch_v5_shadow_observations(max_rows: int = V5_SHADOW_MAX_OBSERVATIONS_READ) -> list[dict]:
+    """Tail-reads up to max_rows most recent JSONL observations. Never
+    raises -- a missing/unreadable file returns an empty list."""
+    try:
+        lines = V5_SHADOW_OBSERVATIONS_FILE.read_text().splitlines()
+    except Exception:
+        return []
+    tail = lines[-max_rows:] if len(lines) > max_rows else lines
+    observations = []
+    for line in tail:
+        try:
+            observations.append(json.loads(line))
+        except Exception:
+            continue
+    return observations
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def get_v5_shadow_observations_cached() -> list[dict]:
+    return fetch_v5_shadow_observations()
+
+
 async def _fresh_price(exchange: str, binance_read: BinanceAccountClient, bybit_read: BybitClient, symbol: str) -> float | None:
     """Best-effort current price for one symbol on one exchange -- mid of
     bid/ask, or whichever side is available. Never raises."""

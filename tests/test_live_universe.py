@@ -46,8 +46,16 @@ class FakeBybit:
         return [BYBIT_INFO_FIXTURE]
 
 
+class FakeOkx:
+    def __init__(self, symbols: set[str] | None = None) -> None:
+        self._symbols = symbols if symbols is not None else {"BTC/USDT", "ZRO/USDT"}
+
+    async def get_all_usdt_spot_symbols(self) -> set[str]:
+        return self._symbols
+
+
 async def test_get_universe_computes_intersection(monkeypatch):
-    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit())
+    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), okx_client=FakeOkx())
 
     async def fake_bybit_all(self):
         return BYBIT_INFO_FIXTURE
@@ -59,6 +67,39 @@ async def test_get_universe_computes_intersection(monkeypatch):
     assert universe.bybit_symbol_count == 2
 
 
+async def test_get_universe_computes_okx_pairwise_intersections(monkeypatch):
+    """binance_okx/bybit_okx must surface symbols the OLD 2-exchange
+    common_symbols could never see -- e.g. ZRO/USDT here is on Binance
+    and OKX but not Bybit, previously invisible to any caller."""
+
+    async def fake_bybit_all(self):
+        return BYBIT_INFO_FIXTURE
+
+    monkeypatch.setattr(LiveUniverseBuilder, "_bybit_all_usdt_instruments", fake_bybit_all)
+    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), okx_client=FakeOkx({"BTC/USDT", "ZRO/USDT", "STX/USDT"}))
+    universe = await builder.get_universe()
+    assert universe.binance_okx_symbols == ["BTC/USDT", "ZRO/USDT"]
+    assert universe.bybit_okx_symbols == ["BTC/USDT", "STX/USDT"]
+    assert universe.all_three_symbols == ["BTC/USDT"]
+    assert universe.okx_symbol_count == 3
+
+
+async def test_get_universe_okx_fetch_failure_leaves_okx_fields_empty_without_crashing(monkeypatch):
+    class BrokenOkx:
+        async def get_all_usdt_spot_symbols(self):
+            raise ConnectionError("okx unreachable")
+
+    async def fake_bybit_all(self):
+        return BYBIT_INFO_FIXTURE
+
+    monkeypatch.setattr(LiveUniverseBuilder, "_bybit_all_usdt_instruments", fake_bybit_all)
+    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), okx_client=BrokenOkx())
+    universe = await builder.get_universe()
+    assert universe.common_symbols == ["BTC/USDT"]  # Binance/Bybit side unaffected
+    assert universe.binance_okx_symbols == []
+    assert universe.okx_symbol_count == 0
+
+
 async def test_get_universe_caches_within_refresh_interval(monkeypatch):
     call_count = {"n": 0}
 
@@ -67,7 +108,7 @@ async def test_get_universe_caches_within_refresh_interval(monkeypatch):
         return BYBIT_INFO_FIXTURE
 
     monkeypatch.setattr(LiveUniverseBuilder, "_bybit_all_usdt_instruments", fake_bybit_all)
-    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), refresh_interval_seconds=300.0)
+    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), okx_client=FakeOkx(), refresh_interval_seconds=300.0)
     await builder.get_universe()
     await builder.get_universe()
     assert call_count["n"] == 1  # second call served from cache
@@ -82,7 +123,7 @@ async def test_get_universe_never_silently_collapses_to_empty(monkeypatch):
         return BYBIT_INFO_FIXTURE
 
     monkeypatch.setattr(LiveUniverseBuilder, "_bybit_all_usdt_instruments", good_bybit)
-    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), refresh_interval_seconds=0.0)
+    builder = LiveUniverseBuilder(binance_client=FakeBinance(), bybit_client=FakeBybit(), okx_client=FakeOkx(), refresh_interval_seconds=0.0)
     first = await builder.get_universe()
     assert first.common_symbols == ["BTC/USDT"]
 

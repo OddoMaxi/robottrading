@@ -2110,6 +2110,71 @@ def _render_live_activity_feed(summary) -> None:
         )
 
 
+def _render_v5_shadow_three_exchange() -> None:
+    """V5 THREE-EXCHANGE SHADOW (user directive, 2026-08-25) -- read-only,
+    exactly like every other section on this page. REAL_ORDERS is always
+    0 for this script by construction, never a control this dashboard
+    could flip. TRUE_ECONOMIC_POSITIVE and EXECUTABLE_NOW are shown as
+    separate columns deliberately: an opportunity can be economically
+    excellent and still blocked purely by real capital not being on the
+    right exchange yet (e.g. OKX unfunded) -- collapsing those two into
+    one status would hide exactly the distinction the shadow exists to
+    surface."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">V5 THREE-EXCHANGE SHADOW (OBSERVATION ONLY)</div>', unsafe_allow_html=True)
+    shadow_status = data.get_v5_shadow_status_cached()
+    if not shadow_status.available:
+        st.caption("Le shadow V5 trois-exchanges n'est pas (encore) en cours d'exécution.")
+        return
+    raw = shadow_status.raw
+    cols = st.columns(4)
+    cols[0].metric("MODE", raw.get("MODE", "—"))
+    cols[1].metric("REAL ORDERS", raw.get("REAL_ORDERS", 0))
+    cols[2].metric("SCANS", raw.get("SCANS", 0))
+    cols[3].metric("OBSERVATIONS LOGGED", raw.get("OBSERVATIONS_LOGGED", 0))
+    if shadow_status.stale:
+        st.warning("Statut shadow V5 obsolète (le script ne semble plus tourner).")
+
+    observations = data.get_v5_shadow_observations_cached()
+    if not observations:
+        st.caption("Aucune observation enregistrée pour l'instant.")
+        return
+
+    pairs = {"BINANCE_BYBIT": [], "BINANCE_OKX": [], "BYBIT_OKX": []}
+    for obs in observations:
+        exchanges = {obs.get("buy_exchange"), obs.get("sell_exchange")}
+        if exchanges == {"binance", "bybit"}:
+            pairs["BINANCE_BYBIT"].append(obs)
+        elif exchanges == {"binance", "okx"}:
+            pairs["BINANCE_OKX"].append(obs)
+        elif exchanges == {"bybit", "okx"}:
+            pairs["BYBIT_OKX"].append(obs)
+
+    pcols = st.columns(3)
+    for pcol, (pair_label, rows) in zip(pcols, pairs.items()):
+        positive = [r for r in rows if r.get("TRUE_ECONOMIC_POSITIVE")]
+        best = max((r.get("TRUE_ECONOMIC_EDGE") for r in rows if r.get("TRUE_ECONOMIC_EDGE") is not None), default=None)
+        with pcol:
+            st.markdown(f"**{pair_label.replace('_', ' ↔ ')}**")
+            st.caption(f"{len(rows)} observations · {len(positive)} true economic positive")
+            st.caption(f"best true edge: {best:+.6f} $" if best is not None else "best true edge: —")
+
+    st.caption("Dernières observations économiquement positives (TRUE_ECONOMIC_POSITIVE) :")
+    positive_recent = [o for o in observations if o.get("TRUE_ECONOMIC_POSITIVE")][-15:]
+    if not positive_recent:
+        st.caption("Aucune opportunité économiquement positive observée pour l'instant.")
+    for o in reversed(positive_recent):
+        executable = o.get("EXECUTABLE_NOW")
+        badge = "✅ EXECUTABLE_NOW" if executable else f"⛔ {o.get('BLOCKER', 'BLOCKED')}"
+        old_edge = o.get("OLD_EDGE")
+        true_edge = o.get("TRUE_ECONOMIC_EDGE")
+        st.markdown(
+            f'<div style="font-family:monospace;font-size:0.85rem;color:{INK_SECONDARY};padding:3px 0;">'
+            f'{o.get("at", "—")} — {o.get("symbol")} {o.get("buy_exchange")}→{o.get("sell_exchange")} · '
+            f'OLD_EDGE={old_edge:+.4f} TRUE_EDGE={true_edge:+.4f} · {badge}</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def _render_live_controls(status_key: str) -> None:
     """Deliberately non-functional (user directive, 2026-08-25, section
     14: buttons must "demander confirmation" and never touch withdrawal/
@@ -2172,6 +2237,7 @@ def render_live_trading_page() -> None:
     _render_live_funnel(summary)
     _render_live_session_performance(summary, raw)
     _render_live_activity_feed(summary)
+    _render_v5_shadow_three_exchange()
     _render_live_controls(status_key)
 
 

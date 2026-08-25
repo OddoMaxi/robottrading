@@ -14,6 +14,7 @@ from app.execution.binance_account_client import BinanceAccountClient, BinanceCr
 from app.execution.binance_filters import SymbolNotFound as BinanceSymbolNotFound
 from app.execution.binance_filters import parse_symbol_rules as parse_binance_symbol_rules
 from app.execution.bybit_client import BybitClient, BybitCredentialsMissing
+from app.execution.okx_account_client import OkxAccountClient, OkxCredentialsMissing
 from app.execution.reality_quote import DEFAULT_TAKER_FEE_RATE
 from app.scanner.okx_public_client import OKX_ESTIMATED_MAKER_FEE_RATE, OKX_ESTIMATED_TAKER_FEE_RATE, OkxPublicClient, to_okx_symbol
 
@@ -53,10 +54,17 @@ class MultiExchangeSnapshotFetcher:
         binance: BinanceAccountClient | None = None,
         bybit: BybitClient | None = None,
         okx: OkxPublicClient | None = None,
+        okx_account: OkxAccountClient | None = None,
     ) -> None:
         self._binance = binance or BinanceAccountClient()
         self._bybit = bybit or BybitClient()
         self._okx = okx or OkxPublicClient()
+        # Separate from OkxPublicClient (unauthenticated, always usable):
+        # OkxAccountClient is only usable once okx_api_key/secret/
+        # passphrase are configured -- exactly the same optional-real-fee
+        # pattern _fetch_binance/_fetch_bybit already apply via their own
+        # account clients.
+        self._okx_account = okx_account or OkxAccountClient()
         self._rules_cache: dict[tuple[str, str], tuple[float, object]] = {}
         self._fee_cache: dict[tuple[str, str], tuple[float, object]] = {}
 
@@ -181,6 +189,16 @@ class MultiExchangeSnapshotFetcher:
         if rules is None:
             return None
 
+        cached_fee = self._fee_cache.get(cache_key)
+        if cached_fee is not None and now - cached_fee[0] < self.FEE_TTL_SECONDS:
+            fee = cached_fee[1]
+        else:
+            try:
+                fee = await self._okx_account.get_trade_fee(symbol)
+            except OkxCredentialsMissing:
+                fee = None
+            self._fee_cache[cache_key] = (now, fee)
+
         book_data = depth.get("data", [{}])
         levels = book_data[0] if book_data else {}
         return SymbolMarketData(
@@ -195,8 +213,8 @@ class MultiExchangeSnapshotFetcher:
             tick_size=rules.tick_size,
             min_notional=None,  # OKX spot publishes no separate notional floor; minSz (base asset) is the binding constraint
             tradable=rules.is_tradable,
-            maker_fee_rate=OKX_ESTIMATED_MAKER_FEE_RATE,
-            taker_fee_rate=OKX_ESTIMATED_TAKER_FEE_RATE,
-            fee_source="estimated_default",  # no okx_api_key configured — never fabricated as real
+            maker_fee_rate=fee.maker_fee_rate if fee is not None else OKX_ESTIMATED_MAKER_FEE_RATE,
+            taker_fee_rate=fee.taker_fee_rate if fee is not None else OKX_ESTIMATED_TAKER_FEE_RATE,
+            fee_source="real_account_fee" if fee is not None else "estimated_default",
             fetched_at=time.time(),
         )
