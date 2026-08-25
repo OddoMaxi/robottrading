@@ -2175,6 +2175,60 @@ def _render_v5_shadow_three_exchange() -> None:
         )
 
 
+def _render_v5_true_economic_live() -> None:
+    """V5 TRUE ECONOMIC LIVE (user directive, 2026-08-25, "AUTORISATION --
+    V5 TRUE ECONOMIC MICRO-LIVE -- 20 MINUTES"). Read-only, matching every
+    other section on this page -- this dashboard controls nothing about
+    the session, only displays its own status file. Success here is
+    measured by REAL_WEALTH_PNL (real liquidation net worth change), not
+    ACCOUNTING_PNL alone -- both are shown together specifically so a
+    reconciliation break is visible immediately, not just recorded in a
+    log."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">V5 TRUE ECONOMIC LIVE</div>', unsafe_allow_html=True)
+    live_status = data.get_v5_live_status_cached()
+    if not live_status.available:
+        st.caption("Aucune session V5 true-economic live en cours ou terminée récemment.")
+        return
+    raw = live_status.raw
+    if live_status.stale:
+        st.warning("Statut V5 live obsolète (le script ne semble plus tourner).")
+
+    status_label = raw.get("LIVE_STATUS", "—")
+    st.caption(f"LIVE_STATUS = {status_label}" + (f"  ·  ACTIVE = {raw['ACTIVE']}" if raw.get("ACTIVE") else ""))
+
+    cols = st.columns(4)
+    start_nw = raw.get("START_NET_WORTH") or raw.get("START_LIQUIDATION_NET_WORTH")
+    current_nw = raw.get("CURRENT_NET_WORTH") or raw.get("END_LIQUIDATION_NET_WORTH")
+    real_wealth_pnl = raw.get("REAL_WEALTH_PNL")
+    return_pct = raw.get("REAL_WEALTH_RETURN_PCT")
+    cols[0].metric("START NET WORTH", f"{start_nw:.4f} $" if start_nw is not None else "—")
+    cols[1].metric("CURRENT NET WORTH", f"{current_nw:.4f} $" if current_nw is not None else "—")
+    cols[2].metric("REAL WEALTH PNL", f"{real_wealth_pnl:+.4f} $" if real_wealth_pnl is not None else "—")
+    cols[3].metric("REAL WEALTH RETURN %", f"{return_pct:+.4f}%" if return_pct is not None else "—")
+
+    cols2 = st.columns(4)
+    accounting_pnl = raw.get("ACCOUNTING_PNL")
+    reconciliation_error = raw.get("PNL_RECONCILIATION_ERROR")
+    within_tolerance = raw.get("WITHIN_TOLERANCE", raw.get("RECONCILIATION_WITHIN_TOLERANCE"))
+    cols2[0].metric("ACCOUNTING PNL", f"{accounting_pnl:+.4f} $" if accounting_pnl is not None else "—")
+    cols2[1].metric("PNL RECONCILIATION ERROR", f"{reconciliation_error:+.6f} $" if reconciliation_error is not None else "—")
+    cols2[2].metric("RECONCILED", "✅ YES" if within_tolerance else ("⛔ NO" if within_tolerance is False else "—"))
+    cols2[3].metric("REAL TRADES", raw.get("REAL_TRADES", raw.get("COMPLETE_REAL_ARBITRAGES", "—")))
+
+    if within_tolerance is False:
+        st.error("INVARIANT ROMPU: ABS(ACCOUNTING_PNL - REAL_WEALTH_PNL) > 0.01 USDT -- la session doit s'être arrêtée (SAFE STOP IMMEDIATE).")
+
+    cols3 = st.columns(4)
+    cols3[0].metric("TRUE ECONOMIC REJECTIONS", raw.get("TRUE_ECONOMIC_REJECTIONS", "—"))
+    cols3[1].metric("INVENTORY PNL", f"{raw.get('INVENTORY_PNL', 0.0):+.4f} $")
+    cols3[2].metric("REBALANCING PNL", f"{raw.get('REBALANCING_PNL', 0.0):+.4f} $")
+    cols3[3].metric("TOTAL FEES", f"{raw.get('TOTAL_FEES', raw.get('TOTAL_REAL_FEES', 0.0)):.4f} $")
+
+    okx_positives = raw.get("OKX_TRUE_POSITIVE_OBSERVATIONS")
+    if okx_positives is not None:
+        st.caption(f"OKX SHADOW TRUE POSITIVES (même fenêtre, OKX jamais tradé réellement) = {okx_positives}")
+
+
 def _render_live_controls(status_key: str) -> None:
     """Deliberately non-functional (user directive, 2026-08-25, section
     14: buttons must "demander confirmation" and never touch withdrawal/
@@ -2237,6 +2291,7 @@ def render_live_trading_page() -> None:
     _render_live_funnel(summary)
     _render_live_session_performance(summary, raw)
     _render_live_activity_feed(summary)
+    _render_v5_true_economic_live()
     _render_v5_shadow_three_exchange()
     _render_live_controls(status_key)
 

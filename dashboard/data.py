@@ -1648,6 +1648,39 @@ def get_v5_shadow_observations_cached() -> list[dict]:
     return fetch_v5_shadow_observations()
 
 
+# V5 TRUE ECONOMIC MICRO-LIVE (user directive, 2026-08-25, "AUTORISATION
+# -- V5 TRUE ECONOMIC MICRO-LIVE -- 20 MINUTES"). Same read-only file
+# pattern as LIVE_STATUS_FILE/V5_SHADOW_STATUS_FILE above -- this page
+# never controls the live session, only displays what its own status
+# file reports.
+V5_LIVE_STATUS_FILE = Path("/tmp/robotcripto_v5_live_status.json")
+V5_LIVE_STATUS_STALE_AFTER_SECONDS = 60.0
+
+
+@dataclass(slots=True)
+class V5LiveStatus:
+    available: bool
+    stale: bool = False
+    age_seconds: float | None = None
+    raw: dict = field(default_factory=dict)
+
+
+def fetch_v5_live_status() -> V5LiveStatus:
+    try:
+        mtime = V5_LIVE_STATUS_FILE.stat().st_mtime
+        age = datetime.now(UTC).timestamp() - mtime
+        payload = json.loads(V5_LIVE_STATUS_FILE.read_text())
+        stale = age > V5_LIVE_STATUS_STALE_AFTER_SECONDS and payload.get("LIVE_STATUS") in ("RUNNING", "EXECUTING")
+        return V5LiveStatus(available=True, stale=stale, age_seconds=age, raw=payload)
+    except Exception:
+        return V5LiveStatus(available=False)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def get_v5_live_status_cached() -> V5LiveStatus:
+    return fetch_v5_live_status()
+
+
 async def _fresh_price(exchange: str, binance_read: BinanceAccountClient, bybit_read: BybitClient, symbol: str) -> float | None:
     """Best-effort current price for one symbol on one exchange -- mid of
     bid/ask, or whichever side is available. Never raises."""
