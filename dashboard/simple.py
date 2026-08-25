@@ -1769,10 +1769,14 @@ def _render_live_capital_rebalancer(summary, raw: dict) -> None:
     inventory_pnl = raw.get("INVENTORY_PNL")
     rebalancing_pnl = raw.get("REBALANCING_PNL")
     true_net_pnl = raw.get("TRUE_SESSION_NET_PNL")
+    inventory_constitutions = raw.get("INVENTORY_CONSTITUTIONS")
+    inventory_recycling = raw.get("INVENTORY_RECYCLING_EVENTS")
     render_stat_cards(
         [
             {"label": "TOTAL REBALANCES (session)", "value": f"{total_rebalances}" if total_rebalances is not None else "—"},
             {"label": "REBALANCING COST (session)", "value": _money4(rebalancing_cost) if rebalancing_cost is not None else "—"},
+            {"label": "INVENTORY ACTIONS (session)", "value": f"{inventory_constitutions}" if inventory_constitutions is not None else "—",
+             "sub": f"{inventory_recycling} recycling" if inventory_recycling is not None else None},
             {"label": "ARBITRAGE P&L (session)", "value": _money4_signed(arbitrage_pnl) if arbitrage_pnl is not None else "—"},
             {"label": "INVENTORY P&L (session)", "value": _money4_signed(inventory_pnl) if inventory_pnl is not None else "—"},
             {"label": "REBALANCING P&L (session)", "value": _money4_signed(rebalancing_pnl) if rebalancing_pnl is not None else "—"},
@@ -1814,14 +1818,17 @@ def _render_live_self_healing(summary) -> None:
 
     exch_status = summary.exchange_status or {}
     if exch_status:
-        render_stat_cards([{"label": f"EXCHANGE STATUS — {ex.upper()}", "value": status} for ex, status in exch_status.items()])
+        render_stat_cards([{"label": f"EXCHANGE CIRCUIT BREAKER — {ex.upper()}", "value": status} for ex, status in exch_status.items()])
 
+    st.markdown('<div class="simple-card-label" style="margin-top:14px;">SYMBOL CIRCUIT BREAKERS</div>', unsafe_allow_html=True)
     if summary.symbols_temporarily_paused:
         st.markdown(
-            f'<div class="simple-state-card warn"><div class="simple-state-title">SYMBOLS TEMPORARILY PAUSED</div>'
+            f'<div class="simple-state-card warn"><div class="simple-state-title">TEMPORARILY PAUSED</div>'
             f'<div class="simple-state-body">{", ".join(summary.symbols_temporarily_paused)}</div></div>',
             unsafe_allow_html=True,
         )
+    else:
+        st.caption("Aucun symbole en pause.")
 
     if summary.last_auto_recovery:
         st.markdown(
