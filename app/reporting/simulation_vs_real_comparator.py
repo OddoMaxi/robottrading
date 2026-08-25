@@ -281,13 +281,25 @@ def classify_difference(
     if real.slippage_pct >= 100.0:
         causes.append("REAL_DEPTH_INSUFFICIENT")
 
+    # Quantity sufficiency is checked BEFORE "cost basis unknown": a pool's
+    # apply_sell fails identically (returns None) whether the real balance
+    # is genuinely zero, a ledger-tracking gap, OR simply too small to
+    # cover what THIS trade needs -- collapsing those into "unknown cost
+    # basis" would misdiagnose the common real case where the account
+    # holds *some* of the asset but not enough for even REAL's own
+    # (much smaller, fixed-notional) requested quantity, let alone
+    # SIM's larger optimal-size one.
     if real_sell_inventory_qty <= 1e-9:
         causes.append("SIMULATION_ASSUMED_IMPOSSIBLE_INVENTORY")
         causes.append("SELL_INVENTORY_MISSING")
+    elif real_sell_inventory_qty < real.common_qty - 1e-9:
+        causes.append("SELL_INVENTORY_MISSING")  # real balance can't even cover REAL's own requested qty
+        if real_sell_inventory_qty < sim.sell_qty - 1e-9:
+            causes.append("SIMULATION_ASSUMED_IMPOSSIBLE_INVENTORY")
     elif real.sell_side_cost_basis_usd is None:
-        causes.append("SELL_COST_BASIS_UNKNOWN")
+        causes.append("SELL_COST_BASIS_UNKNOWN")  # real balance covers REAL's requested qty, but the pool still failed -- a genuine ledger-tracking gap
     elif real.common_qty < sim.sell_qty - 1e-9:
-        causes.append("SELL_INVENTORY_MISSING")  # real inventory exists but less than sim assumed
+        causes.append("SELL_INVENTORY_MISSING")  # real inventory covers REAL's own size but less than sim's larger assumed size
 
     if sim_recalculated_true_economic_pnl is not None and sim_recalculated_true_economic_pnl <= 0 and sim.net_pnl_usd is not None and sim.net_pnl_usd > 0:
         causes.append("SIMULATION_ACCOUNTING_BIAS")
