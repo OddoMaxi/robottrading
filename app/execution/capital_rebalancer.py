@@ -80,7 +80,7 @@ def evaluate_reserve_impact(current_usdt: float, reserve_floor: float, trade_not
 
 
 class TradeDecision(StrEnum):
-    PROCEED = "PROCEED"
+    ALLOW = "ALLOW"
     DO_NOT_TRADE = "DO_NOT_TRADE"
     REBALANCE_FIRST = "REBALANCE_FIRST"
     PREFER_OPPOSITE_DIRECTION = "PREFER_OPPOSITE_DIRECTION"
@@ -114,7 +114,7 @@ def decide_trade_with_reserve_check(
     trade through."""
     impact = evaluate_reserve_impact(buy_exchange_usdt, buy_exchange_floor, trade_notional_usdt)
     if not impact.would_breach:
-        return TradeDecisionResult(TradeDecision.PROCEED, "trade does not breach the buy exchange's reserve floor", impact)
+        return TradeDecisionResult(TradeDecision.ALLOW, "trade does not breach the buy exchange's reserve floor", impact)
     if opposite_direction_available_and_profitable:
         return TradeDecisionResult(
             TradeDecision.PREFER_OPPOSITE_DIRECTION,
@@ -178,3 +178,128 @@ def classify_inventory_position(
     if currently_qualifying:
         return InventoryDecision(InventoryAction.REUSE, "symbol currently shows a qualifying real short-term edge (CONFIRMED_SHORT_TERM or better) -- likely to be sold into a real arbitrage again soon")
     return InventoryDecision(InventoryAction.KEEP, "no immediate reserve pressure on this exchange and no currently-qualifying edge -- no action needed right now")
+
+
+def compute_rebalance_realized_pnl(qty_sold: float, sell_price_usdt: float, cost_basis_usdt_per_unit: float | None, fee_usd: float) -> float | None:
+    """Pure function (user directive, 2026-08-25, REBALANCING_PNL). The
+    REALIZED gain/loss from a rebalance sell -- selling inventory back to
+    USDT is a real trade with a real result, not a free/neutral action:
+    "un arbitrage a +0.20 USDT suivi d'un rebalance coutant -0.05 USDT
+    doit contribuer seulement +0.15 USDT au resultat economique global."
+    Returns None (never a fabricated number) when the cost basis is
+    unknown -- matches app.reporting.live_trading_dashboard's own
+    weighted-average cost-basis convention, so a rebalance's P&L and the
+    dashboard's inventory unrealized-P&L are always computed the same way."""
+    if cost_basis_usdt_per_unit is None:
+        return None
+    return (sell_price_usdt - cost_basis_usdt_per_unit) * qty_sold - fee_usd
+
+
+@dataclass(slots=True)
+class ReplayEvent:
+    """One real historical USDT-spending event -- either an arbitrage
+    buy leg or an inventory constitution, whichever ledger it came from.
+    kind is informational only; spend_exchange/spend_notional is what
+    the reserve check actually acts on regardless of kind, which is the
+    whole point (item 1 of the 2026-08-25 integration directive: the
+    same check applies before arbitrage BUY, inventory constitution, AND
+    inventory recycling)."""
+
+    at: object  # datetime -- left untyped to avoid importing datetime just for a replay-only sort key
+    kind: str
+    symbol: str
+    spend_exchange: str
+    receive_exchange: str | None
+    spend_notional_usdt: float
+    receive_notional_usdt: float
+    price_usdt: float
+    qty_received_net: float
+    qty_sold: float
+
+
+@dataclass(slots=True)
+class ReplayStepResult:
+    event: ReplayEvent
+    decision: TradeDecisionResult
+    binance_usdt_after: float
+    bybit_usdt_after: float
+
+
+@dataclass(slots=True)
+class ReplayResult:
+    steps: list[ReplayStepResult]
+    min_binance_usdt: float
+    min_bybit_usdt: float
+    end_binance_usdt: float
+    end_bybit_usdt: float
+    interventions: int
+
+
+def simulate_event_sequence(
+    events: list[ReplayEvent],
+    *,
+    starting_binance_usdt: float,
+    starting_bybit_usdt: float,
+    binance_floor: float,
+    bybit_floor: float,
+    taker_fee_rate: float = 0.001,
+) -> ReplayResult:
+    """Pure function, no I/O. Replays a chronological sequence of real
+    USDT-spending events through decide_trade_with_reserve_check,
+    simulating the SAME REBALANCE_FIRST mechanics the live orchestrator
+    uses: sell just enough already-accumulated same-exchange inventory
+    (never more than the real shortfall, per the user's own "utiliser
+    uniquement la quantite minimale necessaire") to clear the floor,
+    then let the event proceed. DO_NOT_TRADE skips the event entirely.
+    opposite-direction preference is NOT modeled here (it would require
+    re-deriving what alternative candidates were live-scanned at each
+    historical instant, which isn't reconstructable after the fact) --
+    this makes simulate_event_sequence a deliberate LOWER BOUND on how
+    much the real integrated system would help, not an exact replay.
+
+    This is the same logic tests/test_capital_rebalancer_replay.py runs
+    against the 31 real historical events from 2026-08-24 as a
+    permanent regression -- proving this specific incident (Binance
+    draining to 2.66 USDT) cannot silently recur uncaught."""
+    usdt = {"binance": starting_binance_usdt, "bybit": starting_bybit_usdt}
+    base: dict[str, dict[str, float]] = {"binance": {}, "bybit": {}}
+    steps: list[ReplayStepResult] = []
+    min_binance = starting_binance_usdt
+    min_bybit = starting_bybit_usdt
+    interventions = 0
+
+    for event in events:
+        base_asset = event.symbol.removesuffix("USDT")
+        spend_exch = event.spend_exchange
+        floor = binance_floor if spend_exch == "binance" else bybit_floor
+        reconvertible_value = base[spend_exch].get(base_asset, 0.0) * event.price_usdt
+
+        decision = decide_trade_with_reserve_check(
+            buy_exchange_usdt=usdt[spend_exch], buy_exchange_floor=floor, trade_notional_usdt=event.spend_notional_usdt,
+            opposite_direction_available_and_profitable=False,
+            reconvertible_inventory_value_usdt_on_buy_exchange=reconvertible_value,
+        )
+        if decision.decision != TradeDecision.ALLOW:
+            interventions += 1
+
+        if decision.decision == TradeDecision.DO_NOT_TRADE:
+            steps.append(ReplayStepResult(event, decision, usdt["binance"], usdt["bybit"]))
+            min_binance, min_bybit = min(min_binance, usdt["binance"]), min(min_bybit, usdt["bybit"])
+            continue
+
+        if decision.decision == TradeDecision.REBALANCE_FIRST:
+            qty_to_sell = min(decision.impact.shortfall_usdt / event.price_usdt if event.price_usdt else 0.0, base[spend_exch].get(base_asset, 0.0))
+            proceeds = qty_to_sell * event.price_usdt * (1 - taker_fee_rate)
+            base[spend_exch][base_asset] = base[spend_exch].get(base_asset, 0.0) - qty_to_sell
+            usdt[spend_exch] += proceeds
+
+        usdt[spend_exch] -= event.spend_notional_usdt
+        base[spend_exch][base_asset] = base[spend_exch].get(base_asset, 0.0) + event.qty_received_net
+        if event.receive_exchange:
+            base[event.receive_exchange][base_asset] = base[event.receive_exchange].get(base_asset, 0.0) - event.qty_sold
+            usdt[event.receive_exchange] += event.receive_notional_usdt
+
+        steps.append(ReplayStepResult(event, decision, usdt["binance"], usdt["bybit"]))
+        min_binance, min_bybit = min(min_binance, usdt["binance"]), min(min_bybit, usdt["bybit"])
+
+    return ReplayResult(steps=steps, min_binance_usdt=min_binance, min_bybit_usdt=min_bybit, end_binance_usdt=usdt["binance"], end_bybit_usdt=usdt["bybit"], interventions=interventions)
