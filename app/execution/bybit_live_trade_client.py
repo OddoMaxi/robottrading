@@ -93,25 +93,33 @@ def _parse_order_ack(data: dict) -> BybitOrderAck:
     return BybitOrderAck(order_id=str(result.get("orderId", "")), order_link_id=str(result.get("orderLinkId", "")), raw=data)
 
 
+def _parse_one_order_status(entry: dict) -> BybitOrderStatus:
+    avg_price = entry.get("avgPrice")
+    fee_detail_raw = entry.get("cumFeeDetail") or {}
+    cum_fee_detail = {str(asset): float(amount) for asset, amount in fee_detail_raw.items()}
+    return BybitOrderStatus(
+        order_id=str(entry.get("orderId", "")),
+        order_link_id=str(entry.get("orderLinkId", "")),
+        symbol=str(entry.get("symbol", "")),
+        side=str(entry.get("side", "")),
+        order_status=str(entry.get("orderStatus", "")),
+        cum_exec_qty=float(entry.get("cumExecQty", 0.0) or 0.0),
+        cum_exec_value=float(entry.get("cumExecValue", 0.0) or 0.0),
+        cum_exec_fee=float(entry.get("cumExecFee", 0.0) or 0.0),
+        avg_price=float(avg_price) if avg_price else None,
+        raw=entry,
+        cum_fee_detail=cum_fee_detail,
+    )
+
+
 def _parse_order_status(data: dict) -> BybitOrderStatus | None:
     for entry in data.get("result", {}).get("list", []):
-        avg_price = entry.get("avgPrice")
-        fee_detail_raw = entry.get("cumFeeDetail") or {}
-        cum_fee_detail = {str(asset): float(amount) for asset, amount in fee_detail_raw.items()}
-        return BybitOrderStatus(
-            order_id=str(entry.get("orderId", "")),
-            order_link_id=str(entry.get("orderLinkId", "")),
-            symbol=str(entry.get("symbol", "")),
-            side=str(entry.get("side", "")),
-            order_status=str(entry.get("orderStatus", "")),
-            cum_exec_qty=float(entry.get("cumExecQty", 0.0) or 0.0),
-            cum_exec_value=float(entry.get("cumExecValue", 0.0) or 0.0),
-            cum_exec_fee=float(entry.get("cumExecFee", 0.0) or 0.0),
-            avg_price=float(avg_price) if avg_price else None,
-            raw=entry,
-            cum_fee_detail=cum_fee_detail,
-        )
+        return _parse_one_order_status(entry)
     return None
+
+
+def _parse_order_status_list(data: dict) -> list[BybitOrderStatus]:
+    return [_parse_one_order_status(entry) for entry in data.get("result", {}).get("list", [])]
 
 
 def _sign(secret: str, payload: str) -> str:
@@ -237,6 +245,38 @@ class BybitLiveTradeClient:
                 response.raise_for_status()
                 data = await response.json()
         return _parse_order_status(data)
+
+    async def get_open_orders(self, symbol: str | None = None) -> list[BybitOrderStatus]:
+        """GET /v5/order/realtime — SIGNED, read-only, called with NEITHER
+        orderId NOR orderLinkId (a documented, valid Bybit v5 call shape
+        that returns every currently open order for the category,
+        optionally scoped to one symbol). Added for AUTONOMOUS 24/7
+        startup safety (user directive, 2026-08-25) -- see
+        BinanceLiveTradeClient.get_open_orders's docstring for the full
+        rationale: any order found here at startup is inherently
+        anomalous under this system's own design (MAX_CONCURRENT=1,
+        always polled to terminal before moving on) and must never be
+        silently assumed resolved either way."""
+        params: dict = {"category": "spot"}
+        if symbol is not None:
+            params["symbol"] = symbol
+        query = urlencode(params)
+        timestamp = str(int(time.time() * 1000))
+        settings = get_settings()
+        if not settings.bybit_api_key or not settings.bybit_api_secret:
+            raise BybitLiveCredentialsMissing("bybit_api_key/bybit_api_secret not configured")
+        payload = timestamp + settings.bybit_api_key + str(RECV_WINDOW_MS) + query
+        headers = self._signed_headers(timestamp, payload)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/v5/order/realtime",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return _parse_order_status_list(data)
 
     async def get_order_history(self, symbol: str, order_id: str | None = None, order_link_id: str | None = None) -> BybitOrderStatus | None:
         """GET /v5/order/history — SIGNED. Fallback for an order that has

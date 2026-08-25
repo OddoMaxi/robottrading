@@ -228,6 +228,33 @@ class BinanceLiveTradeClient:
                 data = await response.json()
         return _parse_order_result(data)
 
+    async def get_open_orders(self, symbol: str | None = None) -> list[BinanceOrderResult]:
+        """GET /api/v3/openOrders — SIGNED, read-only (a GET, never an
+        order-submission call). Lists every order still in a non-terminal
+        state (NEW/PARTIALLY_FILLED) account-wide (or for one symbol).
+        Added for AUTONOMOUS 24/7 startup safety (user directive,
+        2026-08-25): before resuming any new trading after a restart
+        (fresh start, crash recovery, or VPS reboot), the caller must
+        confirm this returns empty -- this system's own design never
+        leaves an order open across a cycle boundary (MAX_CONCURRENT=1,
+        always polled to a terminal status before moving on), so any
+        order found here at startup is inherently anomalous and must
+        never be silently assumed resolved either way."""
+        extra: dict = {}
+        if symbol is not None:
+            extra["symbol"] = symbol
+        headers, params = self._signed_request_params(extra)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self._base_url}/api/v3/openOrders",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return [_parse_order_result(o) for o in data]
+
     async def get_order_trades(self, symbol: str, order_id: int) -> list[BinanceTrade]:
         """GET /api/v3/myTrades — SIGNED, filtered to one orderId. The
         authoritative source for real per-fill commission/commissionAsset/

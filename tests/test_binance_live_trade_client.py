@@ -66,6 +66,24 @@ def test_parse_new_order_is_not_terminal():
     assert result.average_fill_price() is None
 
 
+def test_get_open_orders_parses_a_list_of_order_dicts_the_same_way_as_a_single_order():
+    """GET /api/v3/openOrders returns a bare JSON array of order objects
+    -- the same shape _parse_order_result already handles per-item, just
+    without a 'fills' key (open orders have no fills yet)."""
+    raw_list = [
+        {"symbol": "RVNUSDT", "orderId": 1, "clientOrderId": "a", "status": "NEW", "executedQty": "0", "cummulativeQuoteQty": "0"},
+        {"symbol": "ZILUSDT", "orderId": 2, "clientOrderId": "b", "status": "PARTIALLY_FILLED", "executedQty": "10", "cummulativeQuoteQty": "1"},
+    ]
+    parsed = [_parse_order_result(o) for o in raw_list]
+    assert len(parsed) == 2
+    assert parsed[0].symbol == "RVNUSDT" and parsed[0].is_terminal is False
+    assert parsed[1].symbol == "ZILUSDT" and parsed[1].is_partially_filled is True
+
+
+def test_get_open_orders_empty_list_parses_to_no_orders():
+    assert [_parse_order_result(o) for o in []] == []
+
+
 def test_average_fill_price_none_when_nothing_executed():
     result = _parse_order_result(NEW_ORDER_FIXTURE)
     assert result.average_fill_price() is None
@@ -168,6 +186,43 @@ async def test_get_order_trades_hits_my_trades_endpoint_and_parses_the_response(
     assert trades[0].qty == 3003.5
     assert trades[0].commission == 3.0035
     assert trades[0].commission_asset == "LUNC"
+
+
+# ---- get_open_orders (real network call, mocked) --------------------------
+
+
+async def test_get_open_orders_hits_the_open_orders_endpoint_and_parses_every_entry(monkeypatch):
+    payload = [
+        {"symbol": "RVNUSDT", "orderId": 1, "clientOrderId": "a", "status": "NEW", "executedQty": "0", "cummulativeQuoteQty": "0"},
+        {"symbol": "ZILUSDT", "orderId": 2, "clientOrderId": "b", "status": "PARTIALLY_FILLED", "executedQty": "10", "cummulativeQuoteQty": "1"},
+    ]
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.binance_live_trade_client.get_settings", _fake_settings)
+    client = BinanceLiveTradeClient()
+    with patch("app.execution.binance_live_trade_client.aiohttp.ClientSession", return_value=_FakeMyTradesSession(payload, captured)):
+        orders = await client.get_open_orders()
+    assert "/api/v3/openOrders" in captured["url"]
+    assert "symbol" not in captured["params"]  # no symbol given -- account-wide
+    assert len(orders) == 2
+    assert {o.symbol for o in orders} == {"RVNUSDT", "ZILUSDT"}
+
+
+async def test_get_open_orders_with_no_open_orders_returns_empty_list(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.binance_live_trade_client.get_settings", _fake_settings)
+    client = BinanceLiveTradeClient()
+    with patch("app.execution.binance_live_trade_client.aiohttp.ClientSession", return_value=_FakeMyTradesSession([], captured)):
+        orders = await client.get_open_orders()
+    assert orders == []
+
+
+async def test_get_open_orders_can_be_scoped_to_one_symbol(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.binance_live_trade_client.get_settings", _fake_settings)
+    client = BinanceLiveTradeClient()
+    with patch("app.execution.binance_live_trade_client.aiohttp.ClientSession", return_value=_FakeMyTradesSession([], captured)):
+        await client.get_open_orders(symbol="RVNUSDT")
+    assert captured["params"]["symbol"] == "RVNUSDT"
 
 
 async def test_get_order_trades_empty_when_no_trades_found(monkeypatch):

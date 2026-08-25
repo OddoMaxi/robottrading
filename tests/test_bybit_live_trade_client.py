@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.execution.bybit_live_trade_client import BybitLiveTradeClient, _parse_order_ack, _parse_order_status
+from app.execution.bybit_live_trade_client import BybitLiveTradeClient, _parse_order_ack, _parse_order_status, _parse_order_status_list
 
 ACK_FIXTURE = {"retCode": 0, "retMsg": "OK", "result": {"orderId": "abc123", "orderLinkId": "my-link-1"}}
 
@@ -133,6 +133,99 @@ def test_parse_order_status_returns_none_when_order_not_found():
     """An order that already rolled off this endpoint must return None,
     never a fabricated status — the caller falls back to order history."""
     assert _parse_order_status(EMPTY_STATUS_FIXTURE) is None
+
+
+# ---- get_open_orders / _parse_order_status_list (AUTONOMOUS 24/7 startup
+# safety, user directive 2026-08-25) -----------------------------------------
+
+
+TWO_OPEN_ORDERS_FIXTURE = {
+    "result": {
+        "list": [
+            {"orderId": "o1", "orderLinkId": "l1", "symbol": "RVNUSDT", "side": "Sell", "orderStatus": "New", "cumExecQty": "0", "cumExecValue": "0", "cumExecFee": "0", "avgPrice": ""},
+            {"orderId": "o2", "orderLinkId": "l2", "symbol": "ZILUSDT", "side": "Buy", "orderStatus": "PartiallyFilled", "cumExecQty": "10", "cumExecValue": "1", "cumExecFee": "0.001", "avgPrice": "0.1"},
+        ]
+    }
+}
+
+
+def test_parse_order_status_list_returns_every_entry():
+    statuses = _parse_order_status_list(TWO_OPEN_ORDERS_FIXTURE)
+    assert len(statuses) == 2
+    assert {s.symbol for s in statuses} == {"RVNUSDT", "ZILUSDT"}
+    assert statuses[1].is_partially_filled is True
+
+
+def test_parse_order_status_list_empty_when_nothing_open():
+    assert _parse_order_status_list(EMPTY_STATUS_FIXTURE) == []
+
+
+class _FakeGetResponse:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+    async def json(self) -> dict:
+        return self._payload
+
+    async def __aenter__(self) -> "_FakeGetResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeGetSession:
+    def __init__(self, payload: dict, captured: dict) -> None:
+        self._payload = payload
+        self._captured = captured
+
+    def get(self, url: str, headers=None, params=None, timeout=None):
+        self._captured["url"] = url
+        self._captured["params"] = params
+        return _FakeGetResponse(self._payload)
+
+    async def __aenter__(self) -> "_FakeGetSession":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+async def test_get_open_orders_hits_realtime_endpoint_with_neither_order_id(monkeypatch):
+    """Confirms the account-wide call shape: category=spot, no orderId,
+    no orderLinkId -- a documented, valid way to list every open order."""
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.bybit_live_trade_client.get_settings", lambda: SimpleNamespace(bybit_api_key="k", bybit_api_secret="s"))
+    client = BybitLiveTradeClient()
+    with patch("app.execution.bybit_live_trade_client.aiohttp.ClientSession", return_value=_FakeGetSession(TWO_OPEN_ORDERS_FIXTURE, captured)):
+        orders = await client.get_open_orders()
+    assert "/v5/order/realtime" in captured["url"]
+    assert captured["params"]["category"] == "spot"
+    assert "orderId" not in captured["params"]
+    assert "orderLinkId" not in captured["params"]
+    assert "symbol" not in captured["params"]
+    assert len(orders) == 2
+
+
+async def test_get_open_orders_with_no_open_orders_returns_empty_list(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.bybit_live_trade_client.get_settings", lambda: SimpleNamespace(bybit_api_key="k", bybit_api_secret="s"))
+    client = BybitLiveTradeClient()
+    with patch("app.execution.bybit_live_trade_client.aiohttp.ClientSession", return_value=_FakeGetSession(EMPTY_STATUS_FIXTURE, captured)):
+        orders = await client.get_open_orders()
+    assert orders == []
+
+
+async def test_get_open_orders_can_be_scoped_to_one_symbol(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.bybit_live_trade_client.get_settings", lambda: SimpleNamespace(bybit_api_key="k", bybit_api_secret="s"))
+    client = BybitLiveTradeClient()
+    with patch("app.execution.bybit_live_trade_client.aiohttp.ClientSession", return_value=_FakeGetSession(EMPTY_STATUS_FIXTURE, captured)):
+        await client.get_open_orders(symbol="RVNUSDT")
+    assert captured["params"]["symbol"] == "RVNUSDT"
 
 
 # ---- place_market_order payload construction (2026-08-24 fix) ------------
