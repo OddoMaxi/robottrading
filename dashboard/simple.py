@@ -2433,33 +2433,43 @@ def render_live_trading_page() -> None:
     (tests/test_dashboard_is_read_only.py enforces this mechanically for
     dashboard/data.py); its one live control (kill switch) only ever
     engages a stop, never initiates a trade."""
-    script_status = data.get_live_script_status_cached()
-    summary = data.get_live_trading_page_summary_cached()
-    raw = script_status.raw if script_status.available else {}
-
-    status_key = _render_live_header(script_status, raw)
-    if not summary.reachable:
-        st.error("Base de données injoignable — impossible d'afficher les données réelles.")
-        return
-
-    _render_live_capital(summary)
-    _render_live_capital_rebalancer(summary, raw)
-    _render_live_self_healing(summary)
-    _render_live_pnl(summary, raw)
-    _render_live_trades(summary)
-    _render_live_best_opportunity()
-    _render_live_inventory(summary)
-    _render_live_active_cycle(raw)
-    _render_live_predicted_vs_actual(summary)
-    _render_live_safety(script_status, raw, summary)
-    _render_live_funnel(summary)
-    _render_live_session_performance(summary, raw)
-    _render_live_activity_feed(summary)
+    # V5 AUTONOMOUS is the engine actually placing real orders right now
+    # -- it leads the page, unconditionally, before anything that depends
+    # on the DB or on V4's own (permanently stale -- V4 has been disabled
+    # all session) status file. User directive, 2026-08-26: the old V4
+    # header/sections used to render first and claimed "RUNNING" from a
+    # 16h-old file even though V4 is disabled, which is exactly backwards
+    # from "what's really live right now."
     _render_v5_autonomous_live()
     _render_v5_true_economic_live()
     _render_v5_shadow_three_exchange()
     _render_v5_continuous_okx_validation()
-    _render_live_controls(status_key)
+
+    script_status = data.get_live_script_status_cached()
+    summary = data.get_live_trading_page_summary_cached()
+    raw = script_status.raw if script_status.available else {}
+
+    with st.expander("V4 (moteur désactivé) — données historiques uniquement, jamais en direct", expanded=False):
+        st.caption("Le moteur V4 est arrêté depuis le début de cette session. Tout ce qui suit vient de son dernier fichier de statut "
+                   "et de ses exécutions passées en base — utile pour l'historique, jamais pour savoir ce qui tourne réellement maintenant.")
+        status_key = _render_live_header(script_status, raw)
+        if not summary.reachable:
+            st.error("Base de données injoignable — impossible d'afficher les données réelles.")
+        else:
+            _render_live_capital(summary)
+            _render_live_capital_rebalancer(summary, raw)
+            _render_live_self_healing(summary)
+            _render_live_pnl(summary, raw)
+            _render_live_trades(summary)
+            _render_live_best_opportunity()
+            _render_live_inventory(summary)
+            _render_live_active_cycle(raw)
+            _render_live_predicted_vs_actual(summary)
+            _render_live_safety(script_status, raw, summary)
+            _render_live_funnel(summary)
+            _render_live_session_performance(summary, raw)
+            _render_live_activity_feed(summary)
+            _render_live_controls(status_key)
 
 
 def render_simple_mode() -> None:
