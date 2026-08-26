@@ -155,6 +155,98 @@ def evaluate_arbitrage_true_economics(
 
 
 @dataclass(slots=True, frozen=True)
+class JointConstitutionArbitrageQuote:
+    """The result of judging inventory constitution TOGETHER with the
+    real arbitrage it exists to fund, never in isolation."""
+
+    constitution_cost_usd: float
+    post_constitution_pool: CostBasisPool
+    arbitrage: TrueEconomicQuote
+    residual_qty: float
+    residual_value_usd: float | None  # unrealized value of any leftover inventory at current mark price -- None if no mark price supplied
+    total_true_economic_result_usd: float | None
+    would_proceed: bool
+    reason: str
+
+
+def evaluate_joint_constitution_and_arbitrage(
+    *,
+    sell_pool: CostBasisPool,
+    constitution_qty: float, constitution_price: float, constitution_fee_amount: float, constitution_fee_asset: str,
+    arb_sell_qty: float, arb_sell_price: float, arb_sell_fee_amount: float, arb_sell_fee_asset: str,
+    buy_pool: CostBasisPool, arb_buy_qty: float, arb_buy_price: float, arb_buy_fee_amount: float, arb_buy_fee_asset: str,
+    arb_buy_side_mark_price: float,
+    residual_mark_price: float | None = None,
+    rebalance_impact_usd: float = 0.0,
+    required_safety_margin_usd: float = 0.0,
+    quote_asset: str = QUOTE_ASSET,
+) -> JointConstitutionArbitrageQuote:
+    """Pure. User directive, 2026-08-25 ("V5 AUTONOMOUS LIVE ENGINE",
+    item 5): "Ne juge plus une constitution d'inventaire uniquement sur
+    achat a ask -> valorisation immediate au bid. Cela bloque
+    structurellement certains arbitrages valables." Confirmed exactly
+    this way in the Digital Twin's own live run immediately before this
+    mission: every isolated evaluate_inventory_constitution_true_
+    economics call showed an instant paper loss (buying at ask and
+    marking at bid always costs the spread) and was rejected 56/56
+    times at a zero safety margin -- not a bug, a structurally
+    impossible bar for a standalone buy to ever clear.
+
+    The fix is not a new pricing formula: apply_buy simulates the
+    constitution directly onto sell_pool (its ask price and real fee
+    become part of that pool's own cost basis, by construction), then
+    evaluate_arbitrage_true_economics runs UNCHANGED against the
+    resulting pool. SELL_SIDE_REALIZED_PNL from that one call already
+    nets the constitution's cost against the arbitrage's real sell
+    proceeds -- there is no separate "constitution cost" term to add a
+    second time; doing so would double-count it. required_safety_margin_usd
+    gates the TOTAL (arbitrage result + any leftover inventory's honest
+    unrealized value), never the constitution step in isolation."""
+    post_constitution_pool = apply_buy(
+        sell_pool, qty=constitution_qty, price=constitution_price, fee_amount=constitution_fee_amount,
+        fee_asset=constitution_fee_asset, quote_asset=quote_asset,
+    )
+    constitution_cost_usd = constitution_qty * constitution_price + (constitution_fee_amount if constitution_fee_asset == quote_asset else 0.0)
+
+    arbitrage = evaluate_arbitrage_true_economics(
+        sell_pool=post_constitution_pool, sell_qty=arb_sell_qty, sell_price=arb_sell_price,
+        sell_fee_amount=arb_sell_fee_amount, sell_fee_asset=arb_sell_fee_asset,
+        buy_pool=buy_pool, buy_qty=arb_buy_qty, buy_price=arb_buy_price,
+        buy_fee_amount=arb_buy_fee_amount, buy_fee_asset=arb_buy_fee_asset,
+        buy_side_mark_price=arb_buy_side_mark_price, required_safety_margin_usd=0.0,
+        rebalance_impact_usd=rebalance_impact_usd, quote_asset=quote_asset,
+    )
+
+    residual_pool = arbitrage.new_sell_pool if arbitrage.new_sell_pool is not None else post_constitution_pool
+    residual_qty = residual_pool.qty if arbitrage.new_sell_pool is not None else max(0.0, post_constitution_pool.qty - arb_sell_qty)
+    residual_value_usd = None
+    if residual_mark_price is not None and residual_qty > 0:
+        residual_value_usd = residual_qty * residual_mark_price - residual_qty * (residual_pool.avg_cost_per_unit or residual_mark_price)
+    elif residual_mark_price is not None:
+        residual_value_usd = 0.0
+
+    total = arbitrage.expected_true_wealth_delta_usd
+    if total is not None and residual_value_usd is not None:
+        total = total + residual_value_usd
+
+    if arbitrage.expected_true_wealth_delta_usd is None:
+        would_proceed = False
+        reason = "arbitrage sell_result unavailable even after simulated constitution -- should not happen (constitution always adds qty first)"
+    elif total is not None and total > required_safety_margin_usd:
+        would_proceed = True
+        reason = "constitution+arbitrage joint true-economic result > required_safety_margin_usd"
+    else:
+        would_proceed = False
+        reason = f"joint_true_economic_result_usd={total:.6f} <= required_safety_margin_usd={required_safety_margin_usd:.6f}"
+
+    return JointConstitutionArbitrageQuote(
+        constitution_cost_usd=constitution_cost_usd, post_constitution_pool=post_constitution_pool, arbitrage=arbitrage,
+        residual_qty=residual_qty, residual_value_usd=residual_value_usd, total_true_economic_result_usd=total,
+        would_proceed=would_proceed, reason=reason,
+    )
+
+
+@dataclass(slots=True, frozen=True)
 class InventoryConstitutionQuote:
     cost_usd: float
     mark_to_market_value_usd: float
