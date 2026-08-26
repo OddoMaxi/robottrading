@@ -2175,6 +2175,104 @@ def _render_v5_shadow_three_exchange() -> None:
         )
 
 
+def _render_v5_autonomous_live() -> None:
+    """V5 AUTONOMOUS TRUE-ECONOMIC LIVE ENGINE (user directive,
+    2026-08-26, "MISSION -- START V5 AUTONOMOUS TRUE-ECONOMIC LIVE
+    ENGINE"). Read-only, same pattern as every other V5 section --
+    displays what the persistent, systemd-managed engine
+    (robotcripto-live-v5-autonomous.service, the one process in this
+    whole project that places real orders indefinitely across all three
+    exchanges) reports about itself, never controls it. CAPITAL_CHANGE_
+    SINCE_START is the headline number the user actually asked to see
+    here -- computed from real wallets via compute_liquidation_net_worth,
+    never the old V4 ledger."""
+    st.markdown('<div class="simple-card-label" style="margin-top:22px;">V5 AUTONOMOUS LIVE ENGINE (REAL MONEY)</div>', unsafe_allow_html=True)
+    status = data.get_v5_autonomous_status_cached()
+    if not status.available:
+        st.caption("Le moteur autonome V5 n'a pas encore publié de statut (pas encore démarré, ou vient de démarrer).")
+        return
+    raw = status.raw
+    if status.stale:
+        st.warning("Statut du moteur autonome obsolète (le service ne semble plus tourner -- vérifier systemctl status robotcripto-live-v5-autonomous).")
+
+    robot_status = raw.get("ROBOT_STATUS", "—")
+    status_icon = {"RUNNING": "🟢", "STOPPED": "🔴"}.get(robot_status, "—")
+    incident = raw.get("INCIDENT")
+    st.caption(f"ROBOT_STATUS = {status_icon} {robot_status}" + (f"  ·  UPTIME = {raw.get('UPTIME_HOURS'):.2f}h" if raw.get("UPTIME_HOURS") is not None else ""))
+
+    capital_change = raw.get("CAPITAL_CHANGE_SINCE_START_USDT")
+    capital_change_pct = raw.get("CAPITAL_CHANGE_SINCE_START_PCT")
+    if capital_change is not None:
+        color = "normal" if capital_change >= 0 else "inverse"
+        st.metric("CAPITAL CHANGE SINCE START", f"{capital_change:+.4f} USDT", delta=f"{capital_change_pct:+.3f}%" if capital_change_pct is not None else None)
+    else:
+        st.metric("CAPITAL CHANGE SINCE START", "—")
+
+    cols = st.columns(4)
+    cols[0].metric("START NET WORTH", f"{raw.get('START_REAL_NET_WORTH'):.4f} $" if raw.get("START_REAL_NET_WORTH") is not None else "—")
+    cols[1].metric("CURRENT NET WORTH", f"{raw.get('CURRENT_REAL_NET_WORTH'):.4f} $" if raw.get("CURRENT_REAL_NET_WORTH") is not None else "—")
+    cols[2].metric("REAL WEALTH PNL", f"{raw.get('REAL_WEALTH_PNL'):+.4f} $" if raw.get("REAL_WEALTH_PNL") is not None else "—")
+    recon_error = raw.get("RECONCILIATION_ERROR")
+    within_tol = raw.get("RECONCILIATION_WITHIN_TOLERANCE")
+    cols[3].metric("RECONCILED", "✅ YES" if within_tol else ("⛔ NO" if within_tol is False else "—"),
+                   delta=f"error {recon_error:+.6f}" if recon_error is not None else None)
+
+    nw_by_exchange = raw.get("NET_WORTH_BY_EXCHANGE") or {}
+    if nw_by_exchange:
+        cols_ex = st.columns(3)
+        for i, ex in enumerate(("binance", "bybit", "okx")):
+            cols_ex[i].metric(f"{ex.upper()} NET WORTH", f"{nw_by_exchange[ex]:.4f} $" if ex in nw_by_exchange else "—")
+
+    cols2 = st.columns(4)
+    cols2[0].metric("REAL TRADES", raw.get("REAL_TRADES", "—"))
+    cols2[1].metric("WIN RATE %", f"{raw.get('WIN_RATE_PCT'):.1f}%" if raw.get("WIN_RATE_PCT") is not None else "—")
+    cols2[2].metric("TRADES / HOUR", f"{raw.get('TRADES_PER_HOUR'):.3f}" if raw.get("TRADES_PER_HOUR") is not None else "—")
+    cols2[3].metric("PNL / HOUR", f"{raw.get('PNL_PER_HOUR'):+.4f} $" if raw.get("PNL_PER_HOUR") is not None else "—")
+
+    cols3 = st.columns(4)
+    cols3[0].metric("TOTAL REAL FEES", f"{raw.get('TOTAL_REAL_FEES_USD', 0.0):.4f} $")
+    cols3[1].metric("REBALANCES", raw.get("TOTAL_REBALANCES", "—"))
+    cols3[2].metric("REBALANCING COST", f"{raw.get('REBALANCING_COST_USD', 0.0):.4f} $")
+    cols3[3].metric("OKX CYCLES", raw.get("OKX_CYCLES_COMPLETED", "—"))
+
+    cols4 = st.columns(4)
+    cols4[0].metric("OPPORTUNITIES SCANNED", raw.get("OPPORTUNITIES_SCANNED", "—"))
+    cols4[1].metric("TRUE-POSITIVE OPPORTUNITIES", raw.get("TRUE_POSITIVE_OPPORTUNITIES", "—"))
+    cols4[2].metric("OLD-FORMULA FALSE POSITIVES", raw.get("OLD_FORMULA_FALSE_POSITIVES", "—"))
+    cols4[3].metric("SELF-HEALING EVENTS", raw.get("RECOVERED_INCIDENTS", "—"))
+
+    rejected = raw.get("REJECTED_OPPORTUNITIES_BY_REASON") or {}
+    if rejected:
+        st.caption("REJETS PAR RAISON: " + " · ".join(f"{k}={v}" for k, v in rejected.items()))
+
+    active = raw.get("ACTIVE_ARBITRAGE") or raw.get("ACTIVE_INVENTORY")
+    if active:
+        st.info(f"EN COURS: {active}")
+
+    paused_symbols = raw.get("SYMBOLS_TEMPORARILY_PAUSED") or []
+    exchange_status = raw.get("EXCHANGE_STATUS") or {}
+    paused_exchanges = [ex for ex, s in exchange_status.items() if s != "OK"]
+    if paused_symbols or paused_exchanges:
+        st.warning(f"CIRCUIT BREAKERS ACTIFS -- symboles: {paused_symbols or 'aucun'} · exchanges: {paused_exchanges or 'aucun'}")
+
+    last_recovery = raw.get("LAST_AUTO_RECOVERY")
+    if last_recovery:
+        st.caption(f"Dernière auto-récupération: {last_recovery}")
+
+    if robot_status == "STOPPED" and incident:
+        st.error(f"SAFE STOP: {incident.get('type', '—')} — {incident.get('detail', '')}")
+
+    with st.expander("Derniers trades / activité"):
+        last_trades = raw.get("LAST_10_REAL_TRADES") or []
+        if last_trades:
+            st.dataframe(last_trades, use_container_width=True)
+        else:
+            st.caption("Aucun trade réel exécuté pour l'instant sur ce moteur.")
+        feed = raw.get("ACTIVITY_FEED") or []
+        for line in feed[-15:]:
+            st.text(line)
+
+
 def _render_v5_true_economic_live() -> None:
     """V5 TRUE ECONOMIC LIVE (user directive, 2026-08-25, "AUTORISATION --
     V5 TRUE ECONOMIC MICRO-LIVE -- 20 MINUTES"). Read-only, matching every
@@ -2357,6 +2455,7 @@ def render_live_trading_page() -> None:
     _render_live_funnel(summary)
     _render_live_session_performance(summary, raw)
     _render_live_activity_feed(summary)
+    _render_v5_autonomous_live()
     _render_v5_true_economic_live()
     _render_v5_shadow_three_exchange()
     _render_v5_continuous_okx_validation()
