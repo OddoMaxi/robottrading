@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import aiohttp
 
 from app.config.settings import get_settings
-from app.execution.okx_account_client import okx_timestamp, sign_request, to_okx_symbol
+from app.execution.okx_account_client import new_okx_http_session, okx_timestamp, sign_request, to_okx_symbol
 
 MAINNET_BASE_URL = "https://www.okx.com"
 REQUEST_TIMEOUT_SECONDS = 10.0
@@ -139,7 +139,7 @@ class OkxLiveTradeClient:
         body = json.dumps(body_dict, separators=(",", ":"))
         request_path = "/api/v5/trade/order"
         headers = self._signed_headers("POST", request_path, body)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.post(
                 f"{self._base_url}{request_path}", headers=headers, data=body,
                 timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
@@ -157,7 +157,7 @@ class OkxLiveTradeClient:
         query = f"instId={inst_id}&" + (f"ordId={order_id}" if order_id else f"clOrdId={client_order_id}")
         request_path = f"/api/v5/trade/order?{query}"
         headers = self._signed_headers("GET", request_path)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
@@ -175,7 +175,7 @@ class OkxLiveTradeClient:
         query = f"instId={inst_id}&ordId={order_id}"
         request_path = f"/api/v5/trade/fills?{query}"
         headers = self._signed_headers("GET", request_path)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
@@ -193,7 +193,7 @@ class OkxLiveTradeClient:
         query = "instType=SPOT" + (f"&instId={to_okx_symbol(symbol)}" if symbol else "")
         request_path = f"/api/v5/trade/orders-pending?{query}"
         headers = self._signed_headers("GET", request_path)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:

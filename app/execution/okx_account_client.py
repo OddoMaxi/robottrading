@@ -22,6 +22,7 @@ includes the query string for GET, and body is the empty string for GET
 import base64
 import hashlib
 import hmac
+import socket
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -42,6 +43,25 @@ class OkxCredentialsMissing(Exception):
 
 def to_okx_symbol(symbol: str) -> str:
     return symbol.replace("/", "-")
+
+
+def new_okx_http_session() -> aiohttp.ClientSession:
+    """OKX API keys are commonly IP-whitelisted — confirmed for real on
+    this project's own key (account/config's own `ip` field lists one
+    exact IPv4 and one exact IPv6 address). A host with IPv6
+    privacy-extension addresses enabled can have an outbound request
+    leave from an IPv6 address that is NOT that exact whitelisted one,
+    producing a clean, correctly-signed request that OKX still rejects
+    with 401 — first hit for real 2026-08-26 on a genuine order-
+    placement call, while every read call on the identical signing code
+    succeeded (those calls happened to go out IPv4, or matched the
+    whitelisted IPv6, by chance). Every OKX HTTP client in this codebase
+    should build its aiohttp session through this helper instead of a
+    bare `aiohttp.ClientSession()`, pinning the connection to IPv4 (the
+    address actually on file) and removing this whole failure class
+    rather than hoping the OS keeps picking the right interface."""
+    connector = aiohttp.TCPConnector(family=socket.AF_INET)
+    return aiohttp.ClientSession(connector=connector)
 
 
 def okx_timestamp() -> str:
@@ -137,7 +157,7 @@ class OkxAccountClient(ExchangeClient):
         related endpoint is ever called by this class."""
         request_path = "/api/v5/account/balance"
         headers = self._signed_headers("GET", request_path)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
@@ -152,7 +172,7 @@ class OkxAccountClient(ExchangeClient):
         query = f"instType=SPOT&instId={inst_id}"
         request_path = f"/api/v5/account/trade-fee?{query}"
         headers = self._signed_headers("GET", request_path)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
@@ -166,7 +186,7 @@ class OkxAccountClient(ExchangeClient):
         alone is enough for anything wiring OKX into the same shape as
         BinanceAccountClient/BybitClient."""
         inst_id = to_okx_symbol(symbol)
-        async with aiohttp.ClientSession() as session:
+        async with new_okx_http_session() as session:
             async with session.get(
                 f"{self._base_url}/api/v5/market/ticker", params={"instId": inst_id},
                 timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
