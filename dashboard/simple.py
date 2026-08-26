@@ -1911,7 +1911,8 @@ def _render_live_trades(summary) -> None:
     if not summary.last_trades:
         st.caption("Aucun trade réel enregistré pour l'instant.")
         return
-    with st.expander(f"Derniers trades réels ({len(summary.last_trades)})", expanded=True):
+    st.markdown(f"**Derniers trades réels ({len(summary.last_trades)})**")
+    with st.container():
         for t in summary.last_trades:
             pnl_color = "good" if (t.actual_net_usd or 0) >= 0 else "bad"
             st.markdown(
@@ -1964,7 +1965,8 @@ def _render_live_inventory(summary) -> None:
     if not summary.positions:
         st.caption("Aucune position d'inventaire réelle actuellement (tous les soldes non-USDT sont à zéro).")
         return
-    with st.expander(f"Positions d'inventaire réelles ({len(summary.positions)})", expanded=True):
+    st.markdown(f"**Positions d'inventaire réelles ({len(summary.positions)})**")
+    with st.container():
         for p in sorted(summary.positions, key=lambda p: p.value_usdt or 0, reverse=True):
             css_class, badge_label = INVENTORY_STATUS_BADGES.get(p.status, ("warn", p.status))
             unrealized_str = _money4_signed(p.unrealized_pnl_usd) if p.unrealized_pnl_usd is not None else "—"
@@ -2058,7 +2060,8 @@ def _render_live_funnel(summary) -> None:
         ]
     )
     if summary.missed_causes:
-        with st.expander(f"Missed opportunities — causes ({len(summary.missed_causes)})"):
+        st.markdown(f"**Missed opportunities — causes ({len(summary.missed_causes)})**")
+        with st.container():
             for c in summary.missed_causes:
                 st.markdown(f'<div class="simple-perf-row"><span class="k">{c.cause}</span><span class="v">{c.count}×</span></div>', unsafe_allow_html=True)
     st.caption(
