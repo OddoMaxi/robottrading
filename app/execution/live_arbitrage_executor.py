@@ -359,6 +359,16 @@ class LiveArbitrageExecutor:
             return snapshot.balance_of(base_asset) if snapshot is not None else 0.0
         raise ValueError(f"unknown exchange {exchange!r}")
 
+    def _to_okx_client_order_id(self, client_order_id: str) -> str:
+        """OKX's clOrdId is alphanumeric-only (see okx_live_trade_client.
+        _new_client_order_id), but the shared buy-{hex}/sell-{hex} id
+        used to correlate all three exchanges contains a hyphen -- OKX
+        silently rejected the order AND the subsequent status poll on
+        it (2026-08-26 incident, "Parameter clOrdId error"). Stripping
+        the hyphen here keeps placement and status-lookup using the
+        identical value."""
+        return client_order_id.replace("-", "")
+
     async def _place_market_buy(self, exchange: str, symbol: str, qty: float, client_order_id: str) -> None:
         """Item 1 fix (2026-08-24, post-incident): the arbitrage buy leg
         is QUANTITY-capped, never notional-capped — common_qty exists
@@ -377,7 +387,7 @@ class LiveArbitrageExecutor:
         elif exchange == "bybit":
             await self._bybit_trade.place_market_order(symbol, "Buy", qty=qty, order_link_id=client_order_id, market_unit="baseCoin")
         elif exchange == "okx":
-            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "buy", qty, client_order_id=client_order_id)
+            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "buy", qty, client_order_id=self._to_okx_client_order_id(client_order_id))
         else:
             raise ValueError(f"unknown exchange {exchange!r}")
 
@@ -387,7 +397,7 @@ class LiveArbitrageExecutor:
         elif exchange == "bybit":
             await self._bybit_trade.place_market_order(symbol, "Sell", qty=qty, order_link_id=client_order_id)
         elif exchange == "okx":
-            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "sell", qty, client_order_id=client_order_id)
+            await self._okx_trade.place_market_order(_bare_symbol_to_okx(symbol), "sell", qty, client_order_id=self._to_okx_client_order_id(client_order_id))
         else:
             raise ValueError(f"unknown exchange {exchange!r}")
 
@@ -447,7 +457,7 @@ class LiveArbitrageExecutor:
                 raw_status=status.order_status,
             )
         elif exchange == "okx":
-            status = await self._okx_trade.get_order_status(_bare_symbol_to_okx(symbol), client_order_id=client_order_id)
+            status = await self._okx_trade.get_order_status(_bare_symbol_to_okx(symbol), client_order_id=self._to_okx_client_order_id(client_order_id))
             if status is None:
                 return None
             gross_qty = status.filled_qty

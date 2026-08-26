@@ -800,6 +800,25 @@ async def test_okx_as_buy_exchange_both_legs_filled(monkeypatch):
     assert guard.in_flight_count == 0
 
 
+async def test_okx_client_order_id_never_contains_a_hyphen(monkeypatch):
+    """The 2026-08-26 real-money incident this test guards against: the
+    shared buy-{hex}/sell-{hex} client_order_id format (built for
+    Bybit's orderLinkId length limit) contains a hyphen, which OKX's
+    clOrdId rejects outright -- both the order placement AND the
+    subsequent status poll on it failed with "Parameter clOrdId
+    error"."""
+    guard = _armed_guard()
+    monkeypatch.setattr(executor_module, "live_guard", guard)
+    okx_trade = FakeOkxTrade()
+    executor = _executor_okx(okx_trade=okx_trade)
+    result = await executor.execute_one_arbitrage(SYMBOL, "okx", "bybit", 10.0)
+    assert result.outcome == ArbitrageOutcome.BOTH_FILLED
+    assert len(okx_trade.submitted_orders) == 1
+    sent_client_order_id = okx_trade.submitted_orders[0][3]
+    assert "-" not in sent_client_order_id
+    assert sent_client_order_id.isalnum()
+
+
 async def test_okx_fee_in_base_asset_resolved_correctly(monkeypatch):
     """OKX charging the fee in LUNC (the base asset) must reduce
     net_base_qty, never be silently treated as a $0 USDT cost -- exactly
