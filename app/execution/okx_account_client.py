@@ -22,6 +22,7 @@ includes the query string for GET, and body is the empty string for GET
 import base64
 import hashlib
 import hmac
+import json
 import socket
 import time
 from dataclasses import dataclass
@@ -46,22 +47,41 @@ def to_okx_symbol(symbol: str) -> str:
 
 
 def new_okx_http_session() -> aiohttp.ClientSession:
-    """OKX API keys are commonly IP-whitelisted — confirmed for real on
-    this project's own key (account/config's own `ip` field lists one
-    exact IPv4 and one exact IPv6 address). A host with IPv6
-    privacy-extension addresses enabled can have an outbound request
-    leave from an IPv6 address that is NOT that exact whitelisted one,
-    producing a clean, correctly-signed request that OKX still rejects
-    with 401 — first hit for real 2026-08-26 on a genuine order-
-    placement call, while every read call on the identical signing code
-    succeeded (those calls happened to go out IPv4, or matched the
-    whitelisted IPv6, by chance). Every OKX HTTP client in this codebase
-    should build its aiohttp session through this helper instead of a
-    bare `aiohttp.ClientSession()`, pinning the connection to IPv4 (the
-    address actually on file) and removing this whole failure class
-    rather than hoping the OS keeps picking the right interface."""
+    """Pins every OKX aiohttp session to IPv4, matching the exact IPv4
+    address on file for this account's IP whitelist (account/config's
+    own `ip` field). Originally added 2026-08-26 on the theory that an
+    IPv6-address mismatch explained a real order-placement 401 -- kept
+    as a real, still-worthwhile defensive measure, but DISCLOSED AS
+    DISPROVEN as the actual root cause: the identical 401 recurred on a
+    second real attempt with this fix already in place, ruling out IP
+    whitelist mismatch as the (sole) explanation. See
+    OkxOrderSubmissionError / read_okx_response for the actual next
+    diagnostic step -- capturing OKX's own detailed error body, which
+    the original incident's generic "401 Unauthorized" (aiohttp's own
+    message, not OKX's) never captured."""
     connector = aiohttp.TCPConnector(family=socket.AF_INET)
     return aiohttp.ClientSession(connector=connector)
+
+
+class OkxApiError(Exception):
+    """Raised with OKX's own detailed error body (code + msg), never
+    just the bare HTTP status -- a generic "401 Unauthorized" from
+    aiohttp's own raise_for_status() carries none of OKX's own
+    diagnostic detail (e.g. a specific numbered error code explaining
+    WHY: bad signature, IP not whitelisted, permission missing, symbol
+    not tradable for this account type, etc.), which is exactly the
+    detail the 2026-08-26 order-placement 401 incident was missing."""
+
+
+async def read_okx_response(response: aiohttp.ClientResponse, *, context: str) -> dict:
+    """Reads the body BEFORE checking status (raise_for_status() would
+    discard it) and raises OkxApiError with the FULL real response text
+    on any non-2xx status, so a future incident's exception message
+    carries OKX's own explanation instead of just the HTTP status code."""
+    text = await response.text()
+    if response.status < 200 or response.status >= 300:
+        raise OkxApiError(f"{context}: HTTP {response.status} — {text}")
+    return json.loads(text) if text else {}
 
 
 def okx_timestamp() -> str:
@@ -161,8 +181,7 @@ class OkxAccountClient(ExchangeClient):
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context="get_account_snapshot")
         return _parse_account_snapshot(data)
 
     async def get_trade_fee(self, symbol: str) -> OkxTradeFee | None:
@@ -176,8 +195,7 @@ class OkxAccountClient(ExchangeClient):
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context="get_trade_fee")
         return _parse_trade_fee(data, inst_id)
 
     async def get_book_ticker(self, symbol: str) -> dict:
@@ -191,8 +209,7 @@ class OkxAccountClient(ExchangeClient):
                 f"{self._base_url}/api/v5/market/ticker", params={"instId": inst_id},
                 timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                return await response.json()
+                return await read_okx_response(response, context="get_book_ticker")
 
     async def check_connectivity(self) -> ExchangeConnectivity:
         start = time.monotonic()

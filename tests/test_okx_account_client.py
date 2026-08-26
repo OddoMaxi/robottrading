@@ -75,14 +75,19 @@ def test_signed_headers_raise_when_passphrase_missing(monkeypatch):
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict, status: int = 200) -> None:
         self._payload = payload
+        self.status = status
 
     def raise_for_status(self) -> None:
         pass
 
     async def json(self) -> dict:
         return self._payload
+
+    async def text(self) -> str:
+        import json as _json
+        return _json.dumps(self._payload)
 
     async def __aenter__(self) -> "_FakeResponse":
         return self

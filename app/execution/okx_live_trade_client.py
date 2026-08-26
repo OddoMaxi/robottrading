@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import aiohttp
 
 from app.config.settings import get_settings
-from app.execution.okx_account_client import new_okx_http_session, okx_timestamp, sign_request, to_okx_symbol
+from app.execution.okx_account_client import new_okx_http_session, okx_timestamp, read_okx_response, sign_request, to_okx_symbol
 
 MAINNET_BASE_URL = "https://www.okx.com"
 REQUEST_TIMEOUT_SECONDS = 10.0
@@ -144,8 +144,7 @@ class OkxLiveTradeClient:
                 f"{self._base_url}{request_path}", headers=headers, data=body,
                 timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context=f"place_market_order({symbol}, {side})")
         return _parse_order_ack(data)
 
     async def get_order_status(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> OkxOrderStatus | None:
@@ -161,8 +160,7 @@ class OkxLiveTradeClient:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context="get_order_status")
         entries = data.get("data", [])
         return _parse_order_status(entries[0]) if entries else None
 
@@ -179,8 +177,7 @@ class OkxLiveTradeClient:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context="get_order_fills")
         return data.get("data", [])
 
     async def get_open_orders(self, symbol: str | None = None) -> list[OkxOrderStatus]:
@@ -197,6 +194,5 @@ class OkxLiveTradeClient:
             async with session.get(
                 f"{self._base_url}{request_path}", headers=headers, timeout=aiohttp.ClientTimeout(total=self._timeout_seconds),
             ) as response:
-                response.raise_for_status()
-                data = await response.json()
+                data = await read_okx_response(response, context="get_open_orders")
         return [_parse_order_status(entry) for entry in data.get("data", [])]

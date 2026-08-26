@@ -91,14 +91,19 @@ def test_get_order_status_requires_exactly_one_identifier():
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict, status: int = 200) -> None:
         self._payload = payload
+        self.status = status
 
     def raise_for_status(self) -> None:
         pass
 
     async def json(self) -> dict:
         return self._payload
+
+    async def text(self) -> str:
+        import json as _json
+        return _json.dumps(self._payload)
 
     async def __aenter__(self) -> "_FakeResponse":
         return self
@@ -108,20 +113,21 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, payload: dict, captured: dict) -> None:
+    def __init__(self, payload: dict, captured: dict, status: int = 200) -> None:
         self._payload = payload
         self._captured = captured
+        self._status = status
 
     def get(self, url: str, headers=None, timeout=None):
         self._captured["url"] = url
         self._captured["headers"] = headers
-        return _FakeResponse(self._payload)
+        return _FakeResponse(self._payload, status=self._status)
 
     def post(self, url: str, headers=None, data=None, timeout=None):
         self._captured["url"] = url
         self._captured["headers"] = headers
         self._captured["body"] = json.loads(data)
-        return _FakeResponse(self._payload)
+        return _FakeResponse(self._payload, status=self._status)
 
     async def __aenter__(self) -> "_FakeSession":
         return self
@@ -152,6 +158,24 @@ async def test_place_market_order_sends_base_ccy_sizing_and_cash_mode(monkeypatc
     assert captured["body"]["tgtCcy"] == "base_ccy"
     assert captured["body"]["sz"] == "2130.9"
     assert captured["body"]["clOrdId"] == "okxabc123"
+
+
+async def test_place_market_order_401_raises_with_full_okx_error_body(monkeypatch):
+    """The 2026-08-26 real-money incident this test guards against: a
+    real order-placement 401 was caught only as aiohttp's own generic
+    "401 Unauthorized" (raise_for_status()'s message), with none of
+    OKX's own detailed error body (code/msg) ever captured -- making the
+    actual cause impossible to diagnose after the fact. Any future
+    non-2xx response must surface OKX's real body in the exception."""
+    from app.execution.okx_account_client import OkxApiError
+
+    captured: dict = {}
+    monkeypatch.setattr("app.execution.okx_live_trade_client.get_settings", _fake_settings)
+    client = OkxLiveTradeClient()
+    error_payload = {"code": "50113", "msg": "Invalid sign", "data": []}
+    with patch("app.execution.okx_live_trade_client.aiohttp.ClientSession", return_value=_FakeSession(error_payload, captured, status=401)):
+        with pytest.raises(OkxApiError, match="50113"):
+            await client.place_market_order("RVN/USDT", "buy", 100.0)
 
 
 async def test_get_order_status_by_order_id(monkeypatch):
